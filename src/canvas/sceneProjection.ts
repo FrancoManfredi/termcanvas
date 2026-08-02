@@ -1,6 +1,7 @@
 import type {
   PersistedProjectData,
   PersistedStashedTerminal,
+  PersistedIssueNode,
   ProjectData,
   Viewport,
 } from "../types";
@@ -36,6 +37,7 @@ interface SceneDocumentState {
   drawings?: DrawingElement[] | null;
   browserCards?: Record<string, BrowserCardData> | null;
   stashedTerminals?: PersistedStashedTerminal[] | null;
+  issues?: PersistedIssueNode[] | null;
 }
 
 function worldAnchor(position: { x: number; y: number }): AnnotationAnchor {
@@ -266,6 +268,7 @@ export function buildSceneDocument(
     annotations:
       state.annotations ?? (state.drawings ?? []).map(drawingToAnnotation),
     stashedTerminals: state.stashedTerminals ?? undefined,
+    issues: state.issues ?? undefined,
   };
 }
 
@@ -277,6 +280,7 @@ export function sceneDocumentToLegacyState(
   drawings: DrawingElement[];
   browserCards: Record<string, BrowserCardData>;
   stashedTerminals: ReturnType<typeof restorePersistedStashedTerminal>[];
+  issues: PersistedIssueNode[];
 } {
   return {
     viewport: sceneCameraToViewport(scene.camera),
@@ -286,5 +290,6 @@ export function sceneDocumentToLegacyState(
     stashedTerminals: (scene.stashedTerminals ?? []).map(
       restorePersistedStashedTerminal,
     ),
+    issues: scene.issues ?? [],
   };
 }

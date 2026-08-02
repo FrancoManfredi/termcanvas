@@ -2261,6 +2261,397 @@ function setupIpc() {
     openPinPreviewWindow(repo, id);
   });
 
+  // ── GitHub Issues ──
+
+  ipcMain.handle(
+    "github:fetch-issues",
+    async (_event, cwd: string) => {
+      const { execFile } = await import("child_process");
+      const { promisify } = await import("util");
+      const execFileAsync = promisify(execFile);
+
+      // Ensure gh CLI inherits auth tokens from the parent process.
+      // Electron on Windows/macOS may not inherit shell env vars.
+      const execEnv = { ...process.env };
+      // gh reads GH_TOKEN or GITHUB_TOKEN; ensure both are forwarded if either is set
+      if (!execEnv.GH_TOKEN && process.env.GITHUB_TOKEN) {
+        execEnv.GH_TOKEN = process.env.GITHUB_TOKEN;
+      }
+      if (!execEnv.GITHUB_TOKEN && process.env.GH_TOKEN) {
+        execEnv.GITHUB_TOKEN = process.env.GH_TOKEN;
+      }
+      console.log("[gh-issues] GH_TOKEN set:", !!execEnv.GH_TOKEN, "GITHUB_TOKEN set:", !!execEnv.GITHUB_TOKEN);
+
+      try {
+        // Step 1: resolve owner/repo from git remote
+        let owner: string;
+        let repo: string;
+        try {
+          const { stdout: remoteUrl } = await execFileAsync(
+            "git", ["remote", "get-url", "origin"],
+            { cwd, timeout: 10_000, env: execEnv },
+          );
+          const match = remoteUrl.trim().match(
+            /github\.com[:/]([^/]+)\/([^/\s.]+?)(?:\.git)?$/i,
+          );
+          if (!match) {
+            return {
+              ok: false as const,
+              error: `Could not parse GitHub owner/repo from remote: ${remoteUrl.trim()}`,
+              code: "parse-error",
+            };
+          }
+          owner = match[1];
+          repo = match[2];
+        } catch {
+          return {
+            ok: false as const,
+            error: "No git remote 'origin' found. Add a GitHub remote first.",
+            code: "no-remote",
+          };
+        }
+
+        // Step 2: GraphQL query for ALL issue data including project fields,
+        // sub-issues, relationships, and linked PRs
+        const query = `
+          query($owner: String!, $repo: String!, $cursor: String) {
+            repository(owner: $owner, name: $repo) {
+              issues(first: 50, states: [OPEN, CLOSED], after: $cursor, orderBy: {field: CREATED_AT, direction: DESC}) {
+                nodes {
+                  number
+                  title
+                  body
+                  url
+                  state
+                  stateReason
+                  createdAt
+                  updatedAt
+                  closedAt
+                  author { login avatarUrl }
+                  labels(first: 30) { nodes { name color } }
+                  assignees(first: 10) { nodes { login name avatarUrl } }
+                  milestone { title number dueOn description }
+                  projectItems(first: 20) {
+                    nodes {
+                      project { title number url }
+                      fieldValues(first: 30) {
+                        nodes {
+                          ... on ProjectV2ItemFieldTextValue {
+                            text
+                            field { ... on ProjectV2FieldCommon { name } }
+                          }
+                          ... on ProjectV2ItemFieldNumberValue {
+                            number
+                            field { ... on ProjectV2FieldCommon { name } }
+                          }
+                          ... on ProjectV2ItemFieldDateValue {
+                            date
+                            field { ... on ProjectV2FieldCommon { name } }
+                          }
+                          ... on ProjectV2ItemFieldSingleSelectValue {
+                            name
+                            field { ... on ProjectV2FieldCommon { name } }
+                          }
+                          ... on ProjectV2ItemFieldIterationValue {
+                            title
+                            startDate
+                            duration
+                            field { ... on ProjectV2FieldCommon { name } }
+                          }
+                        }
+                      }
+                    }
+                  }
+                  subIssues(first: 20) {
+                    nodes { number title url state }
+                  }
+                  parent { number title url }
+                  blockedBy(first: 20) {
+                    nodes { number title url }
+                  }
+                  blocking(first: 20) {
+                    nodes { number title url }
+                  }
+                  comments(first: 30) {
+                    nodes {
+                      author { login avatarUrl }
+                      body
+                      createdAt
+                    }
+                  }
+                  timelineItems(first: 30, itemTypes: [CONNECTED_EVENT, DISCONNECTED_EVENT, CROSS_REFERENCED_EVENT, LABELED_EVENT, UNLABELED_EVENT, ASSIGNED_EVENT, UNASSIGNED_EVENT, CLOSED_EVENT, REOPENED_EVENT, MILESTONED_EVENT, RENAMED_TITLE_EVENT]) {
+                    nodes {
+                      ... on LabeledEvent {
+                        createdAt
+                        actor { login }
+                        label { name color }
+                      }
+                      ... on UnlabeledEvent {
+                        createdAt
+                        actor { login }
+                        label { name color }
+                      }
+                      ... on AssignedEvent {
+                        createdAt
+                        actor { login }
+                      }
+                      ... on UnassignedEvent {
+                        createdAt
+                        actor { login }
+                      }
+                      ... on ClosedEvent {
+                        createdAt
+                        actor { login }
+                      }
+                      ... on ReopenedEvent {
+                        createdAt
+                        actor { login }
+                      }
+                      ... on MilestonedEvent {
+                        createdAt
+                        actor { login }
+                        milestoneTitle
+                      }
+                      ... on RenamedTitleEvent {
+                        createdAt
+                        actor { login }
+                        currentTitle
+                        previousTitle
+                      }
+                      ... on ConnectedEvent {
+                        createdAt
+                        actor { login }
+                        subject { ... on Issue { number title url } }
+                        isCrossRepository
+                      }
+                      ... on DisconnectedEvent {
+                        createdAt
+                        actor { login }
+                        subject { ... on Issue { number title url } }
+                      }
+                      ... on CrossReferencedEvent {
+                        createdAt
+                        actor { login }
+                        source {
+                          ... on PullRequest { number title url state }
+                          ... on Issue { number title url state }
+                        }
+                      }
+                    }
+                  }
+                }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+          }`;
+
+        const { stdout } = await execFileAsync(
+          "gh", [
+            "api", "graphql",
+            "--paginate",
+            "-F", `owner=${owner}`,
+            "-F", `repo=${repo}`,
+            "-f", `query=${query}`,
+          ],
+          { cwd, timeout: 60_000, maxBuffer: 50 * 1024 * 1024, env: execEnv },
+        );
+
+        // gh api graphql --paginate returns concatenated JSON; parse each page
+        const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
+        const allIssues: Array<Record<string, unknown>> = [];
+        let graphqlErrors: Array<{ message: string }> = [];
+
+        for (const line of lines) {
+          try {
+            const page = JSON.parse(line);
+            // Check for GraphQL-level errors even on HTTP 200
+            if (Array.isArray(page.errors)) {
+              graphqlErrors.push(...page.errors);
+              for (const e of page.errors) {
+                console.error("[gh-issues] GraphQL error:", JSON.stringify(e));
+              }
+            }
+            const issues = page?.data?.repository?.issues?.nodes;
+            if (Array.isArray(issues)) {
+              for (const issue of issues) {
+                allIssues.push(issue);
+              }
+            }
+          } catch {
+            // skip unparseable lines
+          }
+        }
+
+        if (graphqlErrors.length > 0) {
+          console.error("[gh-issues] GraphQL errors in response:", JSON.stringify(graphqlErrors));
+        }
+        if (graphqlErrors.length > 0 || allIssues.length > 0) {
+          return { ok: true as const, issues: allIssues };
+        }
+
+        // No issues and no GraphQL errors — assume the repo exists but has no open issues
+        return { ok: true as const, issues: [] };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        const code =
+          err instanceof Error && "code" in err
+            ? (err as NodeJS.ErrnoException).code ?? "unknown"
+            : "unknown";
+
+        // Extract stderr from the promisified execFile error
+        const stderrOutput =
+          err instanceof Error && "stderr" in err
+            ? String((err as NodeJS.ErrnoException & { stderr?: unknown }).stderr ?? "")
+            : "";
+        const stdoutOutput =
+          err instanceof Error && "stdout" in err
+            ? String((err as NodeJS.ErrnoException & { stdout?: unknown }).stdout ?? "")
+            : "";
+
+        console.error("[gh-issues] RAW ERROR:", {
+          code,
+          message,
+          stderr: stderrOutput.slice(0, 500),
+          stdout: stdoutOutput.slice(0, 500),
+        });
+
+        if (code === "ENOENT") {
+          return {
+            ok: false as const,
+            error: "GitHub CLI (gh) is not installed. Install from https://cli.github.com",
+            code: "not-installed",
+          };
+        }
+
+        // Include raw stderr in error so user can diagnose
+        const combined = `${message}\n${stderrOutput}`;
+
+        if (
+          combined.includes("not logged") ||
+          combined.includes("401") ||
+          combined.includes("Bad credentials") ||
+          combined.includes("unauthorized") ||
+          combined.includes("Resource protected") ||
+          combined.includes("HTTP 403") ||
+          combined.includes("Must have push") ||
+          combined.includes("Personal access token") ||
+          combined.includes("OAuth") ||
+          combined.includes("requires authentication") ||
+          combined.includes("resolve repository") ||
+          combined.includes("Could not resolve to a Repository")
+        ) {
+          return {
+            ok: false as const,
+            error: `GitHub authentication failed.\n\nRaw gh output:\n${stderrOutput.slice(0, 400)}\n\nMake sure your GH_TOKEN has repo scope and SSO is enabled for the target org.`,
+            code: "not-authenticated",
+          };
+        }
+
+        if (
+          combined.includes("ENOTFOUND") ||
+          combined.includes("ECONNREFUSED") ||
+          combined.includes("network") ||
+          combined.includes("timeout") ||
+          combined.includes("Could not resolve")
+        ) {
+          return {
+            ok: false as const,
+            error: "Network error fetching issues",
+            code: "network",
+          };
+        }
+
+        return { ok: false as const, error: message, code: "unknown" };
+      }
+    },
+  );
+
+  ipcMain.handle("github:open-url", async (_event, url: string) => {
+    if (isSafeExternalUrl(url)) {
+      await shell.openExternal(url);
+    }
+  });
+
+  // ── GitHub Issue Mutations ──
+
+  ipcMain.handle("github:list-labels", async (_event, cwd: string) => {
+    const { execFile } = await import("child_process");
+    const { promisify } = await import("util");
+    const execFileAsync = promisify(execFile);
+    try {
+      const { stdout } = await execFileAsync("gh", ["label", "list", "--json", "name,color,description"], { cwd, timeout: 15_000, env: { ...process.env } });
+      const labels = JSON.parse(stdout);
+      return { ok: true as const, labels: labels as Array<{ name: string; color: string; description: string }> };
+    } catch (err) {
+      return { ok: false as const, error: String(err) };
+    }
+  });
+
+  ipcMain.handle("github:list-milestones", async (_event, cwd: string) => {
+    const { execFile } = await import("child_process");
+    const { promisify } = await import("util");
+    const execFileAsync = promisify(execFile);
+    try {
+      const { stdout } = await execFileAsync("gh", ["api", "/repos/{owner}/{repo}/milestones", "--jq", ".[] | {number, title, due_on}"], { cwd, timeout: 15_000, env: { ...process.env } });
+      const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
+      const milestones = lines.map((l) => JSON.parse(l));
+      return { ok: true as const, milestones: milestones as Array<{ number: number; title: string; due_on: string | null }> };
+    } catch (err) {
+      return { ok: false as const, error: String(err) };
+    }
+  });
+
+  ipcMain.handle("github:mutate-issue", async (_event, cwd: string, number: number, action: string, params: Record<string, unknown>) => {
+    const { execFile } = await import("child_process");
+    const { promisify } = await import("util");
+    const execFileAsync = promisify(execFile);
+    try {
+      const args: string[] = ["issue", "edit", String(number)];
+
+      if (action === "add-labels" && Array.isArray(params.labels)) {
+        for (const l of params.labels as string[]) args.push("--add-label", l);
+      }
+      if (action === "remove-label" && typeof params.label === "string") {
+        args.push("--remove-label", params.label);
+      }
+      if (action === "add-assignees" && Array.isArray(params.assignees)) {
+        for (const a of params.assignees as string[]) args.push("--add-assignee", a);
+      }
+      if (action === "remove-assignee" && typeof params.assignee === "string") {
+        args.push("--remove-assignee", params.assignee);
+      }
+      if (action === "set-milestone" && typeof params.milestone === "string") {
+        args.push("--milestone", params.milestone);
+      }
+      if (action === "clear-milestone") {
+        args.push("--milestone", "");
+      }
+      if (action === "close") {
+        args.splice(1, 0, "close"); // gh issue close {n}
+      }
+      if (action === "reopen") {
+        args.splice(1, 0, "reopen");
+      }
+
+      await execFileAsync("gh", args, { cwd, timeout: 15_000, env: { ...process.env } });
+      return { ok: true as const };
+    } catch (err) {
+      return { ok: false as const, error: String(err) };
+    }
+  });
+
+  ipcMain.handle("github:add-comment", async (_event, cwd: string, number: number, body: string) => {
+    const { execFile } = await import("child_process");
+    const { promisify } = await import("util");
+    const execFileAsync = promisify(execFile);
+    try {
+      await execFileAsync("gh", ["issue", "comment", String(number), "--body", body], { cwd, timeout: 15_000, env: { ...process.env } });
+      return { ok: true as const };
+    } catch (err) {
+      return { ok: false as const, error: String(err) };
+    }
+  });
+
   ipcMain.handle(
     "pin:save-attachment",
     (

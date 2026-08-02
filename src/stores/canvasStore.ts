@@ -15,7 +15,7 @@ export type FocusLevel = "terminal" | "starred" | "worktree";
  * driven by `fileEditorPath` below.
  */
 export type RightPanelTab = "files" | "diff" | "git" | "memory";
-export type LeftPanelTab = "sessions" | "history";
+export type LeftPanelTab = "sessions" | "history" | "issues";
 export interface CanvasViewportAdapter {
   setViewport: (viewport: Viewport, options?: { duration?: number }) => void;
   getViewport: () => Viewport;

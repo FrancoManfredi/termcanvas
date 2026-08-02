@@ -8,6 +8,7 @@ import type {
   TerminalStatus,
   TerminalType,
 } from "./types";
+import type { PersistedIssueNode } from "./stores/issueStore";
 import type { SceneDocument } from "./types/scene";
 import type { WorkspaceCanvas, WorkspaceDocument } from "./types/workspace";
 import { DEFAULT_CANVAS_NAME } from "./types/workspace";
@@ -611,6 +612,12 @@ function coerceSceneDocument(value: unknown): SceneDocument | null {
 
   const stashedTerminals = normalizeStashedTerminals(record.stashedTerminals);
 
+  // Preserve issues through load — they are saved by captureLiveCanvasScene
+  // but were dropped by coerceSceneDocument before this fix.
+  const issues = Array.isArray(record.issues)
+    ? (record.issues as PersistedIssueNode[])
+    : [];
+
   return {
     version: 2,
     camera: normalizeSceneCamera(record.camera),
@@ -621,6 +628,7 @@ function coerceSceneDocument(value: unknown): SceneDocument | null {
         : {},
     annotations,
     ...(stashedTerminals.length > 0 ? { stashedTerminals } : {}),
+    ...(issues.length > 0 ? { issues } : {}),
   };
 }
 

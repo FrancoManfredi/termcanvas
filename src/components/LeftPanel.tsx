@@ -1,6 +1,7 @@
 import { useCallback, useState, useRef, useMemo, useEffect } from "react";
 import { useCanvasStore, COLLAPSED_TAB_WIDTH } from "../stores/canvasStore";
 import { useProjectStore } from "../stores/projectStore";
+import { useIssueStore } from "../stores/issueStore";
 import { useTerminalRuntimeStore } from "../terminal/terminalRuntimeStore";
 import { useSessionStore } from "../stores/sessionStore";
 import { useCompletionSeenStore } from "../stores/completionSeenStore";
@@ -66,13 +67,28 @@ function IconHistory({ size = 14 }: { size?: number }) {
   );
 }
 
+function IconIssues({ size = 14 }: { size?: number }) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 16 16"
+      fill="currentColor"
+    >
+      <path d="M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z" />
+      <path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Z" />
+    </svg>
+  );
+}
+
 const LEFT_TAB_CONFIG: {
   id: LeftPanelTab;
   icon: typeof IconSessions;
-  labelKey: "left_panel_sessions" | "left_panel_history";
+  labelKey: "left_panel_sessions" | "left_panel_history" | "left_panel_issues";
 }[] = [
   { id: "sessions", icon: IconSessions, labelKey: "left_panel_sessions" },
   { id: "history", icon: IconHistory, labelKey: "left_panel_history" },
+  { id: "issues", icon: IconIssues, labelKey: "left_panel_issues" },
 ];
 
 export function LeftPanel() {
@@ -428,6 +444,8 @@ export function LeftPanel() {
                   )}
                   <StashedSection items={stashedItems} t={t} />
                 </>
+              ) : activeTab === "issues" ? (
+                <IssuesSection />
               ) : (
                 <HistorySection
                   projectDirs={canvasProjectDirs}
@@ -454,5 +472,70 @@ export function LeftPanel() {
         )}
       </div>
     </>
+  );
+}
+
+// ── Issues Section ──
+
+function IssuesSection() {
+  const t = useT();
+  const issueVersion = useIssueStore((s) => s.issueVersion);
+  // Read issues imperatively — avoid Map reference loop in selector
+  const issues = useMemo(() => Array.from(useIssueStore.getState().issues.values()), [issueVersion]);
+
+  if (issues.length === 0) {
+    return (
+      <div className="tc-label flex-1 px-4 py-6 text-center">
+        No issues loaded. Right-click the canvas and select "Traer issues de GitHub".
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex flex-col gap-0.5 p-2">
+      <div className="tc-caption px-2 py-1 text-[var(--text-muted)]"
+        style={{ fontSize: "var(--text-xs)" }}>
+        {issues.length} issue{issues.length !== 1 ? "s" : ""}
+      </div>
+      {issues.map((issue) => {
+        const num = (issue as Record<string, unknown>).number as number ?? 0;
+        const title = (issue as Record<string, unknown>).title as string ?? `#${num}`;
+        const state = ((issue as Record<string, unknown>).state as string ?? "OPEN").toLowerCase();
+        return (
+          <div
+            key={issue.issueNumber}
+            role="button"
+            tabIndex={0}
+            className="tc-row-icon group w-full rounded-md flex items-center gap-2 text-left cursor-pointer px-2 py-1.5 bg-[var(--surface)] hover:bg-[var(--sidebar-hover)]"
+          >
+            <div
+              className="w-2 h-2 rounded-full shrink-0"
+              style={{ backgroundColor: state === "open" ? "#238636" : "#8957e5" }}
+            />
+            <div className="flex-1 min-w-0">
+              <div className="truncate" style={{ fontSize: "var(--text-sm)" }}>
+                {title}
+              </div>
+              <div className="tc-caption truncate" style={{ color: "var(--text-muted)" }}>
+                #{num} · {state}
+              </div>
+            </div>
+            <button
+              type="button"
+              className="opacity-0 group-hover:opacity-100 text-[var(--text-muted)] hover:text-red-400 p-0.5 rounded transition-colors"
+              onClick={(e) => {
+                e.stopPropagation();
+                useIssueStore.getState().removeIssue(issue.issueNumber);
+              }}
+              title="Remove issue"
+            >
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
+                <path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.749.749 0 0 1 1.275.326.749.749 0 0 1-.215.734L9.06 8l3.22 3.22a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215L8 9.06l-3.22 3.22a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z" />
+              </svg>
+            </button>
+          </div>
+        );
+      })}
+    </div>
   );
 }

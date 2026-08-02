@@ -1031,6 +1031,29 @@ export interface TermCanvasAPI {
     encrypt: (plaintext: string) => Promise<string>;
     decrypt: (base64: string) => Promise<string>;
   };
+  github: {
+    fetchIssues: (cwd: string) => Promise<
+      | { ok: true; issues: Array<Record<string, unknown>> }
+      | { ok: false; error: string; code: string }
+    >;
+    openUrl: (url: string) => Promise<void>;
+    listLabels: (cwd: string) => Promise<
+      | { ok: true; labels: Array<{ name: string; color: string; description: string }> }
+      | { ok: false; error: string }
+    >;
+    listMilestones: (cwd: string) => Promise<
+      | { ok: true; milestones: Array<{ number: number; title: string; due_on: string | null }> }
+      | { ok: false; error: string }
+    >;
+    mutateIssue: (cwd: string, number: number, action: string, params: Record<string, unknown>) => Promise<
+      | { ok: true }
+      | { ok: false; error: string }
+    >;
+    addComment: (cwd: string, number: number, body: string) => Promise<
+      | { ok: true }
+      | { ok: false; error: string }
+    >;
+  };
   agent: {
     start: (
       sessionId: string,

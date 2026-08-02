@@ -1,0 +1,179 @@
+# Project Context - TermCanvas
+# Generated: 2026-07-31
+
+project:
+  name: termcanvas
+  version: 0.39.10
+  description: "An infinite canvas desktop app for visually managing terminals"
+  license: MIT
+  author: blueberrycongee
+  repository: https://github.com/blueberrycongee/termcanvas.git
+
+stack:
+  runtime: electron
+  framework: react
+  language: typescript
+  state_management: zustand
+  ui_library: radix-ui
+  css: tailwindcss
+  build_tool: vite
+  package_manager: pnpm
+  testing: tsx-test
+
+architecture:
+  pattern: hexagonal
+  state_management: zustand-stores
+  ipc: electron-preload
+  canvas: react-flow
+  terminal: xterm-webgl
+
+key_features:
+  - infinite_canvas
+  - terminal_management
+  - git_worktree_support
+  - session_management
+  - pin_detail_system
+  - agent_integration
+  - hydra_subagent_orchestration
+  - drawing_layer
+  - snapshot_history
+  - usage_analytics
+  - auto_updater
+  - i18n
+
+monorepo:
+  packages:
+    - name: termcanvas
+      description: Main application
+      path: .
+    - name: hydra
+      description: Sub-agent spawner
+      path: hydra/
+    - name: browse
+      description: Browser automation
+      path: browse/
+    - name: agent
+      description: Agent integration
+      path: agent/
+    - name: eval
+      description: Evaluation tools
+      path: eval/
+    - name: website
+      description: Documentation site
+      path: website/
+
+dependencies:
+  core:
+    - "@anthropic-ai/sdk": "^0.81.0"
+    - "@supabase/supabase-js": "^2.99.3"
+    - "@aws-sdk/client-s3": "^3.1019.0"
+    - electron-updater: "^6.8.3"
+    - zod: "^4.3.6"
+    - zustand: "^5.0.11"
+    - react: "^19.2.4"
+    - react-dom: "^19.2.4"
+    - "@xyflow/react": "^12.10.1"
+    - "@xterm/xterm": "^6.0.0"
+    - "@wterm/core": "0.3.0"
+    - "@wterm/ghostty": "0.3.0"
+    - node-pty: "^1.1.0"
+    - ws: "^8.20.0"
+    - marked: "^17.0.4"
+    - dompurify: "^3.4.1"
+    - perfect-freehand: "^1.2.3"
+    - lucide-react: "^1.11.0"
+    - radix-ui: "^1.4.3"
+    - tailwind-merge: "^3.5.0"
+    - class-variance-authority: "^0.7.1"
+    - clsx: "^2.1.1"
+    - geist: "^1.7.0"
+    - @monaco-editor/react: "^4.7.0"
+    - monaco-editor: "^0.52.2"
+
+  dev:
+    - electron: "^41.0.2"
+    - electron-builder: "^26.8.1"
+    - vite: "^7.3.1"
+    - typescript: "^5.9.3"
+    - tsx: "^4.21.0"
+    - esbuild: "^0.27.7"
+    - tailwindcss: "^4.2.1"
+    - @vitejs/plugin-react: "^4.7.0"
+    - vite-plugin-electron: "^0.29.0"
+    - vite-plugin-electron-renderer: "^0.14.6"
+    - jsdom: "^29.1.0"
+    - playwright: "^1.52.0"
+
+conventions:
+  commits: conventional
+  ai_attribution: false
+  code_style:
+    indent: 2
+    line_ending: lf
+    charset: utf-8
+    trailing_whitespace: trim
+    final_newline: insert
+
+testing:
+  runner: node-test
+  command: "pnpm test"
+  coverage: false
+  strict_tdd: false
+  test_location: tests/
+  test_pattern: "*.test.ts"
+
+quality:
+  typecheck: "pnpm typecheck"
+  build: "pnpm build"
+  linting: none
+  formatting: editorconfig
+
+persistence:
+  mode: hybrid
+  engram: true
+  openspec: true
+
+sdd:
+  artifact_store: hybrid
+  delivery_strategy: single-pr
+  review_budget: 800
+
+workspace:
+  ignore:
+    - "**/.hydra/**"
+    - "**/.worktrees/**"
+    - "**/.hydra-result-*.md"
+    - "**/.hydra-task-*.md"
+
+  watch:
+    ignored:
+      - "**/.hydra/**"
+      - "**/.worktrees/**"
+      - "**/.hydra-result-*.md"
+      - "**/.hydra-task-*.md"
+
+  optimize_deps:
+    exclude:
+      - "@wterm/core"
+      - "@wterm/dom"
+      - "@wterm/ghostty"
+      - "@wterm/react"
+
+  build:
+    out_dir: dist
+    electron_out_dir: dist-electron
+    cli_out_dir: dist-cli
+
+  resolve:
+    alias:
+      "@": "src/"
+
+  base: "./"
+
+  server:
+    watch:
+      ignored:
+        - "**/.hydra/**"
+        - "**/.worktrees/**"
+        - "**/.hydra-result-*.md"
+        - "**/.hydra-task-*.md"

@@ -1,5 +1,6 @@
 import type { Node } from "@xyflow/react";
 import type { ProjectData } from "../types";
+import type { IssueNodeData } from "../stores/issueStore";
 
 export interface TerminalNodeData {
   terminalId: string;
@@ -9,7 +10,9 @@ export interface TerminalNodeData {
   [key: string]: unknown;
 }
 
-export type CanvasFlowNode = Node<TerminalNodeData, "terminal">;
+export type CanvasFlowNode =
+  | Node<TerminalNodeData, "terminal">
+  | Node<IssueNodeData, "issue">;
 
 export function buildCanvasFlowNodes(
   projects: ProjectData[],
@@ -44,4 +47,18 @@ export function buildCanvasFlowNodes(
     }
   }
   return nodes;
+}
+
+export function buildCanvasFlowIssueNodes(
+  issues: IssueNodeData[],
+): Node<IssueNodeData, "issue">[] {
+  return issues.map((issue) => ({
+    id: `issue-${issue.issueNumber}`,
+    type: "issue" as const,
+    position: { x: issue.x, y: issue.y },
+    data: issue,
+    style: { width: 960 },
+    draggable: true,
+    selectable: true,
+  }));
 }

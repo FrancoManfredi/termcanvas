@@ -25,7 +25,12 @@ import { usePinStore } from "../stores/pinStore";
 import { useDrawingStore } from "../stores/drawingStore";
 import { useCanvasToolStore } from "../stores/canvasToolStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
+import { useTileDimensionsStore } from "../stores/tileDimensionsStore";
 import { useSidebarDragStore } from "../stores/sidebarDragStore";
+import { useNotificationStore } from "../stores/notificationStore";
+import { useIssueStore } from "../stores/issueStore";
+import type { IssueNodeData } from "../stores/issueStore";
+import { computeIssueGridPositions } from "./issueGridLayout";
 import {
   PANEL_TRANSITION_DURATION_MS,
   PANEL_TRANSITION_EASING_CSS,
@@ -50,7 +55,7 @@ import {
   updateTerminalRuntime,
 } from "../terminal/terminalRuntimeStore";
 import { fromFlowViewport, toFlowViewport } from "./viewportAdapter";
-import { buildCanvasFlowNodes } from "./nodeProjection";
+import { buildCanvasFlowNodes, buildCanvasFlowIssueNodes } from "./nodeProjection";
 import { xyflowNodeTypes, type CanvasFlowNode } from "./xyflowNodes";
 import {
   getCanvasLeftInset,
@@ -62,6 +67,7 @@ import { WorktreeLabelLayer } from "./WorktreeLabelLayer";
 import { ClusterLinkLayer } from "./ClusterLinkLayer";
 import { SpatialWaypointsLayer } from "./SpatialWaypointsLayer";
 import { ContextMenu } from "../components/ContextMenu";
+import { ConfirmDialog } from "../components/ui/ConfirmDialog";
 import { createTerminalInScene } from "../actions/terminalSceneActions";
 import type { TerminalType } from "../types";
 
@@ -303,6 +309,7 @@ function XyFlowCanvasInner() {
     (state) => state.openProjectPath !== null,
   );
   const projects = useProjectStore((state) => state.projects);
+  const issueVersion = useIssueStore((state) => state.issueVersion);
   const drawingEnabled = usePreferencesStore((state) => state.drawingEnabled);
   const petEnabled = usePreferencesStore((state) => state.petEnabled);
   const activityHeatmapEnabled = usePreferencesStore(
@@ -335,6 +342,23 @@ function XyFlowCanvasInner() {
     flowY: number;
   } | null>(null);
 
+  const [ghErrorDialog, setGhErrorDialog] = useState<{
+    title: string;
+    message: string;
+  } | null>(null);
+
+  const [isFetchingIssues, setIsFetchingIssues] = useState(false);
+
+  const [issueContextMenu, setIssueContextMenu] = useState<{
+    clientX: number;
+    clientY: number;
+    issueNumber: number;
+  } | null>(null);
+
+  const [resolveArrows, setResolveArrows] = useState<
+    Array<{ issueId: string; terminalId: string }>
+  >([]);
+
   const handlePaneContextMenu = useCallback(
     (event: React.MouseEvent | MouseEvent) => {
       event.preventDefault();
@@ -352,44 +376,180 @@ function XyFlowCanvasInner() {
     [reactFlow],
   );
 
+  const resolveContextMenuTarget = useCallback(() => {
+    const {
+      focusedProjectId,
+      focusedWorktreeId,
+      projects: currentProjects,
+    } = useProjectStore.getState();
+    let projectId = focusedProjectId;
+    let worktreeId = focusedWorktreeId;
+    if (!projectId || !worktreeId) {
+      const fallbackProject = currentProjects[0];
+      const fallbackWorktree = fallbackProject?.worktrees[0];
+      if (!fallbackProject || !fallbackWorktree) {
+        return null;
+      }
+      projectId = fallbackProject.id;
+      worktreeId = fallbackWorktree.id;
+    }
+    const project = currentProjects.find((p) => p.id === projectId);
+    const worktree = project?.worktrees.find((w) => w.id === worktreeId);
+    if (!project || !worktree) return null;
+    return { projectId, worktreeId, worktree };
+  }, []);
+
   const handleContextMenuPick = useCallback(
     (type: TerminalType) => {
       if (!contextMenu) return;
-      const {
-        focusedProjectId,
-        focusedWorktreeId,
-        projects: currentProjects,
-      } = useProjectStore.getState();
-      let projectId = focusedProjectId;
-      let worktreeId = focusedWorktreeId;
-      if (!projectId || !worktreeId) {
-        const fallbackProject = currentProjects[0];
-        const fallbackWorktree = fallbackProject?.worktrees[0];
-        if (!fallbackProject || !fallbackWorktree) {
-          return;
-        }
-        projectId = fallbackProject.id;
-        worktreeId = fallbackWorktree.id;
-      }
+      const target = resolveContextMenuTarget();
+      if (!target) return;
       createTerminalInScene({
-        projectId,
-        worktreeId,
+        projectId: target.projectId,
+        worktreeId: target.worktreeId,
         type,
         position: { x: contextMenu.flowX, y: contextMenu.flowY },
       });
     },
-    [contextMenu],
+    [contextMenu, resolveContextMenuTarget],
   );
 
-  const projectedNodes = useMemo(
-    () => buildCanvasFlowNodes(projects),
-    [layoutKey],
-  );
+  const handleIssueContextMenuPick = useCallback(async () => {
+    if (!contextMenu) return;
+    const target = resolveContextMenuTarget();
+    if (!target) {
+      console.warn("[gh-issues] resolveContextMenuTarget returned null");
+      return;
+    }
+
+    console.log("[gh-issues] Fetching issues for worktree:", target.worktree.path);
+    setIsFetchingIssues(true);
+    try {
+      const result = await window.termcanvas.github.fetchIssues(
+        target.worktree.path,
+      );
+
+      console.log("[gh-issues] IPC result:", JSON.stringify({ ok: result.ok, count: result.ok ? result.issues.length : 0, code: result.ok ? undefined : (result as { code: string }).code }));
+
+      if (!result.ok) {
+        const notify = useNotificationStore.getState().notify;
+        notify("error", `GitHub Issues: ${result.error}`);
+
+        let dialogMessage = result.error;
+        if (result.code === "not-installed") {
+          dialogMessage =
+            "The GitHub CLI (gh) is not installed.\n\nInstall it from: https://cli.github.com\n\nAfter installation, restart TermCanvas.";
+        } else if (result.code === "not-authenticated") {
+          dialogMessage =
+            "The GitHub CLI is not authenticated.\n\nRun: gh auth login\n\nThen try again.";
+        } else if (result.code === "network") {
+          dialogMessage =
+            "Network error while fetching issues.\n\nCheck your internet connection and try again.";
+        }
+
+        setGhErrorDialog({
+          title: "GitHub Issues Error",
+          message: dialogMessage,
+        });
+        return;
+      }
+
+      if (result.issues.length === 0) {
+        useNotificationStore
+          .getState()
+          .notify("info", "No open issues found in this repository.");
+        return;
+      }
+
+      const issueStore = useIssueStore.getState();
+      let addedCount = 0;
+
+      // Sort issues by number ascending (1, 2, 3...)
+      const sorted = [...result.issues].sort((a, b) => (a.number as number) - (b.number as number));
+
+      // Compute grid positions starting from the context menu click point
+      const basePos = { x: contextMenu.flowX, y: contextMenu.flowY };
+
+      for (let i = 0; i < sorted.length; i++) {
+        const raw = sorted[i];
+        const issueNum = raw.number as number;
+        const issueId = `gh-${target.projectId}-${issueNum}`;
+
+        if (issueStore.hasIssue(issueNum)) {
+          // Refresh existing issue metadata from GitHub
+          issueStore.updateIssue(issueNum, {
+            ...raw,
+            issueId,
+            projectId: target.projectId,
+            worktreeId: target.worktreeId,
+            issueNumber: issueNum,
+            __worktreePath: target.worktree.path,
+          } as Partial<IssueNodeData>);
+          addedCount++;
+          continue;
+        }
+
+        const pos = computeIssueGridPositions(basePos, i);
+        issueStore.addIssue({
+          ...raw,
+          issueId,
+          projectId: target.projectId,
+          worktreeId: target.worktreeId,
+          issueNumber: issueNum,
+          x: pos.x,
+          y: pos.y,
+          __worktreePath: target.worktree.path,
+        } as unknown as IssueNodeData);
+        addedCount++;
+      }
+
+      if (addedCount === 0) {
+        useNotificationStore
+          .getState()
+          .notify("info", "Issues are up to date — no changes from GitHub.");
+      } else {
+        const newIssues = addedCount - (result.issues.length - addedCount > 0 ? 0 : 0);
+        console.log(`[gh-issues] Synced ${addedCount} issues (new + refreshed)`);
+        useNotificationStore
+          .getState()
+          .notify("info", `Synced ${addedCount} issue${addedCount !== 1 ? "s" : ""} from GitHub.`);
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      useNotificationStore
+        .getState()
+        .notify("error", `GitHub Issues: ${message}`);
+    } finally {
+      setIsFetchingIssues(false);
+    }
+  }, [contextMenu, resolveContextMenuTarget]);
+
+  const projectedNodes = useMemo(() => {
+    const terminalNodes = buildCanvasFlowNodes(projects);
+
+    const issues = useIssueStore.getState().getAllIssues();
+    console.log(`[projectedNodes] terminals=${terminalNodes.length}, issues=${issues.length}, issueVersion=${issueVersion}`);
+    const issueNodes = issues.length > 0
+      ? buildCanvasFlowIssueNodes(issues)
+      : [];
+
+    return [...issueNodes, ...terminalNodes];
+  }, [layoutKey, issueVersion]);
   const [nodes, setNodes, onNodesChange] =
     useNodesState<CanvasFlowNode>(projectedNodes);
 
   useEffect(() => {
-    setNodes(projectedNodes);
+    setNodes((currentNodes) => {
+      const existing = new Map(currentNodes.map((n) => [n.id, n]));
+      return projectedNodes.map((pn) => {
+        const cur = existing.get(pn.id);
+        // Preserve user-dragged positions for existing nodes of the same type
+        if (cur && cur.type === pn.type) {
+          return { ...pn, position: cur.position };
+        }
+        return pn;
+      });
+    });
   }, [projectedNodes, setNodes]);
 
   useEffect(
@@ -467,18 +627,33 @@ function XyFlowCanvasInner() {
 
   const handleNodeClick = useCallback<NodeMouseHandler<CanvasFlowNode>>(
     (_event, node) => {
-      // Space-held panning is a transient override on top of whatever
-      // tool is active — a click that lands while Space is down is the
-      // tail of a pan gesture, so suppress the activate. Persistent
-      // Hand mode is different: clicking a terminal there is the user's
-      // way of getting *into* a terminal without leaving Hand. Without
-      // this distinction the now-default Hand tool can't focus a
-      // worktree by clicking, which made the canvas feel inert.
       if (spaceHeld) return;
-      const { projectId, worktreeId } = node.data;
-      useProjectStore.getState().setFocusedWorktree(projectId, worktreeId);
+
+      // Issue nodes: handled by the card's own buttons, not here
+      if (node.type === "issue") {
+        return;
+      }
+
+      // Terminal nodes: focus worktree
+      if (node.type === "terminal") {
+        const { projectId, worktreeId } = node.data;
+        useProjectStore.getState().setFocusedWorktree(projectId, worktreeId);
+      }
     },
     [spaceHeld],
+  );
+
+  const handleNodeContextMenu = useCallback(
+    (event: React.MouseEvent, node: CanvasFlowNode) => {
+      event.preventDefault();
+      if (node.type !== "issue") return;
+      setIssueContextMenu({
+        clientX: event.clientX,
+        clientY: event.clientY,
+        issueNumber: (node.data as Record<string, unknown>).number as number,
+      });
+    },
+    [],
   );
 
   const handleNodeDragStart = useCallback<OnNodeDrag<CanvasFlowNode>>(() => {
@@ -487,7 +662,13 @@ function XyFlowCanvasInner() {
 
   const handleNodeDragStop = useCallback<OnNodeDrag<CanvasFlowNode>>(
     (_event, node) => {
-      // Write terminal position back to store
+      // Issue nodes: no store update needed (positions are ephemeral per session)
+      if (node.type === "issue") {
+        return;
+      }
+
+      // Terminal nodes: write position back to store
+      if (node.type !== "terminal") return;
       const { projectId, worktreeId, terminalId } = node.data;
       const snappedX =
         Math.round(node.position.x / SNAP_GRID[0]) * SNAP_GRID[0];
@@ -730,6 +911,7 @@ function XyFlowCanvasInner() {
         onPaneClick={handlePaneClick}
         onPaneContextMenu={handlePaneContextMenu}
         onNodeClick={handleNodeClick}
+        onNodeContextMenu={handleNodeContextMenu}
         onNodeDragStart={handleNodeDragStart}
         onNodeDragStop={handleNodeDragStop}
         nodesConnectable={false}
@@ -759,6 +941,60 @@ function XyFlowCanvasInner() {
         <Background gap={20} size={2} color="var(--border)" />
       </ReactFlow>
 
+      {resolveArrows.length > 0 && (
+        <svg
+          className="pointer-events-none"
+          style={{
+            position: "fixed",
+            top: 0,
+            left: 0,
+            width: "100vw",
+            height: "100vh",
+            zIndex: 30,
+          }}
+          aria-hidden="true"
+        >
+          <defs>
+            <marker
+              id="resolve-arrowhead"
+              viewBox="0 0 10 10"
+              refX="9"
+              refY="5"
+              markerWidth="6"
+              markerHeight="6"
+              orient="auto-start-reverse"
+            >
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#58a6ff" />
+            </marker>
+          </defs>
+          {resolveArrows.map((arrow) => {
+            const issueEl = document.querySelector(`[data-id="${arrow.issueId}"]`);
+            const termEl = document.querySelector(`[data-id="${arrow.terminalId}"]`);
+            if (!issueEl || !termEl) return null;
+            const ir = issueEl.getBoundingClientRect();
+            const tr = termEl.getBoundingClientRect();
+            // Arrow from bottom-center of issue to top-center of terminal (screen-space)
+            const x1 = ir.left + ir.width / 2;
+            const y1 = ir.bottom;
+            const x2 = tr.left + tr.width / 2;
+            const y2 = tr.top;
+            return (
+              <line
+                key={`${arrow.issueId}-${arrow.terminalId}`}
+                x1={x1}
+                y1={y1}
+                x2={x2}
+                y2={y2}
+                stroke="#58a6ff"
+                strokeWidth="2"
+                strokeDasharray="6 3"
+                markerEnd="url(#resolve-arrowhead)"
+              />
+            );
+          })}
+        </svg>
+      )}
+
       {contextMenu && (
         <ContextMenu
           x={contextMenu.clientX}
@@ -771,6 +1007,18 @@ function XyFlowCanvasInner() {
               },
             },
             { type: "separator" },
+            ...(resolveContextMenuTarget()
+              ? [
+                  {
+                    label: isFetchingIssues
+                      ? "Cargando issues..."
+                      : "Traer issues de GitHub",
+                    onClick: () => {
+                      void handleIssueContextMenuPick();
+                    },
+                  } as const,
+                ]
+              : []),
             {
               label: "New Shell",
               onClick: () => handleContextMenuPick("shell"),
@@ -793,6 +1041,62 @@ function XyFlowCanvasInner() {
             },
           ]}
           onClose={() => setContextMenu(null)}
+        />
+      )}
+
+      {issueContextMenu && (
+        <ContextMenu
+          x={issueContextMenu.clientX}
+          y={issueContextMenu.clientY}
+          items={[
+            {
+              label: "RESOLVER ISSUE",
+              onClick: () => {
+                const target = resolveContextMenuTarget();
+                if (!target) return;
+                const issueStore = useIssueStore.getState();
+                const issue = issueStore.getIssue(issueContextMenu.issueNumber);
+                if (!issue) return;
+                // Measure the actual issue card DOM rect and convert to flow coords
+                const issueNodeId = `issue-${issue.issueNumber}`;
+                const issueEl = document.querySelector(`[data-id="${issueNodeId}"]`);
+                const rect = issueEl?.getBoundingClientRect();
+                if (!rect) return;
+                // Bottom-center of the card in screen-space → convert to flow-space
+                const screenCenter = { x: rect.left + rect.width / 2, y: rect.bottom + 12 };
+                let flowCenter = reactFlow.screenToFlowPosition(screenCenter);
+                // Center the terminal: subtract half terminal width in FLOW units
+                const stored = usePreferencesStore.getState().defaultTerminalSize;
+                const tileW = stored?.w ?? useTileDimensionsStore.getState().w;
+                flowCenter = { x: flowCenter.x - tileW / 2, y: flowCenter.y };
+                const terminal = createTerminalInScene({
+                  projectId: target.projectId,
+                  worktreeId: target.worktreeId,
+                  type: "opencode",
+                  title: `Issue #${issue.issueNumber}`,
+                  initialPrompt: `Resolvé el issue #${issue.issueNumber} — ${issue.title} — usando SDD con el pipeline completo y estricto. | PRECONDICIONES (ya definidas, no preguntes): Ejecución auto, gatekeeper entre fases, no pausar salvo problema real. Artefactos: openspec y engram, ambos. PRs: auto-chain. Presupuesto de review: 800 líneas. PRs encadenados: stacked-to-main. | ALCANCE: el issue aprobado es el contrato, no agregues requisitos fuera de su scope, no inventes features, no te saltes no-goals. | BODY ORIGINAL DEL ISSUE: ${(issue.body ?? "").replace(/\n/g, " ")} | PIPELINE (todas las fases en orden, sin omitir ninguna, sin pausar entre fases): sdd-new (explore + propose) -> spec -> design -> tasks -> apply -> verify -> archive. | RESTRICCIONES: work-unit commits con conventional commits (type(scope): desc), shellcheck en todo script modificado, sin Co-Authored-By ni atribuciones AI, actualizar docs si cambia el comportamiento. | GESTIÓN DEL ISSUE: NO cierres el issue manualmente, el cierre ocurre automático al mergear el PR vía "Closes #${issue.issueNumber}". Podés comentar avances con gh issue comment, no es obligatorio. No modifiques relaciones blocked-by/blocking/parent sin comentarlo primero. | ENTREGA FINAL: después de verify creá el PR con la skill branch-pr, branch type/descripcion, body con "Closes #${issue.issueNumber}", un solo label type:*, esperar checks automatizados. | AL TERMINAR RESUMÍ: 1) qué se implementó por fase, 2) evidencia de verify, 3) URL del PR.`,
+                  autoApprove: true,
+                  position: flowCenter,
+                });
+                setResolveArrows((prev) => [
+                  ...prev,
+                  { issueId: issueNodeId, terminalId: terminal.id },
+                ]);
+              },
+            },
+          ]}
+          onClose={() => setIssueContextMenu(null)}
+        />
+      )}
+
+      {ghErrorDialog && (
+        <ConfirmDialog
+          open
+          title={ghErrorDialog.title}
+          body={ghErrorDialog.message}
+          confirmLabel="OK"
+          onConfirm={() => setGhErrorDialog(null)}
+          onCancel={() => setGhErrorDialog(null)}
         />
       )}
 

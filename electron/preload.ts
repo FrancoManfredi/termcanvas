@@ -782,6 +782,35 @@ contextBridge.exposeInMainWorld("termcanvas", {
     decrypt: (base64: string): Promise<string> =>
       ipcRenderer.invoke("secure:decrypt", base64),
   },
+  github: {
+    fetchIssues: (cwd: string) =>
+      ipcRenderer.invoke("github:fetch-issues", cwd) as Promise<
+        | { ok: true; issues: Array<Record<string, unknown>> }
+        | { ok: false; error: string; code: string }
+      >,
+    openUrl: (url: string) =>
+      ipcRenderer.invoke("github:open-url", url) as Promise<void>,
+    listLabels: (cwd: string) =>
+      ipcRenderer.invoke("github:list-labels", cwd) as Promise<
+        | { ok: true; labels: Array<{ name: string; color: string; description: string }> }
+        | { ok: false; error: string }
+      >,
+    listMilestones: (cwd: string) =>
+      ipcRenderer.invoke("github:list-milestones", cwd) as Promise<
+        | { ok: true; milestones: Array<{ number: number; title: string; due_on: string | null }> }
+        | { ok: false; error: string }
+      >,
+    mutateIssue: (cwd: string, number: number, action: string, params: Record<string, unknown>) =>
+      ipcRenderer.invoke("github:mutate-issue", cwd, number, action, params) as Promise<
+        | { ok: true }
+        | { ok: false; error: string }
+      >,
+    addComment: (cwd: string, number: number, body: string) =>
+      ipcRenderer.invoke("github:add-comment", cwd, number, body) as Promise<
+        | { ok: true }
+        | { ok: false; error: string }
+      >,
+  },
   agent: {
     start: (
       sessionId: string,

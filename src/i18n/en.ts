@@ -77,6 +77,7 @@ export const en = {
   left_panel_memory: "Memory",
   left_panel_sessions: "Sessions",
   left_panel_history: "History",
+  left_panel_issues: "Issues",
   left_panel_repo: "Repo",
   left_panel_enable_hydra: "Hydra",
   left_panel_enable_hydra_busy: "Enabling\u2026",

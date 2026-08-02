@@ -97,6 +97,20 @@ export type AnnotationElement =
   | AnnotationRectElement
   | AnnotationArrowElement;
 
+export interface PersistedIssueNode {
+  issueId: string;
+  projectId: string;
+  worktreeId: string;
+  issueNumber: number;
+  title: string;
+  body: string;
+  url: string;
+  labels: { name: string; color?: string }[];
+  x: number;
+  y: number;
+  [key: string]: unknown;
+}
+
 export interface SceneDocument {
   version: 2;
   camera: SceneCamera;
@@ -104,6 +118,7 @@ export interface SceneDocument {
   browserCards: Record<string, BrowserCardData>;
   annotations: AnnotationElement[];
   stashedTerminals?: PersistedStashedTerminal[];
+  issues?: PersistedIssueNode[];
 }
 
 export interface SceneRuntime {

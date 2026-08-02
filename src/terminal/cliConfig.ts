@@ -161,6 +161,8 @@ export const TERMINAL_CONFIG: Record<TerminalType, TerminalAdapterConfig> = {
       shell: "opencode",
       resumeArgs: (id) => ["-s", id],
       newArgs: () => [],
+      promptArgs: (prompt) => ["--prompt", prompt],
+      autoApproveArgs: () => ["--auto"],
     },
     composer: {
       supportsComposer: true,

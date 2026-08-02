@@ -20,6 +20,7 @@ import { panToTerminal } from "../utils/panToTerminal";
 import { type TerminalNodeData, type CanvasFlowNode } from "./nodeProjection";
 import { rectIntersectsCanvasViewport } from "./viewportBounds";
 import { resolveCollisions } from "./collisionResolver";
+import { IssueNode } from "./IssueNode";
 
 const SNAP_GRID = 10;
 
@@ -273,6 +274,7 @@ function TerminalNode({ data }: NodeProps<TerminalFlowNode>) {
 
 export const xyflowNodeTypes = {
   terminal: TerminalNode,
+  issue: IssueNode,
 } satisfies NodeTypes;
 
 export type { CanvasFlowNode, TerminalNodeData };

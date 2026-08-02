@@ -23,6 +23,7 @@ import { useDrawingStore } from "../stores/drawingStore";
 import { useProjectStore } from "../stores/projectStore";
 import { useStashStore } from "../stores/stashStore";
 import { useTerminalRuntimeStateStore } from "../stores/terminalRuntimeStateStore";
+import { useIssueStore } from "../stores/issueStore";
 import {
   destroyAllTerminalRuntimes,
   serializeAllTerminalRuntimeBuffers,
@@ -123,11 +124,18 @@ export function captureLiveCanvasScene(): SceneDocument {
     toPersistedProjectData(project, scrollbacks),
   );
 
+  const allIssues = useIssueStore.getState().getAllIssues();
+  // Positions are now stored in IssueNodeData (x, y fields).
+  const persistedIssues = allIssues.map((issue) => ({
+    ...issue,
+  }));
+
   return buildSceneDocument({
     viewport: useCanvasStore.getState().viewport,
     projects,
     drawings: useDrawingStore.getState().elements,
     browserCards: useBrowserCardStore.getState().cards,
+    issues: persistedIssues.length > 0 ? persistedIssues : undefined,
   });
 }
 
@@ -153,4 +161,11 @@ export function applyCanvasSceneToLive(scene: SceneDocument) {
   useStashStore
     .getState()
     .setItems(deriveStashItemsFromProjects(restoredProjects));
+
+  // Hydrate issue store from scene document
+  const issueStore = useIssueStore.getState();
+  issueStore.clearIssues();
+  if (restored.issues.length > 0) {
+    issueStore.hydrateIssues(restored.issues);
+  }
 }
