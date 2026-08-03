@@ -784,6 +784,27 @@ function XyFlowCanvasInner() {
       // to bubble to the terminal engine for scrollback; the canvas
       // does not pan.
       const target = event.target;
+
+      // XXX: debug — log EVERY wheel event unconditionally so we can
+      // diagnose why terminals don't receive scroll. Remove after fix
+      // is confirmed. Use window.__TC_DEBUG_WHEEL__ = 1 to mute after
+      // initial diagnosis (set to 0 or delete to re-enable).
+      const DEBUG_MUTED = (window as any).__TC_DEBUG_WHEEL__ === 1;
+      if (!DEBUG_MUTED) {
+        const targetTag = target instanceof Element ? target.tagName : String(target);
+        const targetClass = target instanceof Element ? (target as Element).className : "";
+        const hitHandoff = target instanceof Element ? target.closest("[data-handoff-terminal-id]") !== null : false;
+        const hitRfNode = target instanceof Element ? target.closest(".react-flow__node-terminal") !== null : false;
+        const hitWterm = target instanceof Element ? target.closest(".tc-wterm-host") !== null : false;
+        const hitXterm = target instanceof Element ? target.closest(".tc-xterm-host") !== null : false;
+        console.log(
+          "%c[tc:wheel]%c target=%c%s.%s%c | rf-node=%s | handoff=%s | xterm=%s | wterm=%s",
+          "color:#58a6ff;font-weight:bold", "",
+          "color:#f0c040", targetTag, targetClass, "",
+          hitRfNode, hitHandoff, hitXterm, hitWterm,
+        );
+      }
+
       if (target instanceof Element) {
         const isTerminalNode =
           target.closest("[data-handoff-terminal-id]") !== null ||
@@ -791,9 +812,12 @@ function XyFlowCanvasInner() {
           target.closest(".tc-wterm-host") !== null ||
           target.closest(".tc-xterm-host") !== null;
         if (isTerminalNode) {
+          if (!DEBUG_MUTED) console.log("%c[tc:wheel]%c → PASSTHROUGH to terminal", "color:#58a6ff;font-weight:bold", "");
           return;
         }
       }
+
+      if (!DEBUG_MUTED) console.log("%c[tc:wheel]%c → canvas pan (dx=%s, dy=%s)", "color:#58a6ff;font-weight:bold", "", event.deltaX.toFixed(1), event.deltaY.toFixed(1));
 
       event.preventDefault();
       event.stopPropagation();
@@ -836,6 +860,40 @@ function XyFlowCanvasInner() {
       window.removeEventListener("blur", stop);
     };
   }, [isPanning]);
+
+  // XXX: debug — native DOM wheel listener on the outer canvas
+  // container. This runs independently of React's synthetic events
+  // and confirms whether native wheel events reach this div at all.
+  // Remove after the terminal scroll fix is confirmed.
+  useEffect(() => {
+    const el = canvasContainerRef.current;
+    if (!el) return;
+    let nativeCount = 0;
+    const onNativeWheel = (e: WheelEvent) => {
+      nativeCount++;
+      // Log first 5 events, then every 50th
+      if (nativeCount <= 5 || nativeCount % 50 === 0) {
+        console.log(
+          "%c[tc:wheel:native]%c #%d phase=%s target=%s.%s | dx=%s dy=%s ctrl=%s",
+          "color:#ff6b6b;font-weight:bold", "",
+          nativeCount,
+          e.eventPhase === 1 ? "CAPTURE" : e.eventPhase === 2 ? "TARGET" : "BUBBLE",
+          (e.target as Element).tagName ?? "?",
+          (e.target as Element).className ?? "",
+          e.deltaX.toFixed(1), e.deltaY.toFixed(1),
+          e.ctrlKey || e.metaKey,
+        );
+      }
+      if (nativeCount === 5) {
+        console.log(
+          "%c[tc:wheel:native]%c suppressing further per-event logs (logging every 50th)",
+          "color:#ff6b6b;font-weight:bold", "",
+        );
+      }
+    };
+    el.addEventListener("wheel", onNativeWheel, true); // capture phase
+    return () => el.removeEventListener("wheel", onNativeWheel, true);
+  }, []);
 
   // isPanning takes precedence over isPanMode for the cursor: if the
   // user holds Space, presses the mouse, then releases Space before
