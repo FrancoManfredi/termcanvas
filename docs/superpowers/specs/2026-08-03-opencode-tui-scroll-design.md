@@ -97,7 +97,8 @@ the current event:
 
 - The current registry entry for the captured terminal ID exists.
 - The current terminal type is `opencode`.
-- The current runtime mode is `live`.
+- The current runtime mode is `live` and the current live input bridge is
+  available (`ptyId !== null`); the callback still captures no PTY ID.
 - The current runtime xterm is the same instance as the captured xterm.
 - The current attached container is the host associated with that xterm
   instance.
@@ -132,7 +133,8 @@ xterm input/onData bridge, so renderer parking, runtime replacement, PTY exit,
 or disposal cannot send input to an old process.
 
 If the live input bridge is unavailable, the callback must not call
-`xterm.input` and must not throw.
+`xterm.input`, must return `true`, and must not throw; xterm retains ownership
+of the event.
 
 ### Exact mapping and bounded behavior
 
@@ -261,7 +263,8 @@ contract:
   never reaches xterm; if it reaches the callback, the defensive modifier guard
   adds no input;
 - a normal xterm effective viewport returns the xterm decision;
-- no live runtime/input bridge produces no input and no throw;
+- an unavailable live input bridge returns `true`, calls no `xterm.input`,
+  leaves ownership with xterm, and does not throw;
 - the callback is installed after `xterm.open()` and calls
   `xterm.input(sequence, false)` exactly once for an eligible event;
 - returning `false` suppresses xterm's duplicate built-in path;
