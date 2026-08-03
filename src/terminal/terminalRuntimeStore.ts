@@ -72,6 +72,9 @@ import {
   toPreviewText,
 } from "./terminalRuntimePolicy";
 import {
+  decideXtermWheelFallback,
+} from "./xtermWheelFallback";
+import {
   createTerminalSelectionAutoCopyState,
   markTerminalSelectionChanged,
   markTerminalSelectionCopied,
@@ -180,9 +183,85 @@ function nextSpawnDelay(): number {
   return spawnStaggerCount * SPAWN_STAGGER_MS;
 }
 const runtimeRegistry = new Map<string, ManagedTerminalRuntime>();
+const registeredXtermWheelFallbacks = new WeakMap<XtermTerminal, () => void>();
 const xtermRuntimeModule = xtermModule as XtermRuntimeModule;
 const XtermTerminalConstructor = (xtermRuntimeModule.Terminal ??
   xtermRuntimeModule.default?.Terminal) as XtermTerminalConstructor;
+
+export function registerXtermWheelFallback(
+  terminalId: string,
+  xterm: XtermTerminal,
+): () => void {
+  const existingDisposer = registeredXtermWheelFallbacks.get(xterm);
+  if (existingDisposer) {
+    return existingDisposer;
+  }
+
+  const element = xterm.element;
+  if (!element) {
+    return () => {};
+  }
+
+  const handleWheel = (event: WheelEvent) => {
+    if (event.defaultPrevented) {
+      return;
+    }
+
+    const runtime = runtimeRegistry.get(terminalId);
+    const host = runtime?.hostElement;
+    const container = runtime?.attachedContainer;
+    const viewport = element?.querySelector(".xterm-viewport");
+    const hasLiveHost =
+      !!runtime &&
+      !runtime.disposed &&
+      runtime.mode === "live" &&
+      runtime.ptyId !== null &&
+      runtime.xterm === xterm &&
+      !!host &&
+      !!container &&
+      host.parentElement === container &&
+      !!element &&
+      host.contains(element);
+    const hasViewportMetrics =
+      !!viewport &&
+      typeof viewport.scrollHeight === "number" &&
+      typeof viewport.clientHeight === "number";
+    const decision = decideXtermWheelFallback({
+      activeBuffer: xterm.buffer.active.type === "alternate"
+        ? "alternate"
+        : xterm.buffer.active.type === "normal"
+          ? "normal"
+          : null,
+      ctrlKey: event.ctrlKey,
+      deltaY: event.deltaY,
+      liveInputAvailable: hasLiveHost,
+      metaKey: event.metaKey,
+      mouseEventsEnabled: !!element?.classList.contains("enable-mouse-events"),
+      terminalType: runtime?.meta.terminal.type ?? "shell",
+      viewport: hasViewportMetrics
+        ? {
+            clientHeight: viewport.clientHeight,
+            scrollHeight: viewport.scrollHeight,
+          }
+        : null,
+    });
+
+    if (decision === "xterm") {
+      return;
+    }
+
+    xterm.input(decision === "up" ? "\x1b[A" : "\x1b[B", false);
+    event.preventDefault();
+    event.stopPropagation();
+  };
+
+  element.addEventListener("wheel", handleWheel);
+  const dispose = () => {
+    element.removeEventListener("wheel", handleWheel);
+  };
+  registeredXtermWheelFallbacks.set(xterm, dispose);
+  return dispose;
+}
 
 function isSessionTelemetryProvider(
   type: TerminalType,
@@ -1164,6 +1243,9 @@ function createTerminalRenderer(
   xterm.loadAddon(fitAddon);
   xterm.loadAddon(serializeAddon);
   xterm.open(host);
+  runtime.globalDisposers.push(
+    registerXtermWheelFallback(runtime.meta.terminal.id, xterm),
+  );
   // SearchAddon's DecorationManager registers markers via the live
   // renderer — load it AFTER `open()` so its `activate()` runs against an
   // initialized terminal. Loading before `open()` makes findNext silently
