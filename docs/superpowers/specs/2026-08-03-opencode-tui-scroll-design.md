@@ -64,25 +64,52 @@ canvas passthrough and is not solved by changing `overflow`, scrolling
 ### Xterm-owned callback
 
 After the renderer calls `xterm.open()`, register exactly one callback with
-`xterm.attachCustomWheelEventHandler`. Keep the disposable returned by that
-registration in the same renderer/host lifecycle owner that manages the xterm
-instance. Do not add a second native `wheel` listener on the host, an ancestor,
-the document, or the canvas.
+`xterm.attachCustomWheelEventHandler`. In xterm.js 6.0.0 this method returns
+`void`; it has no per-registration disposer. The registration belongs to the
+xterm instance and is removed when that renderer is destroyed by
+`xterm.dispose()`. Do not add a second native `wheel` listener on the host, an
+ancestor, the document, or the canvas.
+
+The callback must capture only the terminal ID and the xterm instance. It must
+resolve the current registry entry and current DOM/runtime state on every
+event. While the renderer is parked or detached, the live-state predicate below
+must fail and the callback must return xterm ownership without sending input.
+Reattaching the same xterm instance must not register a second callback. If a
+new xterm instance is created, register once for that new instance immediately
+after its `open()` call.
 
 The callback must evaluate the current event and current runtime state in this
 order:
 
 | Condition | Callback action |
 | --- | --- |
+| `event.defaultPrevented === true` inside the callback | Do not add fallback input; return `false` to suppress xterm processing. This test means "fallback adds no input and the xterm path is suppressed," not "no input at all." |
 | `terminal.type !== "opencode"` | Return `true`; preserve normal xterm behavior. |
-| `ctrlKey` or `metaKey` | Do not call `xterm.input`; return `true` so the existing canvas pinch contract remains intact. |
+| `ctrlKey` or `metaKey` | Do not call `xterm.input`; return `true`. Ctrl/meta pinch is owned by the outer canvas capture handler and normally never reaches xterm; this is a defensive guard if it does. |
 | `deltaY === 0` (including horizontal-only wheel input) | Do not call `xterm.input`; return `true`. |
-| `event.defaultPrevented === true` before this callback | Do not add input; return `true`. This is only a pre-existing guard, never a post-xterm ancestor handoff. |
 | xterm root has `enable-mouse-events` | Do not call `xterm.input`; return `true` and let xterm emit its mouse report and cancel the event. |
-| xterm is not in the OpenCode alternate-screen/no-effective-viewport state | Return `true`; xterm owns normal scrollback or its own alternate-screen behavior. |
-| no live runtime/input bridge | Do not call `xterm.input`; return `true` and do not capture a stale PTY reference. |
+| The exact live fallback predicate is false | Return `true`; xterm owns normal scrollback or its own alternate-screen behavior. |
 | eligible negative `deltaY` | Call `xterm.input("\\x1b[A", false)`, prevent/stop the original event, then return `false`. |
 | eligible positive `deltaY` | Call `xterm.input("\\x1b[B", false)`, prevent/stop the original event, then return `false`. |
+
+The exact fallback predicate is true only when every condition below is true for
+the current event:
+
+- The current registry entry for the captured terminal ID exists.
+- The current terminal type is `opencode`.
+- The current runtime mode is `live`.
+- The current runtime xterm is the same instance as the captured xterm.
+- The current attached container is the host associated with that xterm
+  instance.
+- The active buffer type is `alternate`.
+- `.xterm-viewport` exists and its `scrollHeight <= clientHeight`.
+
+If the viewport or either metric is unavailable, the predicate is false and the
+callback returns xterm ownership; it must not fall back. A parked, detached,
+replaced, disposed, or otherwise non-live runtime therefore cannot receive
+fallback input. The callback must never capture a PTY ID, PTY object, direct PTY
+writer, host reference, or stale runtime snapshot. Only the terminal ID and
+xterm instance may be captured; all other predicate inputs are read live.
 
 The pure decision helper should receive the terminal type, active buffer/state,
 effective viewport state, event flags/deltas, mouse-report marker, and current
@@ -137,8 +164,9 @@ The custom xterm callback is the only component that may add this OpenCode
 fallback. It runs before xterm's built-in wheel processing, so a fallback must
 call `xterm.input`, prevent the original event, stop propagation as appropriate,
 and return `false`. Returning `false` suppresses xterm's duplicate path for the
-same event. Existing `defaultPrevented` state is only a no-fallback guard; no
-ancestor is allowed to infer that xterm already handled the event.
+same event. If `event.defaultPrevented` is already `true` when the callback runs,
+the callback returns `false` and adds no fallback input. No ancestor is allowed
+to infer that xterm already handled the event after the fact.
 
 ### Why there is no event redispatch
 
@@ -179,20 +207,20 @@ the xterm-specific callback. Registration is scoped to xterm instances and
 
 ### Lifecycle cleanup
 
-The disposable returned by `attachCustomWheelEventHandler` must be owned by the
-same runtime lifecycle that owns the xterm host binding. Dispose it when:
+`attachCustomWheelEventHandler` returns `void`, so there is no registration
+disposer to retain or call. Register exactly once after `xterm.open()` for each
+xterm instance. Keep that callback attached while the host is detached or
+parked, but gate it with the live fallback predicate so it cannot send input in
+that state. Reattaching the same xterm instance reuses the existing callback and
+must not register another one.
 
-- the renderer is disposed;
-- the host is detached, parked, or replaced;
-- a terminal switches renderer or runtime mode; or
-- the terminal tile unmounts.
-
-After disposal, the callback must not send input. Reattaching a parked host
-must dispose the previous registration before installing another, leaving at
-most one active callback. The callback must not retain a PTY/runtime reference;
-the xterm `input` to `onData` bridge performs the live lookup at send time.
-Existing renderer and terminal lifecycle disposers in
-`terminalRuntimeStore.ts` remain the single ownership boundary.
+When the renderer is destroyed, call `xterm.dispose()` through the existing
+renderer lifecycle. That is the cleanup boundary for the xterm-owned callback.
+A renderer switch that creates a new xterm instance registers once on the new
+instance after `open()`; the old instance is cleaned up by its own
+`xterm.dispose()`. The callback must capture only the terminal ID and xterm
+instance; the live registry and xterm input/onData bridge prevent parked,
+replaced, exited, or stale runtimes from receiving input.
 
 ## Implementation Touchpoints
 
@@ -203,8 +231,9 @@ The implementation should remain narrow and use these existing boundaries:
 2. `src/terminal/TerminalTile.tsx`: preserve the xterm/wterm distinction and
    expose the terminal type needed for the OpenCode-only predicate.
 3. `src/terminal/terminalRuntimeStore.ts`: after `xterm.open()`, register the
-   custom callback, retain its disposable, use the existing xterm `onData`
-   bridge, and dispose it through renderer/host cleanup.
+   custom callback exactly once per xterm instance, use the existing xterm
+   `onData` bridge, and destroy the callback with `xterm.dispose()` when that
+   renderer is destroyed. Reattachment must reuse the registration.
 
 No CSS scroll workaround is part of this design. No wheel event is cloned,
 redispatched, or manually replayed.
@@ -224,9 +253,13 @@ contract:
 - `ctrlKey` or `metaKey` produces no input and preserves the canvas pinch
   contract;
 - zero `deltaY` and horizontal-only input produce no fallback input;
-- an already `defaultPrevented` event produces no duplicate input;
+- an already `defaultPrevented` event makes the fallback add no input and makes
+  the callback return `false`, suppressing the xterm path;
 - an xterm root with `enable-mouse-events` produces no fallback input and lets
   xterm's mouse-report path handle the event;
+- ctrl/meta pinch is handled by the outer canvas capture boundary and normally
+  never reaches xterm; if it reaches the callback, the defensive modifier guard
+  adds no input;
 - a normal xterm effective viewport returns the xterm decision;
 - no live runtime/input bridge produces no input and no throw;
 - the callback is installed after `xterm.open()` and calls
@@ -234,9 +267,12 @@ contract:
 - returning `false` suppresses xterm's duplicate built-in path;
 - the existing xterm `onData` bridge forwards the sequence to the current PTY,
   not a captured stale PTY;
-- repeated attachment leaves only one active registration; and
-- disposing the registration, parking/detaching the host, switching renderer,
-  or unmounting the tile prevents later input.
+- registration occurs exactly once per xterm instance; reattachment of the same
+  instance does not register a second callback;
+- parking/detaching the host makes the live predicate fail without registering
+  or sending fallback input; and
+- renderer destruction calls `xterm.dispose()`, while renderer switching and
+  tile unmounting do not leave the old xterm instance active.
 
 Regression verification must also cover the existing behavior matrix:
 
@@ -263,8 +299,9 @@ Regression verification must also cover the existing behavior matrix:
   terminal application's mouse protocol, so the `enable-mouse-events` guard is
   mandatory.
 - Runtime parking, reattachment, and PTY replacement can expose stale listener
-  bugs if the registration disposable is not tied to renderer cleanup or if the
-  callback captures a PTY directly.
+  bugs if the callback does not read the current registry entry or captures a
+  PTY/runtime snapshot directly. xterm disposal must remain the renderer
+  teardown boundary because the registration has no per-registration disposer.
 - Future xterm changes to custom-wheel ordering or callback semantics require
   revalidating the callback and duplicate-prevention tests.
 
