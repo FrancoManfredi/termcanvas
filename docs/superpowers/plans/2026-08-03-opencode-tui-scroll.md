@@ -23,6 +23,7 @@ The approved design is `docs/superpowers/specs/2026-08-03-opencode-tui-scroll-de
 - `src/terminal/terminalRuntimeStore.ts:977-999` parks an existing xterm without disposing it; parking removes interactive bindings and detaches the host, so the callback must remain installed but fail its live predicate.
 - `src/terminal/terminalRuntimeStore.ts:2015-2049` reattaches the same xterm instance and rewires live bindings; it must not register another custom-wheel callback.
 - `src/terminal/terminalRuntimeStore.ts:948-975` and `:2139-2204` dispose the xterm renderer on eviction, renderer destruction, and terminal destruction. `xterm.dispose()` is the cleanup boundary because `attachCustomWheelEventHandler` returns `void` in xterm 6.0.0.
+- The exact integration seam is `export function registerXtermWheelFallback(terminalId: string, xterm: XtermTerminal): void` in `src/terminal/terminalRuntimeStore.ts`. `createTerminalRenderer` calls it immediately after `xterm.open(host)`, and focused tests import and call this seam directly.
 - `tests/terminal-runtime-store.test.ts:317-451` already verifies park, reattach, binding disposal, host reuse, and final xterm disposal. Extend this lifecycle surface instead of creating a second runtime harness.
 - `tests/xterm-mouse-scale-patch.test.ts` and `tests/terminal-runtime-policy.test.ts` show the repository convention for focused pure-helper tests: `node:test`, `node:assert/strict`, direct TypeScript imports, and no test framework mocks unless needed.
 
@@ -46,8 +47,8 @@ Observed baseline on 2026-08-03:
 ## Task 1: Add The Pure Wheel Decision Helper
 
 **Files:**
-- Create: `src/terminal/xtermWheelFallback.ts`
 - Create: `tests/xterm-wheel-fallback.test.ts`
+- Modify: `tests/terminal-runtime-store.test.ts`
 
 - [ ] **Step 1: Define the smallest decision contract in the test.**
 
@@ -70,7 +71,24 @@ type XtermWheelFallbackState = {
 
 The helper returns `"xterm"`, `"up"`, or `"down"`; event cancellation and `defaultPrevented` handling remain callback responsibilities.
 
-- [ ] **Step 2: Write the failing predicate and mapping tests.**
+- [ ] **Step 2: Define the fake xterm and runtime test helpers before implementation.**
+
+In `tests/xterm-wheel-fallback.test.ts`, define a `createFakeXterm()` helper with these fields and behaviors:
+
+- `open(host)` records the host and appends an `"open"` entry to an ordered call log.
+- `attachCustomWheelEventHandler(handler)` stores the callback in `wheelHandler` and records an `"attachCustomWheelEventHandler"` entry.
+- `input(data, wasUserInput)` records both arguments in `inputCalls`.
+- `dispose()` increments `disposeCalls` and records a `"dispose"` entry.
+- `element` exposes `classList.contains(name)` and `querySelector(selector)`; `querySelector(".xterm-viewport")` returns the configured viewport.
+- `buffer.active.type` is mutable between `"normal"` and `"alternate"`.
+- `onData(listener)` stores `dataHandler` and returns a disposable whose call is observable.
+- The helper returns `host`, `attachedContainer`, and `viewport` objects with the parent/containment behavior needed by the live-host predicate, plus `wheelHandler`, `dataHandler`, `inputCalls`, `callOrder`, and disposal counters.
+
+Define `createWheelEvent()` to return a `WheelEvent`-shaped object with `defaultPrevented`, `deltaY`, `ctrlKey`, and `metaKey`, where `preventDefault()` sets `defaultPrevented` and `prevented = true`, and `stopPropagation()` sets `stopped = true`. Define a runtime setup helper that seeds the current terminal registry entry with `mode`, `ptyId`, `meta.terminal.type`, `xterm`, `hostElement`, `attachedContainer`, and a live `onData` capture. Tests must invoke the captured `dataHandler` after changing the runtime PTY id to prove the bridge reads current state.
+
+Mirror these fake xterm fields and captures in the existing `createMockXterm()` helper in `tests/terminal-runtime-store.test.ts`, or extract the same helper into a shared test-only module if that avoids duplication; do not leave the lifecycle test mock without `open`, wheel-handler capture, DOM lookup, `dispose`, or `onData` capture.
+
+- [ ] **Step 3: Write every failing test before implementation.**
 
 Cover each exact predicate with one clear test or a small table of cases:
 
@@ -83,15 +101,27 @@ Cover each exact predicate with one clear test or a small table of cases:
 - Missing registry/live state, `liveInputAvailable === false`, `activeBuffer !== "alternate"`, missing viewport, and `scrollHeight > clientHeight` each return `"xterm"`.
 - `scrollHeight === clientHeight` and `scrollHeight < clientHeight` both remain eligible.
 
-- [ ] **Step 3: Run the new focused test to verify the expected RED failure.**
+Also write the callback and lifecycle assertions now, before implementing either the helper or registration seam:
+
+- Import the exact `registerXtermWheelFallback` seam from `src/terminal/terminalRuntimeStore.ts` and call it as `registerXtermWheelFallback("terminal-1", xterm)`.
+- Assert the registration call is made only after `xterm.open(host)` by checking `callOrder`.
+- Assert an eligible negative event calls `xterm.input("\x1b[A", false)` exactly once, sets `prevented` and `stopped`, and returns `false`.
+- Assert an eligible positive event calls `xterm.input("\x1b[B", false)` exactly once with `false` and returns `false`.
+- Assert an already `defaultPrevented` event returns `false`, calls no input, and does not throw.
+- Assert an unavailable live input bridge returns `true` and calls no input.
+- Assert the callback reads current registry/runtime state on every event rather than a captured PTY id or runtime snapshot.
+- Assert a parked or detached host fails the live predicate without input.
+- Assert reattaching the same xterm instance does not attach a second callback, while its `onData` binding can be rewired.
+- Assert renderer eviction/disposal calls `xterm.dispose()` before a newly created xterm instance is registered once; do not model a preference switch as replacing the xterm because the current renderer preference path only changes addons on the existing instance.
+- Assert changing the runtime PTY id causes the captured `onData` listener to forward to the new id, not a stale id.
 
 Run:
 
 ```bash
-pnpm exec tsx --test tests/xterm-wheel-fallback.test.ts
+pnpm exec tsx --test tests/xterm-wheel-fallback.test.ts tests/terminal-runtime-store.test.ts
 ```
 
-Expected: the test command fails because `src/terminal/xtermWheelFallback.ts` and `decideXtermWheelFallback` do not exist yet. Fix only test typos or import errors if the failure is not the missing implementation.
+Expected: the command fails because the pure helper, exported registration seam, callback behavior, and lifecycle assertions do not exist yet. Fix only test fixture/import errors if the failure is not an absent implementation.
 
 - [ ] **Step 4: Implement the minimal pure helper.**
 
@@ -106,12 +136,12 @@ In `src/terminal/xtermWheelFallback.ts`, implement the predicates in this order 
 
 Do not import runtime state, a PTY writer, DOM nodes, React, or xterm into this pure module.
 
-- [ ] **Step 5: Run the helper tests to verify GREEN.**
+- [ ] **Step 5: Run only the helper assertions to verify their GREEN transition.**
 
 Run:
 
 ```bash
-pnpm exec tsx --test tests/xterm-wheel-fallback.test.ts
+pnpm exec tsx --test tests/xterm-wheel-fallback.test.ts --test-name-pattern="decision|predicate|mapping|delta|viewport"
 ```
 
 Expected: all helper tests pass.
@@ -119,37 +149,25 @@ Expected: all helper tests pass.
 ## Task 2: Register The Xterm-Owned Callback
 
 **Files:**
+- Create: `src/terminal/xtermWheelFallback.ts`
 - Modify: `src/terminal/terminalRuntimeStore.ts:1134-1220`
 - Modify: `tests/xterm-wheel-fallback.test.ts`
+- Modify: `package.json:22-23`
 
-- [ ] **Step 1: Add failing callback contract tests.**
+- [ ] **Step 1: Implement the exact exported registration seam.**
 
-Test a small runtime-store registration function or the equivalent callback seam used by the implementation. The fake xterm must record `open`, `attachCustomWheelEventHandler`, `input`, and `dispose` calls and expose `element`, `buffer.active.type`, and a viewport element. Assert:
+In `src/terminal/terminalRuntimeStore.ts`, implement:
 
-- Registration happens only after `xterm.open(host)`.
-- An eligible negative event calls `xterm.input("\x1b[A", false)` exactly once, calls `preventDefault()` and `stopPropagation()`, and returns `false`.
-- An eligible positive event calls `xterm.input("\x1b[B", false)` exactly once with `false` and returns `false`.
-- A callback event whose `defaultPrevented` is already `true` calls no input, returns `false`, and does not throw.
-- A live input bridge that is unavailable returns `true` without calling `xterm.input`.
-- The callback reads current registry/runtime state at event time, not a captured PTY ID or runtime snapshot.
-
-Run:
-
-```bash
-pnpm exec tsx --test tests/xterm-wheel-fallback.test.ts
+```ts
+export function registerXtermWheelFallback(
+  terminalId: string,
+  xterm: XtermTerminal,
+): void
 ```
 
-Expected: the new callback tests fail because registration and callback behavior are not implemented.
+Use a module-level `WeakSet<XtermTerminal>` to return without attaching another callback for the same xterm instance. The callback must capture only `terminalId` and `xterm`; it resolves the current registry/runtime/DOM state on every event. Do not add a disposer field because xterm 6 returns `void` from `attachCustomWheelEventHandler`.
 
-- [ ] **Step 2: Add one-per-instance registration tracking.**
-
-In `src/terminal/terminalRuntimeStore.ts`, add a module-level `WeakSet<XtermTerminal>` for registered instances and a narrow registration function. It must return without attaching another callback when the same xterm instance is reattached. A new xterm instance may register once. Do not add a disposer field because xterm 6 returns `void` from `attachCustomWheelEventHandler`.
-
-- [ ] **Step 3: Register immediately after `xterm.open()`.**
-
-In `createTerminalRenderer`, keep `attachTerminalHost` and addon setup intact, call `xterm.open(host)`, assign the newly created instance to the runtime as needed for live identity checks, and register the callback immediately after the open boundary. The callback closure may capture only the terminal ID and xterm instance; it must resolve everything else live from `runtimeRegistry` and the current xterm DOM/runtime state.
-
-- [ ] **Step 4: Implement the callback’s live-state read.**
+- [ ] **Step 2: Implement the callback’s live-state read and event ownership.**
 
 On every wheel event, resolve the registry entry for the captured terminal ID and verify all of these conditions before calling the pure helper:
 
@@ -164,8 +182,6 @@ On every wheel event, resolve the registry entry for the captured terminal ID an
 
 If the viewport or either metric is unavailable, pass an unavailable viewport to the helper and leave ownership with xterm. Never capture or directly use a PTY ID, PTY object, direct PTY writer, host reference, or runtime snapshot in the callback.
 
-- [ ] **Step 5: Implement event ownership and exact input mapping.**
-
 At the top of the callback, if `event.defaultPrevented` is already `true`, add no input and return `false`. Otherwise call the pure helper. For `"xterm"`, return `true` without event effects. For `"up"` or `"down"`, call exactly:
 
 ```ts
@@ -177,42 +193,45 @@ return false;
 
 Do not redispatch, clone, replay, or manually dispatch a wheel event. Returning `false` is the duplicate-prevention boundary for xterm’s built-in wheel path.
 
-- [ ] **Step 6: Run callback tests to verify GREEN.**
+- [ ] **Step 3: Register immediately after `xterm.open()`.**
+
+In `createTerminalRenderer`, call `xterm.open(host)`, then immediately call `registerXtermWheelFallback(runtime.meta.terminal.id, xterm)`. Keep the existing addon and renderer-binding order otherwise unchanged. This seam is the only place production code invokes registration; tests invoke the exported seam directly.
+
+- [ ] **Step 4: Add the new test file to the explicit package script.**
+
+Modify the root `package.json` `"test"` script to include `tests/xterm-wheel-fallback.test.ts`, alongside the other terminal-focused tests. The command remains the repository’s explicit `tsx --test` file list; do not rely on glob discovery.
+
+- [ ] **Step 5: Run callback assertions to verify GREEN.**
 
 Run:
 
 ```bash
-pnpm exec tsx --test tests/xterm-wheel-fallback.test.ts
+pnpm exec tsx --test tests/xterm-wheel-fallback.test.ts --test-name-pattern="callback|registration|input|mouse|scrollback|pinch|wterm"
 ```
 
 Expected: helper and callback contract tests pass.
 
-## Task 3: Cover Runtime Lifecycle And Preserved Behavior
+## Task 3: Make Runtime Lifecycle Assertions GREEN
 
 **Files:**
+- Modify: `src/terminal/terminalRuntimeStore.ts:948-999, 2015-2049, 2139-2204`
 - Modify: `tests/terminal-runtime-store.test.ts`
 - Modify: `tests/xterm-wheel-fallback.test.ts`
 - Read-only regression references: `src/canvas/XyFlowCanvas.tsx`, `src/terminal/TerminalTile.tsx`, `tests/canvas-xyflow-rewrite.test.ts`
 
-- [ ] **Step 1: Add failing lifecycle tests before changing lifecycle code.**
+- [ ] **Step 1: Implement the existing park, reattach, and disposal lifecycle against the RED tests.**
 
-Extend the existing runtime test harness to assert:
+Keep the callback attached while parking and reattaching the same xterm. Let `parkTerminalRenderer` remove only the existing renderer bindings, and let `detachTerminalRenderer` continue to call `xterm.dispose()` before nulling `runtime.xterm`. A parked or detached host must fail the live predicate without sending fallback input. Reattachment may rewire `onData` but must not attach a second custom-wheel handler.
 
-- A parked/detached host makes the live predicate fail and sends no fallback input.
-- Reattaching the same xterm instance rewires `onData` but does not attach a second custom-wheel handler.
-- Replacing the renderer creates a new xterm registration and disposes the old instance.
-- `destroyTerminalRuntime` calls `xterm.dispose()` and leaves no usable old callback/runtime path.
-- A PTY exit or runtime PTY replacement cannot send fallback input through a stale PTY; the existing `onData` callback must observe the current `runtime.ptyId`.
+- [ ] **Step 2: Verify actual renderer replacement behavior.**
 
-Run:
+Exercise eviction/disposal of the old xterm instance through the existing `detachTerminalRenderer`/`destroyTerminalRuntime` lifecycle, assert its `dispose()` call, then attach a new container so `createTerminalRenderer` creates a new xterm instance and registers exactly once on that new instance. Do not claim that a terminal renderer preference switch replaces xterm: the current `setTerminalRenderer` path changes WebGL/DOM addon state on the existing xterm.
 
-```bash
-pnpm exec tsx --test tests/terminal-runtime-store.test.ts tests/xterm-wheel-fallback.test.ts
-```
+- [ ] **Step 3: Verify the live onData bridge uses the current PTY.**
 
-Expected: the new lifecycle assertions fail before the registration and callback lifecycle integration is complete.
+Invoke the fake xterm’s captured `dataHandler`, change the runtime `ptyId`, invoke it again, and assert `window.termcanvas.terminal.input` receives the current id. A PTY exit or replacement must not route fallback input to a stale process.
 
-- [ ] **Step 2: Add preserved-behavior tests for the helper and callback.**
+- [ ] **Step 4: Verify preserved behavior and lifecycle GREEN.**
 
 Assert that:
 
@@ -222,14 +241,9 @@ Assert that:
 - `ctrlKey`/`metaKey` remains owned by the canvas pinch boundary; if a defensive callback invocation occurs, it sends no input.
 - Horizontal-only/zero-vertical wheel input sends no fallback.
 - Non-terminal wheel remains outside this xterm callback, so empty-canvas pan behavior is untouched.
+- Tile unmount and terminal destruction leave no active old xterm instance.
 
 Do not change `XyFlowCanvas.tsx`, `TerminalTile.tsx`, React Flow configuration, CSS overflow, or wterm implementation to satisfy these tests.
-
-- [ ] **Step 3: Implement only the missing lifecycle behavior.**
-
-Keep the callback attached while parking and reattaching the same xterm. Let `parkTerminalRenderer` remove only the existing renderer bindings, and let `detachTerminalRenderer` continue to call `xterm.dispose()` before nulling `runtime.xterm`. Do not store fallback ownership in a React effect and do not add a second native wheel listener.
-
-- [ ] **Step 4: Run the focused lifecycle and regression tests.**
 
 Run:
 
@@ -246,6 +260,7 @@ Expected: all focused tests pass. If an existing test fails, compare its exact f
 - Verify: `src/terminal/terminalRuntimeStore.ts`
 - Verify: `tests/xterm-wheel-fallback.test.ts`
 - Verify: `tests/terminal-runtime-store.test.ts`
+- Verify: `package.json`
 
 - [ ] **Step 1: Run the focused suite after implementation.**
 
@@ -269,7 +284,7 @@ Expected: `pnpm typecheck` and `pnpm typecheck:headless` pass. `pnpm test` must 
 
 ```bash
 git diff --check
-git diff -- src/terminal/xtermWheelFallback.ts src/terminal/terminalRuntimeStore.ts tests/xterm-wheel-fallback.test.ts tests/terminal-runtime-store.test.ts
+git diff -- src/terminal/xtermWheelFallback.ts src/terminal/terminalRuntimeStore.ts tests/xterm-wheel-fallback.test.ts tests/terminal-runtime-store.test.ts package.json
 ```
 
 Confirm the diff contains no CSS scroll workaround, PTY capture, direct PTY write, redispatch, second native wheel listener, wterm registration, or canvas behavior change.
@@ -277,11 +292,11 @@ Confirm the diff contains no CSS scroll workaround, PTY capture, direct PTY writ
 - [ ] **Step 4: Stage only the implementation work unit.**
 
 ```bash
-git add src/terminal/xtermWheelFallback.ts src/terminal/terminalRuntimeStore.ts tests/xterm-wheel-fallback.test.ts tests/terminal-runtime-store.test.ts
+git add src/terminal/xtermWheelFallback.ts src/terminal/terminalRuntimeStore.ts tests/xterm-wheel-fallback.test.ts tests/terminal-runtime-store.test.ts package.json
 git diff --cached --name-only
 ```
 
-Expected: only the four implementation/test paths are staged. Do not stage `.atl/.skill-registry.cache.json`, `.atl/skill-registry.md`, `pnpm-lock.yaml`, `.codegraph/`, or `openspec/changes/fix-opencode-canvas-scroll/`.
+Expected: only the five implementation/test/config paths are staged: `src/terminal/xtermWheelFallback.ts`, `src/terminal/terminalRuntimeStore.ts`, `tests/xterm-wheel-fallback.test.ts`, `tests/terminal-runtime-store.test.ts`, and `package.json`. Do not stage `.atl/.skill-registry.cache.json`, `.atl/skill-registry.md`, `pnpm-lock.yaml`, `.codegraph/`, or `openspec/changes/fix-opencode-canvas-scroll/`.
 
 - [ ] **Step 5: Commit the implementation work unit.**
 
@@ -289,7 +304,7 @@ Expected: only the four implementation/test paths are staged. Do not stage `.atl
 git commit -m "fix: add OpenCode TUI wheel fallback"
 ```
 
-Expected: one conventional implementation commit containing only the four intended paths.
+Expected: one conventional implementation commit containing only the five intended paths.
 
 - [ ] **Step 6: Verify the final worktree without touching unrelated changes.**
 
@@ -303,10 +318,12 @@ Expected: the implementation commit contains only its intended files, while all 
 ## Acceptance Checklist
 
 - [ ] The helper has exact OpenCode, live, alternate-buffer, attached-host, viewport, mouse-report, modifier, delta, and input-bridge predicates.
-- [ ] Failing tests were observed before each implementation slice.
+- [ ] Helper, callback, and lifecycle tests were all written and observed RED before any registration or callback implementation.
 - [ ] Registration occurs once per xterm instance after `xterm.open()`.
+- [ ] The exact exported seam is `registerXtermWheelFallback(terminalId, xterm)` and tests call it directly.
 - [ ] Eligible events call public `xterm.input(sequence, false)` exactly once with `\x1b[A` or `\x1b[B`.
 - [ ] The callback prevents/stops and returns `false`; no event is redispatched.
 - [ ] Normal scrollback, `enable-mouse-events`, wterm, pinch, canvas pan, and existing `onData` behavior remain unchanged.
-- [ ] Parking, detaching, reattachment, renderer replacement, PTY replacement/exit, disposal, and tile unmount cannot route input to stale runtime state.
+- [ ] Parking, detaching, reattachment, actual xterm replacement after eviction/disposal, PTY replacement/exit, disposal, and tile unmount cannot route input to stale runtime state.
+- [ ] `package.json` explicitly includes `tests/xterm-wheel-fallback.test.ts` in the root `pnpm test` script.
 - [ ] Focused tests, relevant suite, and typechecks are recorded with pre-existing failures separated from regressions.
