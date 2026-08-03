@@ -779,16 +779,18 @@ function XyFlowCanvasInner() {
 
       // Non-pinch wheel: this handler now owns ALL canvas pan, since
       // React Flow's panOnScroll is disabled. The single exception is
-      // when the cursor is over the xterm rendering area of a *focused*
-      // terminal — that's the only condition under which the terminal
-      // is "active" and gets to consume wheel events as scrollback.
-      // Unfocused terminals are passive elements on the canvas, like
-      // images in Figma; wheel over them pans the canvas.
+      // when the cursor is over any terminal descendant — focused or
+      // unfocused, xterm or wterm. In that case the event is allowed
+      // to bubble to the terminal engine for scrollback; the canvas
+      // does not pan.
       const target = event.target;
       if (target instanceof Element) {
-        const xtermHost = target.closest(".tc-xterm-host");
-        const tile = xtermHost?.closest("[data-handoff-terminal-id]");
-        if (tile?.getAttribute("data-focused") === "true") {
+        const isTerminalNode =
+          target.closest("[data-handoff-terminal-id]") !== null ||
+          target.closest(".react-flow__node-terminal") !== null ||
+          target.closest(".tc-wterm-host") !== null ||
+          target.closest(".tc-xterm-host") !== null;
+        if (isTerminalNode) {
           return;
         }
       }
