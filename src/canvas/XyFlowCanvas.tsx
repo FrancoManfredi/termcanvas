@@ -28,6 +28,7 @@ import { usePreferencesStore } from "../stores/preferencesStore";
 import { useTileDimensionsStore } from "../stores/tileDimensionsStore";
 import { useSidebarDragStore } from "../stores/sidebarDragStore";
 import { useNotificationStore } from "../stores/notificationStore";
+import { resolveIssueWorktree } from "./resolveIssueWorktree";
 import { useIssueStore } from "../stores/issueStore";
 import type { IssueNodeData } from "../stores/issueStore";
 import { computeIssueGridPositions } from "./issueGridLayout";
@@ -348,6 +349,10 @@ function XyFlowCanvasInner() {
   } | null>(null);
 
   const [isFetchingIssues, setIsFetchingIssues] = useState(false);
+  const [resolvingIssueNumber, setResolvingIssueNumber] = useState<
+    number | null
+  >(null);
+  const isResolving = resolvingIssueNumber !== null;
 
   const [issueContextMenu, setIssueContextMenu] = useState<{
     clientX: number;
@@ -1050,8 +1055,9 @@ function XyFlowCanvasInner() {
           y={issueContextMenu.clientY}
           items={[
             {
-              label: "RESOLVER ISSUE",
+              label: isResolving ? "Resolviendo issue..." : "RESOLVER ISSUE",
               onClick: () => {
+                if (isResolving) return;
                 const target = resolveContextMenuTarget();
                 if (!target) return;
                 const issueStore = useIssueStore.getState();
@@ -1069,19 +1075,26 @@ function XyFlowCanvasInner() {
                 const stored = usePreferencesStore.getState().defaultTerminalSize;
                 const tileW = stored?.w ?? useTileDimensionsStore.getState().w;
                 flowCenter = { x: flowCenter.x - tileW / 2, y: flowCenter.y };
-                const terminal = createTerminalInScene({
-                  projectId: target.projectId,
-                  worktreeId: target.worktreeId,
-                  type: "opencode",
-                  title: `Issue #${issue.issueNumber}`,
-                  initialPrompt: `Resolvé el issue #${issue.issueNumber} — ${issue.title} — usando SDD con el pipeline completo y estricto. | PRECONDICIONES (ya definidas, no preguntes): Ejecución auto, gatekeeper entre fases, no pausar salvo problema real. Artefactos: openspec y engram, ambos. PRs: auto-chain. Presupuesto de review: 800 líneas. PRs encadenados: stacked-to-main. | ALCANCE: el issue aprobado es el contrato, no agregues requisitos fuera de su scope, no inventes features, no te saltes no-goals. | BODY ORIGINAL DEL ISSUE: ${(issue.body ?? "").replace(/\n/g, " ")} | PIPELINE (todas las fases en orden, sin omitir ninguna, sin pausar entre fases): sdd-new (explore + propose) -> spec -> design -> tasks -> apply -> verify -> archive. | RESTRICCIONES: work-unit commits con conventional commits (type(scope): desc), shellcheck en todo script modificado, sin Co-Authored-By ni atribuciones AI, actualizar docs si cambia el comportamiento. | GESTIÓN DEL ISSUE: NO cierres el issue manualmente, el cierre ocurre automático al mergear el PR vía "Closes #${issue.issueNumber}". Podés comentar avances con gh issue comment, no es obligatorio. No modifiques relaciones blocked-by/blocking/parent sin comentarlo primero. | ENTREGA FINAL: después de verify creá el PR con la skill branch-pr, branch type/descripcion, body con "Closes #${issue.issueNumber}", un solo label type:*, esperar checks automatizados. | AL TERMINAR RESUMÍ: 1) qué se implementó por fase, 2) evidencia de verify, 3) URL del PR.`,
-                  autoApprove: true,
+                const initialPrompt = `Resolvé el issue #${issue.issueNumber} — ${issue.title} — usando SDD con el pipeline completo y estricto. | PRECONDICIONES (ya definidas, no preguntes): Ejecución auto, gatekeeper entre fases, no pausar salvo problema real. Artefactos: openspec y engram, ambos. PRs: auto-chain. Presupuesto de review: 800 líneas. PRs encadenados: stacked-to-main. | ALCANCE: el issue aprobado es el contrato, no agregues requisitos fuera de su scope, no inventes features, no te saltes no-goals. | BODY ORIGINAL DEL ISSUE: ${(issue.body ?? "").replace(/\n/g, " ")} | PIPELINE (todas las fases en orden, sin omitir ninguna, sin pausar entre fases): sdd-new (explore + propose) -> spec -> design -> tasks -> apply -> verify -> archive. | RESTRICCIONES: work-unit commits con conventional commits (type(scope): desc), shellcheck en todo script modificado, sin Co-Authored-By ni atribuciones AI, actualizar docs si cambia el comportamiento. | GESTIÓN DEL ISSUE: NO cierres el issue manualmente, el cierre ocurre automático al mergear el PR vía "Closes #${issue.issueNumber}". Podés comentar avances con gh issue comment, no es obligatorio. No modifiques relaciones blocked-by/blocking/parent sin comentarlo primero. | ENTREGA FINAL: después de verify creá el PR con la skill branch-pr, branch type/descripcion, body con "Closes #${issue.issueNumber}", un solo label type:*, esperar checks automatizados. | AL TERMINAR RESUMÍ: 1) qué se implementó por fase, 2) evidencia de verify, 3) URL del PR.`;
+                setResolvingIssueNumber(issue.issueNumber);
+                void resolveIssueWorktree({
+                  issue,
+                  target,
+                  createWorktree: (repoPath, branch) =>
+                    window.termcanvas.project.createWorktree(repoPath, branch),
+                  projectLookup: useProjectStore.getState(),
+                  syncWorktrees: (projectPath, worktrees) =>
+                    useProjectStore.getState().syncWorktrees(projectPath, worktrees),
+                  createTerminal: createTerminalInScene,
+                  notify: (type, message) =>
+                    useNotificationStore.getState().notify(type, message),
+                  setResolveArrows,
+                  issueNodeId,
                   position: flowCenter,
+                  initialPrompt,
+                }).finally(() => {
+                  setResolvingIssueNumber(null);
                 });
-                setResolveArrows((prev) => [
-                  ...prev,
-                  { issueId: issueNodeId, terminalId: terminal.id },
-                ]);
               },
             },
           ]}
