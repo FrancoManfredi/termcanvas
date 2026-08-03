@@ -2,8 +2,25 @@ import { useCallback, useState } from "react";
 import type { Node, NodeProps } from "@xyflow/react";
 import type { IssueNodeData } from "../stores/issueStore";
 import { useIssueStore } from "../stores/issueStore";
+import { renderMarkdown } from "../utils/markdownClass";
 
 type IssueFlowNode = Node<IssueNodeData, "issue">;
+
+// Scoped to the issue card's always-dark GitHub palette (the card never
+// follows the app theme). markdownClassName uses theme CSS variables, so it
+// would be unreadable here in light mode.
+const issueMarkdownClass =
+  "text-[#e6edf3] text-sm leading-snug break-words " +
+  "[&_h1]:text-[15px] [&_h1]:font-semibold [&_h1]:mt-3 [&_h1]:mb-1.5 [&_h1]:break-words " +
+  "[&_h2]:text-[14px] [&_h2]:font-semibold [&_h2]:mt-3 [&_h2]:mb-1 [&_h2]:break-words " +
+  "[&_h3]:text-[13px] [&_h3]:font-semibold [&_h3]:mt-2 [&_h3]:mb-1 [&_h3]:break-words " +
+  "[&_p]:my-1.5 [&_p]:break-words [&_ul]:pl-4 [&_ol]:pl-4 [&_li]:my-0.5 [&_li]:break-words " +
+  "[&_a]:text-[#58a6ff] [&_a]:no-underline [&_a]:hover:underline [&_a]:break-all " +
+  "[&_code]:text-[#e6edf3] [&_code]:bg-[#161b22] [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:text-[12px] [&_code]:break-words " +
+  "[&_pre]:bg-[#161b22] [&_pre]:rounded-md [&_pre]:p-2.5 [&_pre]:text-[12px] [&_pre]:overflow-x-auto [&_pre]:min-w-0 " +
+  "[&_pre_code]:bg-transparent [&_pre_code]:p-0 " +
+  "[&_blockquote]:border-l-2 [&_blockquote]:border-[#30363d] [&_blockquote]:pl-3 [&_blockquote]:text-[#8b949e] " +
+  "[&_hr]:border-[#30363d] [&_img]:max-w-full [&_img]:h-auto [&_img]:rounded-md [&_img]:my-2";
 
 // ── helpers ──
 
@@ -156,7 +173,10 @@ export function IssueNode({ data }: NodeProps<IssueFlowNode>) {
             {/* Body */}
             <div className="p-4 flex-1 overflow-auto">
               {body ? (
-                <div className="text-[#e6edf3] text-sm" style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{body}</div>
+                <div
+                  className={issueMarkdownClass}
+                  dangerouslySetInnerHTML={{ __html: renderMarkdown(body) }}
+                />
               ) : (
                 <p className="text-[#8b949e] italic text-sm">No description provided.</p>
               )}

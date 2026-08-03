@@ -28,6 +28,7 @@ import { usePreferencesStore } from "../stores/preferencesStore";
 import { useTileDimensionsStore } from "../stores/tileDimensionsStore";
 import { useSidebarDragStore } from "../stores/sidebarDragStore";
 import { useNotificationStore } from "../stores/notificationStore";
+import { resolveIssueWorktree } from "./resolveIssueWorktree";
 import { useIssueStore } from "../stores/issueStore";
 import type { IssueNodeData } from "../stores/issueStore";
 import { computeIssueGridPositions } from "./issueGridLayout";
@@ -348,6 +349,10 @@ function XyFlowCanvasInner() {
   } | null>(null);
 
   const [isFetchingIssues, setIsFetchingIssues] = useState(false);
+  const [resolvingIssueNumber, setResolvingIssueNumber] = useState<
+    number | null
+  >(null);
+  const isResolving = resolvingIssueNumber !== null;
 
   const [issueContextMenu, setIssueContextMenu] = useState<{
     clientX: number;
@@ -779,19 +784,45 @@ function XyFlowCanvasInner() {
 
       // Non-pinch wheel: this handler now owns ALL canvas pan, since
       // React Flow's panOnScroll is disabled. The single exception is
-      // when the cursor is over the xterm rendering area of a *focused*
-      // terminal — that's the only condition under which the terminal
-      // is "active" and gets to consume wheel events as scrollback.
-      // Unfocused terminals are passive elements on the canvas, like
-      // images in Figma; wheel over them pans the canvas.
+      // when the cursor is over any terminal descendant — focused or
+      // unfocused, xterm or wterm. In that case the event is allowed
+      // to bubble to the terminal engine for scrollback; the canvas
+      // does not pan.
       const target = event.target;
+
+      // XXX: debug — log EVERY wheel event unconditionally so we can
+      // diagnose why terminals don't receive scroll. Remove after fix
+      // is confirmed. Use window.__TC_DEBUG_WHEEL__ = 1 to mute after
+      // initial diagnosis (set to 0 or delete to re-enable).
+      const DEBUG_MUTED = (window as any).__TC_DEBUG_WHEEL__ === 1;
+      if (!DEBUG_MUTED) {
+        const targetTag = target instanceof Element ? target.tagName : String(target);
+        const targetClass = target instanceof Element ? (target as Element).className : "";
+        const hitHandoff = target instanceof Element ? target.closest("[data-handoff-terminal-id]") !== null : false;
+        const hitRfNode = target instanceof Element ? target.closest(".react-flow__node-terminal") !== null : false;
+        const hitWterm = target instanceof Element ? target.closest(".tc-wterm-host") !== null : false;
+        const hitXterm = target instanceof Element ? target.closest(".tc-xterm-host") !== null : false;
+        console.log(
+          "%c[tc:wheel]%c target=%c%s.%s%c | rf-node=%s | handoff=%s | xterm=%s | wterm=%s",
+          "color:#58a6ff;font-weight:bold", "",
+          "color:#f0c040", targetTag, targetClass, "",
+          hitRfNode, hitHandoff, hitXterm, hitWterm,
+        );
+      }
+
       if (target instanceof Element) {
-        const xtermHost = target.closest(".tc-xterm-host");
-        const tile = xtermHost?.closest("[data-handoff-terminal-id]");
-        if (tile?.getAttribute("data-focused") === "true") {
+        const isTerminalNode =
+          target.closest("[data-handoff-terminal-id]") !== null ||
+          target.closest(".react-flow__node-terminal") !== null ||
+          target.closest(".tc-wterm-host") !== null ||
+          target.closest(".tc-xterm-host") !== null;
+        if (isTerminalNode) {
+          if (!DEBUG_MUTED) console.log("%c[tc:wheel]%c → PASSTHROUGH to terminal", "color:#58a6ff;font-weight:bold", "");
           return;
         }
       }
+
+      if (!DEBUG_MUTED) console.log("%c[tc:wheel]%c → canvas pan (dx=%s, dy=%s)", "color:#58a6ff;font-weight:bold", "", event.deltaX.toFixed(1), event.deltaY.toFixed(1));
 
       event.preventDefault();
       event.stopPropagation();
@@ -834,6 +865,40 @@ function XyFlowCanvasInner() {
       window.removeEventListener("blur", stop);
     };
   }, [isPanning]);
+
+  // XXX: debug — native DOM wheel listener on the outer canvas
+  // container. This runs independently of React's synthetic events
+  // and confirms whether native wheel events reach this div at all.
+  // Remove after the terminal scroll fix is confirmed.
+  useEffect(() => {
+    const el = canvasContainerRef.current;
+    if (!el) return;
+    let nativeCount = 0;
+    const onNativeWheel = (e: WheelEvent) => {
+      nativeCount++;
+      // Log first 5 events, then every 50th
+      if (nativeCount <= 5 || nativeCount % 50 === 0) {
+        console.log(
+          "%c[tc:wheel:native]%c #%d phase=%s target=%s.%s | dx=%s dy=%s ctrl=%s",
+          "color:#ff6b6b;font-weight:bold", "",
+          nativeCount,
+          e.eventPhase === 1 ? "CAPTURE" : e.eventPhase === 2 ? "TARGET" : "BUBBLE",
+          (e.target as Element).tagName ?? "?",
+          (e.target as Element).className ?? "",
+          e.deltaX.toFixed(1), e.deltaY.toFixed(1),
+          e.ctrlKey || e.metaKey,
+        );
+      }
+      if (nativeCount === 5) {
+        console.log(
+          "%c[tc:wheel:native]%c suppressing further per-event logs (logging every 50th)",
+          "color:#ff6b6b;font-weight:bold", "",
+        );
+      }
+    };
+    el.addEventListener("wheel", onNativeWheel, true); // capture phase
+    return () => el.removeEventListener("wheel", onNativeWheel, true);
+  }, []);
 
   // isPanning takes precedence over isPanMode for the cursor: if the
   // user holds Space, presses the mouse, then releases Space before
@@ -1050,8 +1115,9 @@ function XyFlowCanvasInner() {
           y={issueContextMenu.clientY}
           items={[
             {
-              label: "RESOLVER ISSUE",
+              label: isResolving ? "Resolviendo issue..." : "RESOLVER ISSUE",
               onClick: () => {
+                if (isResolving) return;
                 const target = resolveContextMenuTarget();
                 if (!target) return;
                 const issueStore = useIssueStore.getState();
@@ -1069,19 +1135,26 @@ function XyFlowCanvasInner() {
                 const stored = usePreferencesStore.getState().defaultTerminalSize;
                 const tileW = stored?.w ?? useTileDimensionsStore.getState().w;
                 flowCenter = { x: flowCenter.x - tileW / 2, y: flowCenter.y };
-                const terminal = createTerminalInScene({
-                  projectId: target.projectId,
-                  worktreeId: target.worktreeId,
-                  type: "opencode",
-                  title: `Issue #${issue.issueNumber}`,
-                  initialPrompt: `Resolvé el issue #${issue.issueNumber} — ${issue.title} — usando SDD con el pipeline completo y estricto. | PRECONDICIONES (ya definidas, no preguntes): Ejecución auto, gatekeeper entre fases, no pausar salvo problema real. Artefactos: openspec y engram, ambos. PRs: auto-chain. Presupuesto de review: 800 líneas. PRs encadenados: stacked-to-main. | ALCANCE: el issue aprobado es el contrato, no agregues requisitos fuera de su scope, no inventes features, no te saltes no-goals. | BODY ORIGINAL DEL ISSUE: ${(issue.body ?? "").replace(/\n/g, " ")} | PIPELINE (todas las fases en orden, sin omitir ninguna, sin pausar entre fases): sdd-new (explore + propose) -> spec -> design -> tasks -> apply -> verify -> archive. | RESTRICCIONES: work-unit commits con conventional commits (type(scope): desc), shellcheck en todo script modificado, sin Co-Authored-By ni atribuciones AI, actualizar docs si cambia el comportamiento. | GESTIÓN DEL ISSUE: NO cierres el issue manualmente, el cierre ocurre automático al mergear el PR vía "Closes #${issue.issueNumber}". Podés comentar avances con gh issue comment, no es obligatorio. No modifiques relaciones blocked-by/blocking/parent sin comentarlo primero. | ENTREGA FINAL: después de verify creá el PR con la skill branch-pr, branch type/descripcion, body con "Closes #${issue.issueNumber}", un solo label type:*, esperar checks automatizados. | AL TERMINAR RESUMÍ: 1) qué se implementó por fase, 2) evidencia de verify, 3) URL del PR.`,
-                  autoApprove: true,
+                const initialPrompt = `Resolvé el issue #${issue.issueNumber} — ${issue.title} — usando SDD con el pipeline completo y estricto. | PRECONDICIONES (ya definidas, no preguntes): Ejecución auto, gatekeeper entre fases, no pausar salvo problema real. Artefactos: openspec y engram, ambos. PRs: auto-chain. Presupuesto de review: 800 líneas. PRs encadenados: stacked-to-main. | ALCANCE: el issue aprobado es el contrato, no agregues requisitos fuera de su scope, no inventes features, no te saltes no-goals. | BODY ORIGINAL DEL ISSUE: ${(issue.body ?? "").replace(/\n/g, " ")} | PIPELINE (todas las fases en orden, sin omitir ninguna, sin pausar entre fases): sdd-new (explore + propose) -> spec -> design -> tasks -> apply -> verify -> archive. | RESTRICCIONES: work-unit commits con conventional commits (type(scope): desc), shellcheck en todo script modificado, sin Co-Authored-By ni atribuciones AI, actualizar docs si cambia el comportamiento. | LOGGING PARA DEBUG MANUAL: Como el usuario va a probar manualmente el resultado antes de que se archive el cambio, agregá logging generoso y descriptivo en el código que toques — no solo para vos, para que un humano pueda ver en la consola exactamente qué está pasando paso a paso al usar la feature/fix en vivo: logueá con un prefijo identificable, ej: [fix-<nombre-del-change>] o [feature-<nombre>], para poder filtrarlos fácil en devtools. Logueá en los puntos de decisión clave (ej: "¿se detectó el target correcto?", "¿el evento se está bloqueando o dejando pasar?"), no solo al principio/final de una función. Si el fix depende de una condición (ej: un selector de DOM, un estado de store), logueá el valor real evaluado en cada intento, no solo "true/false" — mostrá el dato concreto que se comparó. Estos logs pueden quedar en el código final (no los borres antes de archivar) — el usuario los va a usar para reportar bugs con evidencia concreta en vez de descripciones vagas. Si en el futuro se decide sacarlos, será un cambio aparte. | GESTIÓN DEL ISSUE: NO cierres el issue manualmente, el cierre ocurre automático al mergear el PR vía "Closes #${issue.issueNumber}". Podés comentar avances con gh issue comment, no es obligatorio. No modifiques relaciones blocked-by/blocking/parent sin comentarlo primero. | ENTREGA FINAL: después de verify creá el PR con la skill branch-pr, branch type/descripcion, body con "Closes #${issue.issueNumber}", un solo label type:*, esperar checks automatizados. | AL TERMINAR RESUMÍ: 1) qué se implementó por fase, 2) evidencia de verify, 3) URL del PR.`;
+                setResolvingIssueNumber(issue.issueNumber);
+                void resolveIssueWorktree({
+                  issue,
+                  target,
+                  createWorktree: (repoPath, branch) =>
+                    window.termcanvas.project.createWorktree(repoPath, branch),
+                  projectLookup: useProjectStore.getState(),
+                  syncWorktrees: (projectPath, worktrees) =>
+                    useProjectStore.getState().syncWorktrees(projectPath, worktrees),
+                  createTerminal: createTerminalInScene,
+                  notify: (type, message) =>
+                    useNotificationStore.getState().notify(type, message),
+                  setResolveArrows,
+                  issueNodeId,
                   position: flowCenter,
+                  initialPrompt,
+                }).finally(() => {
+                  setResolvingIssueNumber(null);
                 });
-                setResolveArrows((prev) => [
-                  ...prev,
-                  { issueId: issueNodeId, terminalId: terminal.id },
-                ]);
               },
             },
           ]}

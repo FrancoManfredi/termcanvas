@@ -117,6 +117,7 @@ function createFakeContainer() {
 function createMockXterm() {
   const stats = {
     blurCalls: 0,
+    dataHandler: null as ((data: string) => void) | null,
     disposeCalls: 0,
     fitCalls: 0,
     focusCalls: 0,
@@ -128,6 +129,9 @@ function createMockXterm() {
     selectionBindingDisposeCalls: 0,
     selectionPointerCleanupCalls: 0,
     selectionSubscriptions: 0,
+    wheelListener: null as ((event: WheelEvent) => void) | null,
+    wheelRegistrationCalls: 0,
+    wheelRemovalCalls: 0,
   };
 
   const xterm = {
@@ -149,9 +153,34 @@ function createMockXterm() {
     loadAddon() {
       stats.loadAddonCalls += 1;
     },
-    onData() {
+    element: {
+      classList: {
+        contains() {
+          return false;
+        },
+      },
+      querySelector() {
+        return null;
+      },
+      addEventListener(_type: string, listener: (event: WheelEvent) => void) {
+        stats.wheelListener = listener;
+        stats.wheelRegistrationCalls += 1;
+      },
+      removeEventListener(_type: string, listener: (event: WheelEvent) => void) {
+        assert.equal(stats.wheelListener, listener);
+        stats.wheelListener = null;
+        stats.wheelRemovalCalls += 1;
+      },
+    },
+    open() {},
+    attachCustomWheelEventHandler() {
+      throw new Error("custom xterm wheel handler must not be used");
+    },
+    onData(listener: (data: string) => void) {
+      stats.dataHandler = listener;
       return {
         dispose() {
+          stats.dataHandler = null;
           stats.inputBindingDisposeCalls += 1;
         },
       };
@@ -325,12 +354,14 @@ test("parked runtimes keep the live xterm, dispose live bindings, reuse the host
     detachTerminalContainer,
     ensureTerminalRuntime,
     getTerminalRuntime,
+    registerXtermWheelFallback,
     serializeAllTerminalRuntimeBuffers,
     setTerminalRuntimeMode,
     useTerminalRuntimeStore,
   } = await import("../src/terminal/terminalRuntimeStore.ts");
   const previousState = useProjectStore.getState();
   const resizeCalls: Array<{ cols: number; ptyId: number; rows: number }> = [];
+  const inputCalls: Array<{ data: string; ptyId: number }> = [];
 
   destroyAllTerminalRuntimes();
 
@@ -347,7 +378,9 @@ test("parked runtimes keep the live xterm, dispose live bindings, reuse the host
     mockWindow.termcanvas = {
       terminal: {
         destroy: async () => {},
-        input() {},
+        input(ptyId: number, data: string) {
+          inputCalls.push({ data, ptyId });
+        },
         resize(ptyId: number, cols: number, rows: number) {
           resizeCalls.push({ cols, ptyId, rows });
         },
@@ -402,6 +435,12 @@ test("parked runtimes keep the live xterm, dispose live bindings, reuse the host
       runtime.xterm as NonNullable<typeof runtime.xterm>,
       serializeAddon as NonNullable<typeof runtime.serializeAddon>,
     );
+    const removeWheelFallback = registerXtermWheelFallback(
+      "terminal-1",
+      runtime.xterm as NonNullable<typeof runtime.xterm>,
+    );
+    runtime.globalDisposers.push(removeWheelFallback);
+    assert.equal(stats.wheelRegistrationCalls, 1);
 
     setTerminalRuntimeMode("terminal-1", "parked");
 
@@ -435,6 +474,12 @@ test("parked runtimes keep the live xterm, dispose live bindings, reuse the host
       rows: 24,
     });
 
+    assert.ok(stats.dataHandler);
+    runtime.ptyId = 99;
+    stats.dataHandler?.("current input");
+    assert.deepEqual(inputCalls, [{ data: "current input", ptyId: 99 }]);
+    assert.equal(stats.wheelRegistrationCalls, 1);
+
     detachTerminalContainer("terminal-1");
     assert.equal(host.parentElement, null);
 
@@ -444,6 +489,7 @@ test("parked runtimes keep the live xterm, dispose live bindings, reuse the host
     assert.equal(stats.disposeCalls, 1);
     assert.equal(host.parentElement, null);
     assert.equal(runtime.hostElement, null);
+    assert.equal(stats.wheelRemovalCalls, 1);
   } finally {
     destroyAllTerminalRuntimes();
     useProjectStore.setState(previousState);
