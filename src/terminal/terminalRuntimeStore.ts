@@ -44,7 +44,11 @@ import { useQuotaStore } from "../stores/quotaStore";
 import { useCodexQuotaStore } from "../stores/codexQuotaStore";
 import { useThemeStore, XTERM_THEMES } from "../stores/themeStore";
 import type { TerminalData, TerminalStatus, TerminalType } from "../types";
-import { getTerminalLaunchOptions, getTerminalPromptArgs } from "./cliConfig";
+import {
+  getTerminalLaunchOptions,
+  getTerminalPromptArgs,
+  getTerminalPromptOnResume,
+} from "./cliConfig";
 import { buildFontFamily } from "./fontRegistry";
 import { useLocaleStore } from "../stores/localeStore";
 import { isRegisteredAppShortcutEvent } from "../stores/shortcutStore";
@@ -1650,7 +1654,9 @@ async function spawnPty(
 
   if (launch) {
     const promptArgs =
-      !resumeSessionId && runtime.meta.terminal.initialPrompt
+      runtime.meta.terminal.initialPrompt &&
+      (!resumeSessionId ||
+        getTerminalPromptOnResume(runtime.meta.terminal.type))
         ? getTerminalPromptArgs(
             runtime.meta.terminal.type,
             runtime.meta.terminal.initialPrompt,

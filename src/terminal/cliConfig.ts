@@ -15,6 +15,13 @@ interface TerminalLaunchConfig {
   newArgs: () => string[];
   autoApproveArgs?: () => string[];
   promptArgs?: (prompt: string) => string[];
+  /**
+   * Whether the CLI accepts a prompt alongside a resumed session id
+   * (e.g. `opencode -s <id> --prompt <text>` pre-fills and auto-submits a
+   * message into the resumed session). When false (default), resuming a
+   * session drops any pending initial prompt.
+   */
+  promptOnResume?: boolean;
 }
 
 export interface ComposerAdapterConfig {
@@ -163,6 +170,7 @@ export const TERMINAL_CONFIG: Record<TerminalType, TerminalAdapterConfig> = {
       newArgs: () => [],
       promptArgs: (prompt) => ["--prompt", prompt],
       autoApproveArgs: () => ["--auto"],
+      promptOnResume: true,
     },
     composer: {
       supportsComposer: true,
@@ -262,6 +270,10 @@ export function getTerminalPromptArgs(
   const config = TERMINAL_CONFIG[type].launch;
   if (!config) return [prompt];
   return config.promptArgs ? config.promptArgs(prompt) : [prompt];
+}
+
+export function getTerminalPromptOnResume(type: TerminalType): boolean {
+  return TERMINAL_CONFIG[type].launch?.promptOnResume ?? false;
 }
 
 export function getComposerAdapter(

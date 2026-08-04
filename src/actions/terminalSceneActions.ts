@@ -8,6 +8,7 @@ import {
   useProjectStore,
 } from "../stores/projectStore";
 import { destroyTerminalRuntime } from "../terminal/terminalRuntimeStore";
+import { useTerminalRuntimeStateStore } from "../stores/terminalRuntimeStateStore";
 import { recordRenderDiagnostic } from "../terminal/renderDiagnostics";
 import { pickPlacement } from "../canvas/terminalPlacement";
 import { useCanvasStore } from "../stores/canvasStore";
@@ -25,6 +26,7 @@ interface CreateTerminalInSceneOptions {
   origin?: TerminalOrigin;
   parentTerminalId?: string;
   position?: { x: number; y: number };
+  issueNumber?: number;
 }
 
 interface WorktreeGroupMovePreview {
@@ -115,6 +117,7 @@ export function createTerminalInScene({
   origin = "user",
   parentTerminalId,
   position,
+  issueNumber,
 }: CreateTerminalInSceneOptions): TerminalData {
   const baseTerminal =
     terminal ??
@@ -158,6 +161,7 @@ export function createTerminalInScene({
     ...baseTerminal,
     x: placement.x,
     y: placement.y,
+    ...(issueNumber !== undefined ? { issueNumber } : {}),
   };
 
   // Apply collision-resolved nudges to existing tiles.
@@ -178,6 +182,61 @@ export function createTerminalInScene({
   }
 
   return addTerminalToScene(projectId, worktreeId, placedTerminal);
+}
+
+/**
+ * Reuse an existing (dead or demoted) terminal tile for an issue session.
+ *
+ * Resets the tile back to an opencode terminal armed with the resume prompt,
+ * kills any leftover shell PTY so the runtime re-spawns opencode on focus, and
+ * focuses the tile.
+ */
+export async function reuseTerminalForIssue(input: {
+  projectId: string;
+  worktreeId: string;
+  terminalId: string;
+  resumePrompt: string;
+}): Promise<void> {
+  const store = useProjectStore.getState();
+
+  // Recover the previous opencode session in this issue's worktree so the
+  // respawned CLI resumes (`-s <id>`) instead of opening a fresh conversation.
+  // When a CLI process exits the runtime demotes the tile and clears the
+  // persisted sessionId, so we re-look it up from the opencode DB by cwd.
+  const worktree = store.projects
+    .find((project) => project.id === input.projectId)
+    ?.worktrees.find((candidate) => candidate.id === input.worktreeId);
+  if (worktree?.path && window.termcanvas?.session) {
+    try {
+      const found = await window.termcanvas.session.findOpenCode(worktree.path);
+      if (found?.sessionId) {
+        store.setTerminalSessionId(
+          input.projectId,
+          input.worktreeId,
+          input.terminalId,
+          found.sessionId,
+        );
+      }
+    } catch (error) {
+      console.error("[reuseTerminalForIssue] failed to resolve opencode session:", error);
+    }
+  }
+
+  store.updateTerminalType(input.projectId, input.worktreeId, input.terminalId, "opencode");
+  store.updateTerminalInitialPrompt(
+    input.projectId,
+    input.worktreeId,
+    input.terminalId,
+    input.resumePrompt,
+  );
+  destroyTerminalRuntime(input.terminalId, {
+    caller: "reuseTerminalForIssue",
+    reason: "resume_issue_session",
+  });
+  // Drop any stale runtime overlay (e.g. the `sessionId: undefined` written on
+  // demotion) so the re-created runtime resolves the persisted sessionId.
+  useTerminalRuntimeStateStore.getState().clearTerminal(input.terminalId);
+  focusTerminalInScene(input.terminalId);
 }
 
 export function focusTerminalInScene(

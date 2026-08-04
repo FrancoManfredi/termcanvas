@@ -5,6 +5,7 @@ import {
   getComposerAdapter,
   getTerminalLaunchOptions,
   getTerminalPromptArgs,
+  getTerminalPromptOnResume,
   isComposerSupportedTerminal,
 } from "../src/terminal/cliConfig.ts";
 
@@ -112,4 +113,21 @@ test("getTerminalPromptArgs uses kimi's explicit prompt flag", () => {
     "--prompt",
     "Explore the repo",
   ]);
+});
+
+test("opencode resumes with -s and accepts a prompt alongside the resumed session", () => {
+  const launch = getTerminalLaunchOptions("opencode", "session-42", true);
+  assert.ok(launch);
+  assert.deepEqual(launch.args, ["--auto", "-s", "session-42"]);
+  assert.deepEqual(getTerminalPromptArgs("opencode", "Continue the work"), [
+    "--prompt",
+    "Continue the work",
+  ]);
+  assert.equal(getTerminalPromptOnResume("opencode"), true);
+});
+
+test("claude and codex do not pass a prompt when resuming a session", () => {
+  assert.equal(getTerminalPromptOnResume("claude"), false);
+  assert.equal(getTerminalPromptOnResume("codex"), false);
+  assert.equal(getTerminalPromptOnResume("shell"), false);
 });

@@ -336,6 +336,161 @@ test("commitWorktreeGroupMove keeps rigid preview positions even when they overl
     useProjectStore.setState(previousState);
   }
 });
+test("reuseTerminalForIssue recovers the prior opencode session and persists it", async () => {
+  const mockWindow = installActionGlobals();
+  const { useProjectStore } = await import("../src/stores/projectStore.ts");
+  const { useTerminalRuntimeStateStore } = await import(
+    "../src/stores/terminalRuntimeStateStore.ts"
+  );
+  const { reuseTerminalForIssue } = await import(
+    "../src/actions/terminalSceneActions.ts"
+  );
+  const previousState = useProjectStore.getState();
+
+  try {
+    useProjectStore.setState({
+      focusedProjectId: "project-1",
+      focusedWorktreeId: "worktree-1",
+      projects: [
+        {
+          id: "project-1",
+          name: "Project One",
+          path: "/tmp/project-1",
+          position: { x: 0, y: 0 },
+          collapsed: false,
+          zIndex: 0,
+          worktrees: [
+            {
+              id: "worktree-1",
+              name: "issue-42",
+              path: "/tmp/project-1-issue-42",
+              position: { x: 0, y: 0 },
+              collapsed: false,
+              terminals: [
+                {
+                  id: "terminal-1",
+                  title: "Issue #42",
+                  type: "shell",
+                  issueNumber: 42,
+                  minimized: false,
+                  focused: false,
+                  ptyId: 7,
+                  status: "running",
+                  span: { cols: 1, rows: 1 },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    mockWindow.termcanvas = {
+      session: {
+        findOpenCode: async (cwd: string) => ({
+          sessionId: cwd === "/tmp/project-1-issue-42" ? "ses_old" : "ses_wrong",
+          filePath: "/tmp/opencode.db",
+          confidence: "weak",
+        }),
+      },
+    };
+
+    await reuseTerminalForIssue({
+      projectId: "project-1",
+      worktreeId: "worktree-1",
+      terminalId: "terminal-1",
+      resumePrompt: "Continua con el issue",
+    });
+
+    const terminal =
+      useProjectStore.getState().projects[0].worktrees[0].terminals[0];
+    assert.equal(terminal.type, "opencode");
+    assert.equal(terminal.sessionId, "ses_old");
+    assert.equal(terminal.initialPrompt, "Continua con el issue");
+    assert.equal(terminal.focused, true);
+    assert.equal(
+      useTerminalRuntimeStateStore.getState().terminals["terminal-1"],
+      undefined,
+    );
+  } finally {
+    useTerminalRuntimeStateStore.getState().reset();
+    useProjectStore.setState(previousState);
+  }
+});
+
+test("reuseTerminalForIssue falls back to a fresh session when none is recovered", async () => {
+  const mockWindow = installActionGlobals();
+  const { useProjectStore } = await import("../src/stores/projectStore.ts");
+  const { useTerminalRuntimeStateStore } = await import(
+    "../src/stores/terminalRuntimeStateStore.ts"
+  );
+  const { reuseTerminalForIssue } = await import(
+    "../src/actions/terminalSceneActions.ts"
+  );
+  const previousState = useProjectStore.getState();
+
+  try {
+    useProjectStore.setState({
+      focusedProjectId: "project-1",
+      focusedWorktreeId: "worktree-1",
+      projects: [
+        {
+          id: "project-1",
+          name: "Project One",
+          path: "/tmp/project-1",
+          position: { x: 0, y: 0 },
+          collapsed: false,
+          zIndex: 0,
+          worktrees: [
+            {
+              id: "worktree-1",
+              name: "issue-42",
+              path: "/tmp/project-1-issue-42",
+              position: { x: 0, y: 0 },
+              collapsed: false,
+              terminals: [
+                {
+                  id: "terminal-1",
+                  title: "Issue #42",
+                  type: "shell",
+                  issueNumber: 42,
+                  minimized: false,
+                  focused: false,
+                  ptyId: 7,
+                  status: "running",
+                  span: { cols: 1, rows: 1 },
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    mockWindow.termcanvas = {
+      session: {
+        findOpenCode: async () => null,
+      },
+    };
+
+    await reuseTerminalForIssue({
+      projectId: "project-1",
+      worktreeId: "worktree-1",
+      terminalId: "terminal-1",
+      resumePrompt: "Continua con el issue",
+    });
+
+    const terminal =
+      useProjectStore.getState().projects[0].worktrees[0].terminals[0];
+    assert.equal(terminal.type, "opencode");
+    assert.equal(terminal.sessionId, undefined);
+    assert.equal(terminal.initialPrompt, "Continua con el issue");
+  } finally {
+    useTerminalRuntimeStateStore.getState().reset();
+    useProjectStore.setState(previousState);
+  }
+});
+
 test("closeTerminalInScene destroys runtime and removes the terminal from the scene", async () => {
   const mockWindow = installActionGlobals();
   const { useProjectStore } = await import("../src/stores/projectStore.ts");

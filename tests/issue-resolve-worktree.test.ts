@@ -84,7 +84,7 @@ test("resolveIssueWorktree: happy path creates worktree and terminal", async () 
       ];
     },
     createTerminal: (opts) => {
-      terminalCalls.push({ worktreeId: opts.worktreeId });
+      terminalCalls.push({ worktreeId: opts.worktreeId, issueNumber: opts.issueNumber });
       return { id: "term-1" };
     },
     notify: (type, message) => notifications.push({ type, message }),
@@ -103,6 +103,8 @@ test("resolveIssueWorktree: happy path creates worktree and terminal", async () 
   assert.equal(createWorktreeCalls[0], "issue-42-fix-login-bug");
   assert.equal(terminalCalls.length, 1);
   assert.equal(terminalCalls[0].worktreeId, "w2");
+  assert.equal(terminalCalls[0].issueNumber, 42, "terminal should carry issueNumber metadata");
+  assert.equal(result.case, "created");
   assert.equal(notifications.length, 0);
   assert.equal(arrows.length, 1);
   assert.equal(arrows[0].issueId, "issue-42");
@@ -262,4 +264,249 @@ test("resolveIssueWorktree: createWorktree exception is caught and toasted", asy
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0].type, "error");
   assert.ok(notifications[0].message.includes("not a git repository"));
+});
+
+test("resolveIssueWorktree: CASE B reuses live opencode session, creates nothing", async () => {
+  const createWorktreeCalls: string[] = [];
+  const terminalCalls: unknown[] = [];
+  const notifications: Array<{ type: string; message: string }> = [];
+  const arrows: Array<{ issueId: string; terminalId: string }> = [];
+
+  const project = makeProject({
+    worktrees: [
+      { id: "w1", name: "main", path: "/repo" },
+      {
+        id: "w-existing",
+        name: "issue-42-fix-login-bug",
+        path: "/repo/issue-42-fix-login-bug",
+        terminals: [
+          { id: "t-live", type: "opencode", title: "Issue #42", issueNumber: 42 },
+        ],
+      },
+    ],
+  });
+
+  const result = await resolveIssueWorktree({
+    issue: makeIssue(),
+    target: makeTarget(),
+    createWorktree: async (repoPath, branch) => {
+      createWorktreeCalls.push(branch);
+      return { ok: true, path: "/repo", worktrees: [] };
+    },
+    projectLookup: { projects: [project] },
+    syncWorktrees: () => {},
+    createTerminal: (opts) => {
+      terminalCalls.push(opts);
+      return { id: "term-should-not-exist" };
+    },
+    notify: (type, message) => notifications.push({ type, message }),
+    setResolveArrows: (fn) => {
+      const next = fn(arrows);
+      arrows.length = 0;
+      arrows.push(...(next as typeof arrows));
+    },
+    issueNodeId: "issue-42",
+    position: { x: 100, y: 200 },
+    initialPrompt: "resolve it",
+    resumePrompt: "retomá",
+    isIssueTerminalLive: (terminalId) => terminalId === "t-live",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.case, "reused");
+  assert.equal(result.terminal?.id, "t-live");
+  assert.equal(result.worktreeId, "w-existing");
+  assert.equal(result.reusedExisting, false);
+  assert.equal(createWorktreeCalls.length, 0, "should NOT create a worktree");
+  assert.equal(terminalCalls.length, 0, "should NOT create a terminal");
+  assert.equal(arrows.length, 1);
+  assert.equal(arrows[0].terminalId, "t-live");
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].type, "info");
+  assert.ok(notifications[0].message.includes("Ya hay una sesión activa"));
+});
+
+test("resolveIssueWorktree: CASE A reuses dead node, no new worktree or terminal", async () => {
+  const createWorktreeCalls: string[] = [];
+  const terminalCalls: unknown[] = [];
+
+  const project = makeProject({
+    worktrees: [
+      { id: "w1", name: "main", path: "/repo" },
+      {
+        id: "w-existing",
+        name: "issue-42-fix-login-bug",
+        path: "/repo/issue-42-fix-login-bug",
+        terminals: [
+          { id: "t-dead", type: "shell", title: "Issue #42", issueNumber: 42 },
+        ],
+      },
+    ],
+  });
+
+  const result = await resolveIssueWorktree({
+    issue: makeIssue(),
+    target: makeTarget(),
+    createWorktree: async (repoPath, branch) => {
+      createWorktreeCalls.push(branch);
+      return { ok: true, path: "/repo", worktrees: [] };
+    },
+    projectLookup: { projects: [project] },
+    syncWorktrees: () => {},
+    createTerminal: (opts) => {
+      terminalCalls.push(opts);
+      return { id: "term-should-not-exist" };
+    },
+    notify: () => {},
+    issueNodeId: "issue-42",
+    position: { x: 100, y: 200 },
+    initialPrompt: "resolve it",
+    resumePrompt: "retomá",
+    isIssueTerminalLive: () => false,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.case, "resumed");
+  assert.equal(result.reusedExisting, true);
+  assert.equal(result.terminal?.id, "t-dead");
+  assert.equal(result.worktreeId, "w-existing");
+  assert.equal(createWorktreeCalls.length, 0);
+  assert.equal(terminalCalls.length, 0, "should reuse the existing tile, not spawn a new one");
+});
+
+test("resolveIssueWorktree: CASE A-bis spawns terminal in existing worktree with resume prompt", async () => {
+  const createWorktreeCalls: string[] = [];
+  const terminalCalls: Array<{ worktreeId: string; initialPrompt: string; issueNumber?: number }> = [];
+
+  const project = makeProject({
+    worktrees: [
+      { id: "w1", name: "main", path: "/repo" },
+      {
+        id: "w-existing",
+        name: "issue-42-fix-login-bug",
+        path: "/repo/issue-42-fix-login-bug",
+        terminals: [],
+      },
+    ],
+  });
+
+  const result = await resolveIssueWorktree({
+    issue: makeIssue(),
+    target: makeTarget(),
+    createWorktree: async (repoPath, branch) => {
+      createWorktreeCalls.push(branch);
+      return { ok: true, path: "/repo", worktrees: [] };
+    },
+    projectLookup: { projects: [project] },
+    syncWorktrees: () => {},
+    createTerminal: (opts) => {
+      terminalCalls.push({
+        worktreeId: opts.worktreeId,
+        initialPrompt: opts.initialPrompt,
+        issueNumber: opts.issueNumber,
+      });
+      return { id: "term-resumed" };
+    },
+    notify: () => {},
+    issueNodeId: "issue-42",
+    position: { x: 100, y: 200 },
+    initialPrompt: "resolve it",
+    resumePrompt: "retomá la sesión",
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.case, "resumed");
+  assert.equal(result.reusedExisting, false);
+  assert.equal(createWorktreeCalls.length, 0);
+  assert.equal(terminalCalls.length, 1);
+  assert.equal(terminalCalls[0].worktreeId, "w-existing");
+  assert.equal(terminalCalls[0].initialPrompt, "retomá la sesión");
+  assert.equal(terminalCalls[0].issueNumber, 42);
+});
+
+test("resolveIssueWorktree: legacy terminal matched by title fallback when no issueNumber metadata", async () => {
+  const terminalCalls: unknown[] = [];
+
+  const project = makeProject({
+    worktrees: [
+      { id: "w1", name: "main", path: "/repo" },
+      {
+        id: "w-existing",
+        name: "issue-42-fix-login-bug",
+        path: "/repo/issue-42-fix-login-bug",
+        terminals: [
+          { id: "t-legacy", type: "opencode", title: "Issue #42" },
+        ],
+      },
+    ],
+  });
+
+  const result = await resolveIssueWorktree({
+    issue: makeIssue(),
+    target: makeTarget(),
+    createWorktree: async () => ({ ok: true, path: "/repo", worktrees: [] }),
+    projectLookup: { projects: [project] },
+    syncWorktrees: () => {},
+    createTerminal: (opts) => {
+      terminalCalls.push(opts);
+      return { id: "x" };
+    },
+    notify: () => {},
+    issueNodeId: "issue-42",
+    position: { x: 100, y: 200 },
+    initialPrompt: "resolve it",
+    resumePrompt: "retomá",
+    isIssueTerminalLive: () => false,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.case, "resumed");
+  assert.equal(result.reusedExisting, true);
+  assert.equal(result.terminal?.id, "t-legacy");
+  assert.equal(terminalCalls.length, 0);
+});
+
+test("resolveIssueWorktree: arrow is not duplicated when the terminal is already mapped", async () => {
+  const arrows: Array<{ issueId: string; terminalId: string }> = [
+    { issueId: "issue-42", terminalId: "t-dead" },
+  ];
+
+  const project = makeProject({
+    worktrees: [
+      { id: "w1", name: "main", path: "/repo" },
+      {
+        id: "w-existing",
+        name: "issue-42-fix-login-bug",
+        path: "/repo/issue-42-fix-login-bug",
+        terminals: [
+          { id: "t-dead", type: "shell", title: "Issue #42", issueNumber: 42 },
+        ],
+      },
+    ],
+  });
+
+  const result = await resolveIssueWorktree({
+    issue: makeIssue(),
+    target: makeTarget(),
+    createWorktree: async () => ({ ok: true, path: "/repo", worktrees: [] }),
+    projectLookup: { projects: [project] },
+    syncWorktrees: () => {},
+    createTerminal: () => ({ id: "x" }),
+    notify: () => {},
+    setResolveArrows: (fn) => {
+      const next = fn([...arrows]);
+      arrows.length = 0;
+      arrows.push(...(next as typeof arrows));
+    },
+    issueNodeId: "issue-42",
+    position: { x: 100, y: 200 },
+    initialPrompt: "resolve it",
+    resumePrompt: "retomá",
+    isIssueTerminalLive: () => false,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.case, "resumed");
+  assert.equal(arrows.length, 1, "arrow should not be duplicated");
+  assert.equal(arrows[0].terminalId, "t-dead");
 });

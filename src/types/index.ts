@@ -139,6 +139,7 @@ export interface TerminalData {
   autoApprove?: boolean;
   stashed?: boolean;
   stashedAt?: number;
+  issueNumber?: number;
 }
 
 export interface TerminalRuntimeState {

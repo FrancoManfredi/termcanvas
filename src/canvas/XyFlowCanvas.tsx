@@ -29,6 +29,9 @@ import { useTileDimensionsStore } from "../stores/tileDimensionsStore";
 import { useSidebarDragStore } from "../stores/sidebarDragStore";
 import { useNotificationStore } from "../stores/notificationStore";
 import { resolveIssueWorktree } from "./resolveIssueWorktree";
+import { buildIssueResolvePrompt } from "./issueResolvePrompt";
+import { reuseTerminalForIssue } from "../actions/terminalSceneActions";
+import { useTerminalRuntimeStateStore } from "../stores/terminalRuntimeStateStore";
 import { useIssueStore } from "../stores/issueStore";
 import type { IssueNodeData } from "../stores/issueStore";
 import { computeIssueGridPositions } from "./issueGridLayout";
@@ -1135,7 +1138,31 @@ function XyFlowCanvasInner() {
                 const stored = usePreferencesStore.getState().defaultTerminalSize;
                 const tileW = stored?.w ?? useTileDimensionsStore.getState().w;
                 flowCenter = { x: flowCenter.x - tileW / 2, y: flowCenter.y };
-                const initialPrompt = `Resolvé el issue #${issue.issueNumber} — ${issue.title} — usando SDD con el pipeline completo y estricto. | PRECONDICIONES (ya definidas, no preguntes): Ejecución auto, gatekeeper entre fases, no pausar salvo problema real. Artefactos: openspec y engram, ambos. PRs: auto-chain. Presupuesto de review: 800 líneas. PRs encadenados: stacked-to-main. | ALCANCE: el issue aprobado es el contrato, no agregues requisitos fuera de su scope, no inventes features, no te saltes no-goals. | BODY ORIGINAL DEL ISSUE: ${(issue.body ?? "").replace(/\n/g, " ")} | PIPELINE (todas las fases en orden, sin omitir ninguna, sin pausar entre fases): sdd-new (explore + propose) -> spec -> design -> tasks -> apply -> verify -> archive. | RESTRICCIONES: work-unit commits con conventional commits (type(scope): desc), shellcheck en todo script modificado, sin Co-Authored-By ni atribuciones AI, actualizar docs si cambia el comportamiento. | LOGGING PARA DEBUG MANUAL: Como el usuario va a probar manualmente el resultado antes de que se archive el cambio, agregá logging generoso y descriptivo en el código que toques — no solo para vos, para que un humano pueda ver en la consola exactamente qué está pasando paso a paso al usar la feature/fix en vivo: logueá con un prefijo identificable, ej: [fix-<nombre-del-change>] o [feature-<nombre>], para poder filtrarlos fácil en devtools. Logueá en los puntos de decisión clave (ej: "¿se detectó el target correcto?", "¿el evento se está bloqueando o dejando pasar?"), no solo al principio/final de una función. Si el fix depende de una condición (ej: un selector de DOM, un estado de store), logueá el valor real evaluado en cada intento, no solo "true/false" — mostrá el dato concreto que se comparó. Estos logs pueden quedar en el código final (no los borres antes de archivar) — el usuario los va a usar para reportar bugs con evidencia concreta en vez de descripciones vagas. Si en el futuro se decide sacarlos, será un cambio aparte. | GESTIÓN DEL ISSUE: NO cierres el issue manualmente, el cierre ocurre automático al mergear el PR vía "Closes #${issue.issueNumber}". Podés comentar avances con gh issue comment, no es obligatorio. No modifiques relaciones blocked-by/blocking/parent sin comentarlo primero. | ENTREGA FINAL: después de verify creá el PR con la skill branch-pr, branch type/descripcion, body con "Closes #${issue.issueNumber}", un solo label type:*, esperar checks automatizados. | AL TERMINAR RESUMÍ: 1) qué se implementó por fase, 2) evidencia de verify, 3) URL del PR.`;
+                const promptInput = { issueNumber: issue.issueNumber, title: issue.title, body: issue.body };
+                const initialPrompt = buildIssueResolvePrompt(promptInput, "new");
+                const resumePrompt = buildIssueResolvePrompt(promptInput, "resume");
+                const isIssueTerminalLive = (terminalId: string): boolean => {
+                  const runtime = useTerminalRuntimeStateStore.getState().terminals[terminalId];
+                  if (runtime?.ptyId != null) return true;
+                  for (const p of useProjectStore.getState().projects) {
+                    for (const w of p.worktrees) {
+                      const t = w.terminals.find((x) => x.id === terminalId);
+                      if (t) return t.ptyId != null;
+                    }
+                  }
+                  return false;
+                };
+                const centerOnIssueTerminal = (terminalId: string) => {
+                  const node = reactFlow.getNode(terminalId);
+                  if (!node) return;
+                  const w = typeof node.measured?.width === "number" ? node.measured.width : 300;
+                  const h = typeof node.measured?.height === "number" ? node.measured.height : 200;
+                  void reactFlow.setCenter(
+                    node.position.x + w / 2,
+                    node.position.y + h / 2,
+                    { zoom: reactFlow.getZoom(), duration: 300 },
+                  );
+                };
                 setResolvingIssueNumber(issue.issueNumber);
                 void resolveIssueWorktree({
                   issue,
@@ -1152,9 +1179,30 @@ function XyFlowCanvasInner() {
                   issueNodeId,
                   position: flowCenter,
                   initialPrompt,
-                }).finally(() => {
-                  setResolvingIssueNumber(null);
-                });
+                  resumePrompt,
+                  isIssueTerminalLive,
+                })
+                  .then((result) => {
+                    if (!result.ok || !result.case || !result.terminal) return;
+                    const terminalId = result.terminal.id;
+                    if (result.case === "reused") {
+                      useProjectStore.getState().setFocusedTerminal(terminalId);
+                      centerOnIssueTerminal(terminalId);
+                      return;
+                    }
+                    if (result.case === "resumed" && result.reusedExisting) {
+                      void reuseTerminalForIssue({
+                        projectId: target.projectId,
+                        worktreeId: result.worktreeId ?? target.worktreeId,
+                        terminalId,
+                        resumePrompt,
+                      });
+                      centerOnIssueTerminal(terminalId);
+                    }
+                  })
+                  .finally(() => {
+                    setResolvingIssueNumber(null);
+                  });
               },
             },
           ]}

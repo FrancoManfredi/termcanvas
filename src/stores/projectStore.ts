@@ -83,6 +83,12 @@ interface ProjectStore {
     terminalId: string,
     sessionId: string | undefined,
   ) => void;
+  setTerminalSessionId: (
+    projectId: string,
+    worktreeId: string,
+    terminalId: string,
+    sessionId: string | undefined,
+  ) => void;
   updateTerminalAutoApprove: (
     projectId: string,
     worktreeId: string,
@@ -100,6 +106,12 @@ interface ProjectStore {
     worktreeId: string,
     terminalId: string,
     customTitle: string,
+  ) => void;
+  updateTerminalInitialPrompt: (
+    projectId: string,
+    worktreeId: string,
+    terminalId: string,
+    initialPrompt: string,
   ) => void;
   toggleTerminalStarred: (
     projectId: string,
@@ -775,6 +787,19 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     useTerminalRuntimeStateStore.getState().setSessionId(terminalId, sessionId);
   },
 
+  setTerminalSessionId: (projectId, worktreeId, terminalId, sessionId) => {
+    set((state) => ({
+      projects: mapTerminals(
+        state.projects,
+        projectId,
+        worktreeId,
+        terminalId,
+        (t) => ({ ...t, sessionId }),
+      ),
+    }));
+    markDirty();
+  },
+
   updateTerminalAutoApprove: (
     projectId,
     worktreeId,
@@ -819,6 +844,24 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
         worktreeId,
         terminalId,
         (t) => withUpdatedTerminalCustomTitle(t, customTitle),
+      ),
+    }));
+    markDirty();
+  },
+
+  updateTerminalInitialPrompt: (
+    projectId,
+    worktreeId,
+    terminalId,
+    initialPrompt,
+  ) => {
+    set((state) => ({
+      projects: mapTerminals(
+        state.projects,
+        projectId,
+        worktreeId,
+        terminalId,
+        (t) => ({ ...t, initialPrompt }),
       ),
     }));
     markDirty();
