@@ -2,6 +2,7 @@ import { useCallback, useState, useRef, useMemo, useEffect } from "react";
 import { useCanvasStore, COLLAPSED_TAB_WIDTH } from "../stores/canvasStore";
 import { useProjectStore } from "../stores/projectStore";
 import { useIssueStore } from "../stores/issueStore";
+import { useIssueSyncStore } from "../stores/issueSyncStore";
 import { useTerminalRuntimeStore } from "../terminal/terminalRuntimeStore";
 import { useSessionStore } from "../stores/sessionStore";
 import { useCompletionSeenStore } from "../stores/completionSeenStore";
@@ -480,13 +481,26 @@ export function LeftPanel() {
 function IssuesSection() {
   const t = useT();
   const issueVersion = useIssueStore((s) => s.issueVersion);
+  const isFetchingIssues = useIssueSyncStore((s) => s.isFetchingIssues);
   // Read issues imperatively — avoid Map reference loop in selector
   const issues = useMemo(() => Array.from(useIssueStore.getState().issues.values()), [issueVersion]);
 
   if (issues.length === 0) {
     return (
-      <div className="tc-label flex-1 px-4 py-6 text-center">
-        No issues loaded. Right-click the canvas and select "Traer issues de GitHub".
+      <div className="flex flex-col items-center gap-3 flex-1 px-4 py-6 text-center">
+        <div className="tc-label">
+          No issues loaded. Right-click the canvas and select "Traer issues de GitHub".
+        </div>
+        <button
+          type="button"
+          disabled={isFetchingIssues}
+          className="inline-flex items-center gap-1.5 rounded-md bg-[var(--accent)] px-3 py-1.5 text-[12px] font-medium text-[var(--accent-foreground)] transition-all duration-quick hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+          onClick={() => {
+            void useIssueSyncStore.getState().fetchIssuesHandler?.();
+          }}
+        >
+          {isFetchingIssues ? "Cargando..." : "Traer Issues de GitHub"}
+        </button>
       </div>
     );
   }

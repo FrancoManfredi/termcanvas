@@ -34,6 +34,7 @@ import { reuseTerminalForIssue } from "../actions/terminalSceneActions";
 import { useTerminalRuntimeStateStore } from "../stores/terminalRuntimeStateStore";
 import { useIssueStore, type IssueNodeData } from "../stores/issueStore";
 import { useIssueResolveStore } from "../stores/issueResolveStore";
+import { useIssueSyncStore } from "../stores/issueSyncStore";
 import { computeIssueGridPositions } from "./issueGridLayout";
 import {
   PANEL_TRANSITION_DURATION_MS,
@@ -351,7 +352,7 @@ function XyFlowCanvasInner() {
     message: string;
   } | null>(null);
 
-  const [isFetchingIssues, setIsFetchingIssues] = useState(false);
+  const isFetchingIssues = useIssueSyncStore((s) => s.isFetchingIssues);
   const resolvingIssueNumber = useIssueResolveStore(
     (s) => s.resolvingIssueNumber,
   );
@@ -422,105 +423,211 @@ function XyFlowCanvasInner() {
     [contextMenu, resolveContextMenuTarget],
   );
 
-  const handleIssueContextMenuPick = useCallback(async () => {
-    if (!contextMenu) return;
-    const target = resolveContextMenuTarget();
-    if (!target) {
-      console.warn("[gh-issues] resolveContextMenuTarget returned null");
-      return;
-    }
+  const handleIssueFetchError = useCallback(
+    (
+      result: Extract<
+        Awaited<ReturnType<typeof window.termcanvas.github.fetchIssues>>,
+        { ok: false }
+      >,
+    ) => {
+      const notify = useNotificationStore.getState().notify;
+      notify("error", `GitHub Issues: ${result.error}`);
 
-    console.log("[gh-issues] Fetching issues for worktree:", target.worktree.path);
-    setIsFetchingIssues(true);
-    try {
-      const result = await window.termcanvas.github.fetchIssues(
-        target.worktree.path,
-      );
+      let dialogMessage = result.error;
+      if (result.code === "not-installed") {
+        dialogMessage =
+          "The GitHub CLI (gh) is not installed.\n\nInstall it from: https://cli.github.com\n\nAfter installation, restart TermCanvas.";
+      } else if (result.code === "not-authenticated") {
+        dialogMessage =
+          "The GitHub CLI is not authenticated.\n\nRun: gh auth login\n\nThen try again.";
+      } else if (result.code === "network") {
+        dialogMessage =
+          "Network error while fetching issues.\n\nCheck your internet connection and try again.";
+      }
 
-      console.log("[gh-issues] IPC result:", JSON.stringify({ ok: result.ok, count: result.ok ? result.issues.length : 0, code: result.ok ? undefined : (result as { code: string }).code }));
+      setGhErrorDialog({
+        title: "GitHub Issues Error",
+        message: dialogMessage,
+      });
+    },
+    [],
+  );
 
-      if (!result.ok) {
-        const notify = useNotificationStore.getState().notify;
-        notify("error", `GitHub Issues: ${result.error}`);
+  const syncIssuesToCanvas = useCallback(
+    async (basePos: { x: number; y: number }) => {
+      const target = resolveContextMenuTarget();
+      if (!target) {
+        console.warn("[gh-issues] resolveContextMenuTarget returned null");
+        return;
+      }
 
-        let dialogMessage = result.error;
-        if (result.code === "not-installed") {
-          dialogMessage =
-            "The GitHub CLI (gh) is not installed.\n\nInstall it from: https://cli.github.com\n\nAfter installation, restart TermCanvas.";
-        } else if (result.code === "not-authenticated") {
-          dialogMessage =
-            "The GitHub CLI is not authenticated.\n\nRun: gh auth login\n\nThen try again.";
-        } else if (result.code === "network") {
-          dialogMessage =
-            "Network error while fetching issues.\n\nCheck your internet connection and try again.";
+      console.log("[gh-issues] Fetching issues for worktree:", target.worktree.path);
+      useIssueSyncStore.getState().setFetchingIssues(true);
+      try {
+        const result = await window.termcanvas.github.fetchIssues(
+          target.worktree.path,
+        );
+
+        console.log("[gh-issues] IPC result:", JSON.stringify({ ok: result.ok, count: result.ok ? result.issues.length : 0, code: result.ok ? undefined : (result as { code: string }).code }));
+
+        if (!result.ok) {
+          handleIssueFetchError(result);
+          return;
         }
 
-        setGhErrorDialog({
-          title: "GitHub Issues Error",
-          message: dialogMessage,
-        });
-        return;
-      }
+        if (result.issues.length === 0) {
+          useNotificationStore
+            .getState()
+            .notify("info", "No open issues found in this repository.");
+          return;
+        }
 
-      if (result.issues.length === 0) {
-        useNotificationStore
-          .getState()
-          .notify("info", "No open issues found in this repository.");
-        return;
-      }
+        const issueStore = useIssueStore.getState();
+        let addedCount = 0;
 
-      const issueStore = useIssueStore.getState();
-      let addedCount = 0;
+        // Sort issues by number ascending (1, 2, 3...)
+        const sorted = [...result.issues].sort((a, b) => (a.number as number) - (b.number as number));
 
-      // Sort issues by number ascending (1, 2, 3...)
-      const sorted = [...result.issues].sort((a, b) => (a.number as number) - (b.number as number));
+        for (let i = 0; i < sorted.length; i++) {
+          const raw = sorted[i];
+          const issueNum = raw.number as number;
+          const issueId = `gh-${target.projectId}-${issueNum}`;
 
-      // Compute grid positions starting from the context menu click point
-      const basePos = { x: contextMenu.flowX, y: contextMenu.flowY };
+          if (issueStore.hasIssue(issueNum)) {
+            // Refresh existing issue metadata from GitHub
+            issueStore.updateIssue(issueNum, {
+              ...raw,
+              issueId,
+              projectId: target.projectId,
+              worktreeId: target.worktreeId,
+              issueNumber: issueNum,
+              __worktreePath: target.worktree.path,
+            } as Partial<IssueNodeData>);
+            addedCount++;
+            continue;
+          }
 
-      for (let i = 0; i < sorted.length; i++) {
-        const raw = sorted[i];
-        const issueNum = raw.number as number;
-        const issueId = `gh-${target.projectId}-${issueNum}`;
-
-        if (issueStore.hasIssue(issueNum)) {
-          // Refresh existing issue metadata from GitHub
-          issueStore.updateIssue(issueNum, {
+          const pos = computeIssueGridPositions(basePos, i);
+          issueStore.addIssue({
             ...raw,
             issueId,
             projectId: target.projectId,
             worktreeId: target.worktreeId,
             issueNumber: issueNum,
+            x: pos.x,
+            y: pos.y,
             __worktreePath: target.worktree.path,
-          } as Partial<IssueNodeData>);
+          } as unknown as IssueNodeData);
           addedCount++;
-          continue;
         }
 
-        const pos = computeIssueGridPositions(basePos, i);
-        issueStore.addIssue({
+        if (addedCount === 0) {
+          useNotificationStore
+            .getState()
+            .notify("info", "Issues are up to date — no changes from GitHub.");
+        } else {
+          console.log(`[gh-issues] Synced ${addedCount} issues (new + refreshed)`);
+          useNotificationStore
+            .getState()
+            .notify("info", `Synced ${addedCount} issue${addedCount !== 1 ? "s" : ""} from GitHub.`);
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        useNotificationStore
+          .getState()
+          .notify("error", `GitHub Issues: ${message}`);
+      } finally {
+        useIssueSyncStore.getState().setFetchingIssues(false);
+      }
+    },
+    [resolveContextMenuTarget, handleIssueFetchError],
+  );
+
+  const handleIssueContextMenuPick = useCallback(async () => {
+    if (!contextMenu) return;
+    await syncIssuesToCanvas({ x: contextMenu.flowX, y: contextMenu.flowY });
+  }, [contextMenu, syncIssuesToCanvas]);
+
+  const handleFetchIssuesFromPanel = useCallback(async () => {
+    // No context-menu position available: lay the issue grid out from
+    // the center of the current viewport.
+    const center = reactFlow.screenToFlowPosition({
+      x: window.innerWidth / 2,
+      y: Math.max(window.innerHeight / 2 - 80, 80),
+    });
+    await syncIssuesToCanvas(center);
+  }, [reactFlow, syncIssuesToCanvas]);
+
+  useEffect(() => {
+    useIssueSyncStore
+      .getState()
+      .registerFetchIssuesHandler(handleFetchIssuesFromPanel);
+    return () => {
+      useIssueSyncStore.getState().registerFetchIssuesHandler(null);
+    };
+  }, [handleFetchIssuesFromPanel]);
+
+  const handleRefreshIssues = useCallback(async () => {
+    const target = resolveContextMenuTarget();
+    if (!target) return;
+
+    console.log("[gh-issues] Refreshing issues for worktree:", target.worktree.path);
+    useIssueSyncStore.getState().setFetchingIssues(true);
+    try {
+      const result = await window.termcanvas.github.fetchIssues(
+        target.worktree.path,
+      );
+
+      if (!result.ok) {
+        handleIssueFetchError(result);
+        return;
+      }
+
+      const issueStore = useIssueStore.getState();
+      const cardsOnCanvas = issueStore.issues.size;
+      let updatedCount = 0;
+
+      // Refresh metadata (state, title, labels) only for issues that
+      // already have a card on the canvas. New issues are NOT added here.
+      for (const raw of result.issues) {
+        const issueNum = raw.number as number;
+        if (!issueStore.hasIssue(issueNum)) continue;
+        const issueId = `gh-${target.projectId}-${issueNum}`;
+        issueStore.updateIssue(issueNum, {
           ...raw,
           issueId,
           projectId: target.projectId,
           worktreeId: target.worktreeId,
           issueNumber: issueNum,
-          x: pos.x,
-          y: pos.y,
           __worktreePath: target.worktree.path,
-        } as unknown as IssueNodeData);
-        addedCount++;
+        } as Partial<IssueNodeData>);
+        updatedCount++;
       }
 
-      if (addedCount === 0) {
+      if (cardsOnCanvas === 0) {
         useNotificationStore
           .getState()
-          .notify("info", "Issues are up to date — no changes from GitHub.");
+          .notify(
+            "info",
+            "No issue cards on the canvas to update — add issues first with \"Traer issues de GitHub\".",
+          );
+      } else if (updatedCount === 0) {
+        // Same success banner as the full sync: nothing changed because
+        // every card already reflects the latest state from GitHub.
+        useNotificationStore
+          .getState()
+          .notify(
+            "info",
+            "Issues are up to date — no changes from GitHub.",
+          );
       } else {
-        const newIssues = addedCount - (result.issues.length - addedCount > 0 ? 0 : 0);
-        console.log(`[gh-issues] Synced ${addedCount} issues (new + refreshed)`);
+        console.log(`[gh-issues] Refreshed ${updatedCount} issues`);
         useNotificationStore
           .getState()
-          .notify("info", `Synced ${addedCount} issue${addedCount !== 1 ? "s" : ""} from GitHub.`);
+          .notify(
+            "info",
+            `Updated ${updatedCount} issue${updatedCount !== 1 ? "s" : ""} from GitHub.`,
+          );
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -528,9 +635,9 @@ function XyFlowCanvasInner() {
         .getState()
         .notify("error", `GitHub Issues: ${message}`);
     } finally {
-      setIsFetchingIssues(false);
+      useIssueSyncStore.getState().setFetchingIssues(false);
     }
-  }, [contextMenu, resolveContextMenuTarget]);
+  }, [resolveContextMenuTarget, handleIssueFetchError]);
 
   const handleResolveIssue = useCallback(
     (issueNumber: number) => {
@@ -1189,6 +1296,14 @@ function XyFlowCanvasInner() {
                       : "Traer issues de GitHub",
                     onClick: () => {
                       void handleIssueContextMenuPick();
+                    },
+                  } as const,
+                  {
+                    label: isFetchingIssues
+                      ? "Cargando issues..."
+                      : "Actualizar estado de issues",
+                    onClick: () => {
+                      void handleRefreshIssues();
                     },
                   } as const,
                 ]
