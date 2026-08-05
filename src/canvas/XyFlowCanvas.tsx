@@ -32,8 +32,8 @@ import { resolveIssueWorktree } from "./resolveIssueWorktree";
 import { buildIssueResolvePrompt } from "./issueResolvePrompt";
 import { reuseTerminalForIssue } from "../actions/terminalSceneActions";
 import { useTerminalRuntimeStateStore } from "../stores/terminalRuntimeStateStore";
-import { useIssueStore } from "../stores/issueStore";
-import type { IssueNodeData } from "../stores/issueStore";
+import { useIssueStore, type IssueNodeData } from "../stores/issueStore";
+import { useIssueResolveStore } from "../stores/issueResolveStore";
 import { computeIssueGridPositions } from "./issueGridLayout";
 import {
   PANEL_TRANSITION_DURATION_MS,
@@ -352,9 +352,9 @@ function XyFlowCanvasInner() {
   } | null>(null);
 
   const [isFetchingIssues, setIsFetchingIssues] = useState(false);
-  const [resolvingIssueNumber, setResolvingIssueNumber] = useState<
-    number | null
-  >(null);
+  const resolvingIssueNumber = useIssueResolveStore(
+    (s) => s.resolvingIssueNumber,
+  );
   const isResolving = resolvingIssueNumber !== null;
 
   const [issueContextMenu, setIssueContextMenu] = useState<{
@@ -531,6 +531,112 @@ function XyFlowCanvasInner() {
       setIsFetchingIssues(false);
     }
   }, [contextMenu, resolveContextMenuTarget]);
+
+  const handleResolveIssue = useCallback(
+    (issueNumber: number) => {
+      if (useIssueResolveStore.getState().resolvingIssueNumber !== null) return;
+      const target = resolveContextMenuTarget();
+      if (!target) return;
+      const issueStore = useIssueStore.getState();
+      const issue = issueStore.getIssue(issueNumber);
+      if (!issue) return;
+      // Measure the actual issue card DOM rect and convert to flow coords
+      const issueNodeId = `issue-${issue.issueNumber}`;
+      const issueEl = document.querySelector(`[data-id="${issueNodeId}"]`);
+      const rect = issueEl?.getBoundingClientRect();
+      if (!rect) return;
+      // Bottom-center of the card in screen-space → convert to flow-space
+      const screenCenter = { x: rect.left + rect.width / 2, y: rect.bottom + 12 };
+      let flowCenter = reactFlow.screenToFlowPosition(screenCenter);
+      // Center the terminal: subtract half terminal width in FLOW units
+      const stored = usePreferencesStore.getState().defaultTerminalSize;
+      const tileW = stored?.w ?? useTileDimensionsStore.getState().w;
+      flowCenter = { x: flowCenter.x - tileW / 2, y: flowCenter.y };
+      const promptInput = { issueNumber: issue.issueNumber, title: issue.title, body: issue.body };
+      const initialPrompt = buildIssueResolvePrompt(promptInput, "new");
+      const resumePrompt = buildIssueResolvePrompt(promptInput, "resume");
+      const isIssueTerminalLive = (terminalId: string): boolean => {
+        const runtime = useTerminalRuntimeStateStore.getState().terminals[terminalId];
+        if (runtime?.ptyId != null) return true;
+        for (const p of useProjectStore.getState().projects) {
+          for (const w of p.worktrees) {
+            const t = w.terminals.find((x) => x.id === terminalId);
+            if (t) return t.ptyId != null;
+          }
+        }
+        return false;
+      };
+      const centerOnIssueTerminal = (terminalId: string) => {
+        const node = reactFlow.getNode(terminalId);
+        if (!node) return;
+        const w = typeof node.measured?.width === "number" ? node.measured.width : 300;
+        const h = typeof node.measured?.height === "number" ? node.measured.height : 200;
+        void reactFlow.setCenter(
+          node.position.x + w / 2,
+          node.position.y + h / 2,
+          { zoom: reactFlow.getZoom(), duration: 300 },
+        );
+      };
+      useIssueResolveStore.getState().setResolvingIssueNumber(issue.issueNumber);
+      void resolveIssueWorktree({
+        issue,
+        target,
+        createWorktree: (repoPath, branch) =>
+          window.termcanvas.project.createWorktree(repoPath, branch),
+        getProject: (projectId) =>
+          useProjectStore
+            .getState()
+            .projects.find((p) => p.id === projectId),
+        syncWorktrees: (projectPath, worktrees) =>
+          useProjectStore.getState().syncWorktrees(projectPath, worktrees),
+        createTerminal: createTerminalInScene,
+        notify: (type, message) =>
+          useNotificationStore.getState().notify(type, message),
+        setResolveArrows,
+        issueNodeId,
+        position: flowCenter,
+        initialPrompt,
+        resumePrompt,
+        isIssueTerminalLive,
+      })
+        .then((result) => {
+          if (!result.ok || !result.case || !result.terminal) return;
+          const terminalId = result.terminal.id;
+          if (
+            result.case === "created" ||
+            result.case === "reused"
+          ) {
+            // Focus the tile so the terminal runtime actually
+            // spawns the CLI. Without focus the tile stays inert
+            // and a second "RESOLVER ISSUE" click is required to
+            // resume it.
+            useProjectStore.getState().setFocusedTerminal(terminalId);
+            centerOnIssueTerminal(terminalId);
+            return;
+          }
+          if (result.case === "resumed" && result.reusedExisting) {
+            void reuseTerminalForIssue({
+              projectId: target.projectId,
+              worktreeId: result.worktreeId ?? target.worktreeId,
+              terminalId,
+              resumePrompt,
+            });
+            centerOnIssueTerminal(terminalId);
+          }
+        })
+        .finally(() => {
+          useIssueResolveStore.getState().setResolvingIssueNumber(null);
+        });
+    },
+    [reactFlow, resolveContextMenuTarget],
+  );
+
+  useEffect(() => {
+    useIssueResolveStore.getState().registerResolveHandler(handleResolveIssue);
+    return () => {
+      useIssueResolveStore.getState().registerResolveHandler(null);
+    };
+  }, [handleResolveIssue]);
 
   const projectedNodes = useMemo(() => {
     const terminalNodes = buildCanvasFlowNodes(projects);
@@ -1119,101 +1225,7 @@ function XyFlowCanvasInner() {
           items={[
             {
               label: isResolving ? "Resolviendo issue..." : "RESOLVER ISSUE",
-              onClick: () => {
-                if (isResolving) return;
-                const target = resolveContextMenuTarget();
-                if (!target) return;
-                const issueStore = useIssueStore.getState();
-                const issue = issueStore.getIssue(issueContextMenu.issueNumber);
-                if (!issue) return;
-                // Measure the actual issue card DOM rect and convert to flow coords
-                const issueNodeId = `issue-${issue.issueNumber}`;
-                const issueEl = document.querySelector(`[data-id="${issueNodeId}"]`);
-                const rect = issueEl?.getBoundingClientRect();
-                if (!rect) return;
-                // Bottom-center of the card in screen-space → convert to flow-space
-                const screenCenter = { x: rect.left + rect.width / 2, y: rect.bottom + 12 };
-                let flowCenter = reactFlow.screenToFlowPosition(screenCenter);
-                // Center the terminal: subtract half terminal width in FLOW units
-                const stored = usePreferencesStore.getState().defaultTerminalSize;
-                const tileW = stored?.w ?? useTileDimensionsStore.getState().w;
-                flowCenter = { x: flowCenter.x - tileW / 2, y: flowCenter.y };
-                const promptInput = { issueNumber: issue.issueNumber, title: issue.title, body: issue.body };
-                const initialPrompt = buildIssueResolvePrompt(promptInput, "new");
-                const resumePrompt = buildIssueResolvePrompt(promptInput, "resume");
-                const isIssueTerminalLive = (terminalId: string): boolean => {
-                  const runtime = useTerminalRuntimeStateStore.getState().terminals[terminalId];
-                  if (runtime?.ptyId != null) return true;
-                  for (const p of useProjectStore.getState().projects) {
-                    for (const w of p.worktrees) {
-                      const t = w.terminals.find((x) => x.id === terminalId);
-                      if (t) return t.ptyId != null;
-                    }
-                  }
-                  return false;
-                };
-                const centerOnIssueTerminal = (terminalId: string) => {
-                  const node = reactFlow.getNode(terminalId);
-                  if (!node) return;
-                  const w = typeof node.measured?.width === "number" ? node.measured.width : 300;
-                  const h = typeof node.measured?.height === "number" ? node.measured.height : 200;
-                  void reactFlow.setCenter(
-                    node.position.x + w / 2,
-                    node.position.y + h / 2,
-                    { zoom: reactFlow.getZoom(), duration: 300 },
-                  );
-                };
-                setResolvingIssueNumber(issue.issueNumber);
-                void resolveIssueWorktree({
-                  issue,
-                  target,
-                  createWorktree: (repoPath, branch) =>
-                    window.termcanvas.project.createWorktree(repoPath, branch),
-                  getProject: (projectId) =>
-                    useProjectStore
-                      .getState()
-                      .projects.find((p) => p.id === projectId),
-                  syncWorktrees: (projectPath, worktrees) =>
-                    useProjectStore.getState().syncWorktrees(projectPath, worktrees),
-                  createTerminal: createTerminalInScene,
-                  notify: (type, message) =>
-                    useNotificationStore.getState().notify(type, message),
-                  setResolveArrows,
-                  issueNodeId,
-                  position: flowCenter,
-                  initialPrompt,
-                  resumePrompt,
-                  isIssueTerminalLive,
-                })
-                  .then((result) => {
-                    if (!result.ok || !result.case || !result.terminal) return;
-                    const terminalId = result.terminal.id;
-                    if (
-                      result.case === "created" ||
-                      result.case === "reused"
-                    ) {
-                      // Focus the tile so the terminal runtime actually
-                      // spawns the CLI. Without focus the tile stays inert
-                      // and a second "RESOLVER ISSUE" click is required to
-                      // resume it.
-                      useProjectStore.getState().setFocusedTerminal(terminalId);
-                      centerOnIssueTerminal(terminalId);
-                      return;
-                    }
-                    if (result.case === "resumed" && result.reusedExisting) {
-                      void reuseTerminalForIssue({
-                        projectId: target.projectId,
-                        worktreeId: result.worktreeId ?? target.worktreeId,
-                        terminalId,
-                        resumePrompt,
-                      });
-                      centerOnIssueTerminal(terminalId);
-                    }
-                  })
-                  .finally(() => {
-                    setResolvingIssueNumber(null);
-                  });
-              },
+              onClick: () => handleResolveIssue(issueContextMenu.issueNumber),
             },
           ]}
           onClose={() => setIssueContextMenu(null)}
