@@ -51,12 +51,12 @@ function makeProject(overrides: Record<string, unknown> = {}) {
 test("resolveIssueWorktree: happy path creates worktree and terminal", async () => {
   const createWorktreeCalls: string[] = [];
   const syncCalls: Array<{ path: string; branch: string }> = [];
-  const terminalCalls: Array<{ worktreeId: string }> = [];
+  const terminalCalls: Array<{ worktreeId: string; issueNumber?: number }> = [];
   const notifications: Array<{ type: string; message: string }> = [];
   const arrows: Array<{ issueId: string; terminalId: string }> = [];
 
   const project = makeProject();
-  const projectLookup = { projects: [project] };
+  const getProject = () => project;
 
   const result = await resolveIssueWorktree({
     issue: makeIssue(),
@@ -72,7 +72,7 @@ test("resolveIssueWorktree: happy path creates worktree and terminal", async () 
         ],
       };
     },
-    projectLookup,
+    getProject,
     syncWorktrees: (_path, worktrees) => {
       for (const wt of worktrees) {
         syncCalls.push(wt);
@@ -89,7 +89,7 @@ test("resolveIssueWorktree: happy path creates worktree and terminal", async () 
     },
     notify: (type, message) => notifications.push({ type, message }),
     setResolveArrows: (fn) => {
-      const next = fn(arrows);
+      const next = typeof fn === "function" ? fn(arrows) : fn;
       arrows.length = 0;
       arrows.push(...(next as typeof arrows));
     },
@@ -129,7 +129,7 @@ test("resolveIssueWorktree: reuse existing worktree skips createWorktree", async
       createWorktreeCalls.push(branch);
       return { ok: true, path: "/repo", worktrees: [] };
     },
-    projectLookup: { projects: [project] },
+    getProject: () => project,
     syncWorktrees: () => {},
     createTerminal: (opts) => {
       terminalCalls.push({ worktreeId: opts.worktreeId });
@@ -158,7 +158,7 @@ test("resolveIssueWorktree: failure toasts and aborts, no terminal created", asy
       ok: false,
       error: "branch already exists at different path",
     }),
-    projectLookup: { projects: [makeProject()] },
+    getProject: () => makeProject(),
     syncWorktrees: () => {},
     createTerminal: (opts) => {
       terminalCalls.push(opts);
@@ -184,7 +184,7 @@ test("resolveIssueWorktree: terminal receives new worktreeId, not fallback", asy
   const terminalCalls: Array<{ worktreeId: string; projectId: string }> = [];
 
   const project = makeProject();
-  const projectLookup = { projects: [project] };
+  const getProject = () => project;
 
   await resolveIssueWorktree({
     issue: makeIssue(),
@@ -197,7 +197,7 @@ test("resolveIssueWorktree: terminal receives new worktreeId, not fallback", asy
         { path: "/repo/issue-42-fix-login-bug", branch: "issue-42-fix-login-bug", isPrimary: false },
       ],
     }),
-    projectLookup,
+    getProject,
     syncWorktrees: () => {
       project.worktrees = [
         { id: "w1", name: "main", path: "/repo" },
@@ -219,12 +219,55 @@ test("resolveIssueWorktree: terminal receives new worktreeId, not fallback", asy
   assert.equal(terminalCalls[0].projectId, "p1");
 });
 
+test("resolveIssueWorktree: CASE C matches new worktree despite Windows path separator mismatch", async () => {
+  const terminalCalls: Array<{ worktreeId: string }> = [];
+
+  // git reports paths with forward slashes (C:/...), but the renderer builds
+  // the expected path with path.join (C:\...). Both must resolve to the same
+  // worktree so the terminal is created on the FIRST resolve click.
+  const project = makeProject();
+  const getProject = () => project;
+
+  await resolveIssueWorktree({
+    issue: makeIssue(),
+    target: makeTarget(),
+    createWorktree: async () => ({
+      ok: true,
+      path: "C:\\repo\\issue-42-fix-login-bug",
+      worktrees: [
+        { path: "C:/repo", branch: "main", isPrimary: true },
+        { path: "C:/repo/issue-42-fix-login-bug", branch: "issue-42-fix-login-bug", isPrimary: false },
+      ],
+    }),
+    getProject,
+    syncWorktrees: () => {
+      project.worktrees = [
+        { id: "w1", name: "main", path: "C:\\repo" },
+        { id: "w-win", name: "issue-42-fix-login-bug", path: "C:/repo/issue-42-fix-login-bug" },
+      ];
+    },
+    createTerminal: (opts) => {
+      terminalCalls.push({ worktreeId: opts.worktreeId });
+      return { id: "term-win" };
+    },
+    notify: (type, message) => {
+      throw new Error(`unexpected notification: ${type} ${message}`);
+    },
+    issueNodeId: "issue-42",
+    position: { x: 100, y: 200 },
+    initialPrompt: "resolve it",
+  });
+
+  assert.equal(terminalCalls.length, 1, "terminal MUST be created on first resolve");
+  assert.equal(terminalCalls[0].worktreeId, "w-win");
+});
+
 test("resolveIssueWorktree: missing issue returns error", async () => {
   const result = await resolveIssueWorktree({
     issue: undefined,
     target: makeTarget(),
     createWorktree: async () => ({ ok: true, path: "/repo", worktrees: [] }),
-    projectLookup: { projects: [makeProject()] },
+    getProject: () => makeProject(),
     syncWorktrees: () => {},
     createTerminal: () => ({ id: "x" }),
     notify: () => {},
@@ -247,7 +290,7 @@ test("resolveIssueWorktree: createWorktree exception is caught and toasted", asy
     createWorktree: async () => {
       throw new Error("git fatal: not a git repository");
     },
-    projectLookup: { projects: [makeProject()] },
+    getProject: () => makeProject(),
     syncWorktrees: () => {},
     createTerminal: (opts) => {
       terminalCalls.push(opts);
@@ -293,7 +336,7 @@ test("resolveIssueWorktree: CASE B reuses live opencode session, creates nothing
       createWorktreeCalls.push(branch);
       return { ok: true, path: "/repo", worktrees: [] };
     },
-    projectLookup: { projects: [project] },
+    getProject: () => project,
     syncWorktrees: () => {},
     createTerminal: (opts) => {
       terminalCalls.push(opts);
@@ -301,7 +344,7 @@ test("resolveIssueWorktree: CASE B reuses live opencode session, creates nothing
     },
     notify: (type, message) => notifications.push({ type, message }),
     setResolveArrows: (fn) => {
-      const next = fn(arrows);
+      const next = typeof fn === "function" ? fn(arrows) : fn;
       arrows.length = 0;
       arrows.push(...(next as typeof arrows));
     },
@@ -351,7 +394,7 @@ test("resolveIssueWorktree: CASE A reuses dead node, no new worktree or terminal
       createWorktreeCalls.push(branch);
       return { ok: true, path: "/repo", worktrees: [] };
     },
-    projectLookup: { projects: [project] },
+    getProject: () => project,
     syncWorktrees: () => {},
     createTerminal: (opts) => {
       terminalCalls.push(opts);
@@ -397,7 +440,7 @@ test("resolveIssueWorktree: CASE A-bis spawns terminal in existing worktree with
       createWorktreeCalls.push(branch);
       return { ok: true, path: "/repo", worktrees: [] };
     },
-    projectLookup: { projects: [project] },
+    getProject: () => project,
     syncWorktrees: () => {},
     createTerminal: (opts) => {
       terminalCalls.push({
@@ -445,7 +488,7 @@ test("resolveIssueWorktree: legacy terminal matched by title fallback when no is
     issue: makeIssue(),
     target: makeTarget(),
     createWorktree: async () => ({ ok: true, path: "/repo", worktrees: [] }),
-    projectLookup: { projects: [project] },
+    getProject: () => project,
     syncWorktrees: () => {},
     createTerminal: (opts) => {
       terminalCalls.push(opts);
@@ -489,12 +532,12 @@ test("resolveIssueWorktree: arrow is not duplicated when the terminal is already
     issue: makeIssue(),
     target: makeTarget(),
     createWorktree: async () => ({ ok: true, path: "/repo", worktrees: [] }),
-    projectLookup: { projects: [project] },
+    getProject: () => project,
     syncWorktrees: () => {},
     createTerminal: () => ({ id: "x" }),
     notify: () => {},
     setResolveArrows: (fn) => {
-      const next = fn([...arrows]);
+      const next = typeof fn === "function" ? fn([...arrows]) : fn;
       arrows.length = 0;
       arrows.push(...(next as typeof arrows));
     },

@@ -8,12 +8,12 @@ Last updated: 2026-08-04
 
 - skills
 - .agents\skills
-- C:\Users\Franco\.agents\skills
-- C:\Users\Franco\.config\opencode\skills
-- C:\Users\Franco\.claude\skills
-- C:\Users\Franco\.copilot\skills
-- C:\Users\Franco\.codex\skills
-- C:\Users\Franco\.openclaw\skills
+- C:\Users\Estudiante UCU\.agents\skills
+- C:\Users\Estudiante UCU\.config\opencode\skills
+- C:\Users\Estudiante UCU\.claude\skills
+- C:\Users\Estudiante UCU\.cursor\skills
+- C:\Users\Estudiante UCU\.copilot\skills
+- C:\Users\Estudiante UCU\.codex\skills
 
 ## Contract
 
@@ -25,44 +25,231 @@ Last updated: 2026-08-04
 
 | Skill | Trigger / description | Scope | Path |
 | --- | --- | --- | --- |
-| `brainstorming` | You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation. | user | `C:\Users\Franco\.claude\skills\brainstorming--de6f87c50c\SKILL.md` |
-| `branch-pr` | Create Gentle AI pull requests with issue-first checks. Trigger: creating, opening, or preparing PRs for review. | user | `C:\Users\Franco\.config\opencode\skills\branch-pr\SKILL.md` |
-| `chained-pr` | Trigger: PRs over 400 lines, stacked PRs, review slices. Split oversized changes into chained PRs that protect review focus. | user | `C:\Users\Franco\.config\opencode\skills\chained-pr\SKILL.md` |
-| `challenge` | Adversarial review skill. Use when the user wants to stress-test an idea, argument, proposal, or opinion from multiple independent angles. Spawns parallel Hydra workers with orthogonal analytical methodologies. | user | `C:\Users\Franco\.claude\skills\challenge\SKILL.md` |
-| `code-review` | Structured code review skill. Use when asked to "review this code", "review this PR", "check this diff", or when acting as a Hydra reviewer. Runs a multi-pass review with specialist focus areas and confidence-gated findings. | user | `C:\Users\Franco\.claude\skills\code-review\SKILL.md` |
-| `cognitive-doc-design` | Design docs that reduce cognitive load. Trigger: writing guides, READMEs, RFCs, onboarding, architecture, or review-facing docs. | user | `C:\Users\Franco\.config\opencode\skills\cognitive-doc-design\SKILL.md` |
-| `comment-writer` | Write warm, direct collaboration comments. Trigger: PR feedback, issue replies, reviews, Slack messages, or GitHub comments. | user | `C:\Users\Franco\.config\opencode\skills\comment-writer\SKILL.md` |
-| `dispatching-parallel-agents` | Use when facing 2+ independent tasks that can be worked on without shared state or sequential dependencies | user | `C:\Users\Franco\.claude\skills\dispatching-parallel-agents--db299a41cb\SKILL.md` |
-| `executing-plans` | Use when you have a written implementation plan to execute in a separate session with review checkpoints | user | `C:\Users\Franco\.claude\skills\executing-plans--ea7c077b30\SKILL.md` |
-| `go-testing` | Trigger: Go tests, go test coverage, Bubbletea teatest, golden files. Apply focused Go testing patterns. | user | `C:\Users\Franco\.config\opencode\skills\go-testing\SKILL.md` |
-| `hydra` | Use when a task should run through Hydra's Lead-driven workflow for multi-agent orchestration, or when an existing workflow must be inspected or cleaned up. | user | `C:\Users\Franco\.claude\skills\hydra\SKILL.md` |
-| `hyperframes` | Mandatory entry point: read this first for any request to make, create, edit, animate, or render a video, animation, or motion graphic, including a promo, explainer, captioned clip, title card, overlay, slideshow or interactive deck, Remotion port, or any HyperFrames HTML composition. Also use it to inspect, diagnose, validate, preview, publish, or batch-render an existing HyperFrames project. Inputs may be a website URL, GitHub PR, Figma design or URL, text or brief, existing footage, or music. It resumes project state, captures intent when applicable, selects and installs the owning workflow, and routes domain capabilities. HyperFrames is the default output framework unless the user explicitly chooses another framework for the deliverable or asks only to record a browser session. | user | `C:\Users\Franco\.agents\skills\hyperframes\SKILL.md` |
-| `hyperframes-animation` | All animation knowledge for HyperFrames — atomic motion rules, multi-phase scene blueprints, scene transitions, broader motion-design techniques, AND the seven runtime adapters (GSAP default, plus Lottie, Three.js, Anime.js, CSS keyframes, Web Animations API, TypeGPU). Use for any motion or animation task: pick 2-4 rules and compose, or load a blueprint, or look up runtime-specific API (e.g. GSAP eases / Lottie player / Three.js mixer). Also covers auditing an existing composition's choreography (animation map) and 24 named text-animation effects. HyperFrames-native: single paused timeline, seek-safe, deterministic. | user | `C:\Users\Franco\.agents\skills\hyperframes-animation\SKILL.md` |
-| `hyperframes-cli` | Use the HyperFrames CLI development loop: init, add, catalog, capture, lint, check, snapshot, compare, grade-compare, preview, play, present, beats, keyframes, single or batch render, publish, cloud, cloudrun, feedback, lambda, doctor, browser, info, upgrade, skills, compositions, docs, benchmark, telemetry, transcribe, auth, tts, and remove-background. Also use when diagnosing build or render failures. validate, inspect, and layout are deprecated aliases; use check. Covers local, HeyGen-hosted cloud, AWS Lambda, and Google Cloud Run rendering. | user | `C:\Users\Franco\.agents\skills\hyperframes-cli\SKILL.md` |
-| `hyperframes-core` | The HyperFrames composition contract — build one renderable project. Use for composition structure, the `data-*` timing attributes, `class="clip"`, tracks, sub-compositions, variables, framework-owned media playback, deterministic-render rules, and validation. Also covers Tailwind projects and the STORYBOARD.md / SCRIPT.md plan formats. Read before writing composition HTML. | user | `C:\Users\Franco\.agents\skills\hyperframes-core\SKILL.md` |
-| `hyperframes-creative` | Non-animation creative direction for HyperFrames videos. Use for design spec (frame.md / design.md) handling, palettes, typography, narration, beat planning, audio-reactive visuals, composition patterns, and brand / style decisions. For atomic motion patterns and scene blueprints, use `hyperframes-animation`. | user | `C:\Users\Franco\.agents\skills\hyperframes-creative\SKILL.md` |
-| `hyperframes-keyframes` | Use when a HyperFrames composition needs seek-safe 2D/3D keyframes, GSAP timelines, CSS keyframes, Anime.js, WAAPI, FLIP, paths, masks, SVG morph/draw, text trails, 3D depth, or `hyperframes keyframes` diagnostics. Don't use for broad scene strategy, brand design, media sourcing, captions, or general video planning. | user | `C:\Users\Franco\.agents\skills\hyperframes-keyframes\SKILL.md` |
-| `hyperframes-registry` | Install, discover, and wire registry blocks and components into HyperFrames compositions. Use when running hyperframes add or hyperframes catalog, installing one item or every block matching a tag, wiring an installed item into index.html, or working with hyperframes.json. Covers discovery, install locations, block sub-composition wiring, component snippet merging, and authoring a new block or component to contribute upstream (idea → scaffold → validate → PR). | user | `C:\Users\Franco\.agents\skills\hyperframes-registry\SKILL.md` |
-| `investigate` | Systematic debugging skill. Use when encountering a bug, test failure, unexpected behavior, or when asked to "investigate", "debug", "diagnose", or "figure out why". Enforces root-cause-first discipline with structured hypothesis tracking. | user | `C:\Users\Franco\.claude\skills\investigate\SKILL.md` |
-| `issue-creation` | Create and triage GitHub issues from repository evidence. Trigger: issue creation, bug reports, feature requests, or issue approval. | user | `C:\Users\Franco\.config\opencode\skills\issue-creation\SKILL.md` |
-| `judgment-day` | Trigger: judgment day, dual review, adversarial review, juzgar. Run explicit blind dual review with at most two scoped fix/re-judgment rounds. | user | `C:\Users\Franco\.config\opencode\skills\judgment-day\SKILL.md` |
-| `media-use` | Agent Media OS, the single skill for every media need in a HyperFrames project. Resolve BGM, SFX, image, icon, brand logo, voice, color grade, or LUT into a frozen local file or paste-ready block + ledger record (one verb, `resolve`); generate via TTS / music / image models when the catalog misses; produce voiceover, transcription, captions, and background removal through one shared audio engine; operate on media (cut / reframe / transform); and reuse assets across projects. Keeps search noise on disk, hands the agent one path or block. Use for any audio, image, icon, logo, voiceover, caption, color-grading, or media-asset need. | user | `C:\Users\Franco\.agents\skills\media-use\SKILL.md` |
-| `qa` | QA testing skill with real browser automation. Use when asked to "test this site", "QA this page", "check for visual bugs", "verify the deploy", or when Hydra needs browser validation for UI changes. Requires the browse binary. | user | `C:\Users\Franco\.claude\skills\qa\SKILL.md` |
-| `receiving-code-review` | Use when receiving code review feedback, before implementing suggestions, especially if feedback seems unclear or technically questionable - requires technical rigor and verification, not performative agreement or blind implementation | user | `C:\Users\Franco\.claude\skills\receiving-code-review--5a6d570ad1\SKILL.md` |
-| `requesting-code-review` | Use when completing tasks, implementing major features, or before merging to verify work meets requirements | user | `C:\Users\Franco\.claude\skills\requesting-code-review--5dd641c87a\SKILL.md` |
-| `security-audit` | Security audit skill. Use when asked to "audit security", "check for vulnerabilities", "security review", "pentest", or when evaluating code that handles auth, user input, secrets, or external data. Runs a phased scan covering OWASP Top 10 and STRIDE threat modeling. | user | `C:\Users\Franco\.claude\skills\security-audit\SKILL.md` |
-| `seo-audit` | When the user wants to audit, review, or diagnose SEO issues on their site. Also use when the user mentions "SEO audit," "technical SEO," "why am I not ranking," "SEO issues," "on-page SEO," "meta tags review," "SEO health check," "my traffic dropped," "lost rankings," "not showing up in Google," "site isn't ranking," "Google update hit me," "page speed," "core web vitals," "crawl errors," or "indexing issues." Use this even if the user just says something vague like "my SEO is bad" or "help with SEO" — start with an audit. For building pages at scale to target keywords, see programmatic-seo. For adding structured data, see schema. For AI search optimization, see ai-seo. | user | `C:\Users\Franco\.agents\skills\seo-audit\SKILL.md` |
-| `skill-creator` | Trigger: new skills, agent instructions, documenting AI usage patterns. Create LLM-first skills with valid frontmatter. | user | `C:\Users\Franco\.config\opencode\skills\skill-creator\SKILL.md` |
-| `skill-improver` | Trigger: improve skills, audit skills, refactor skills, skill quality. Audit and upgrade existing LLM-first skills. | user | `C:\Users\Franco\.config\opencode\skills\skill-improver\SKILL.md` |
-| `subagent-driven-development` | Use when executing implementation plans with independent tasks in the current session | user | `C:\Users\Franco\.claude\skills\subagent-driven-development--c7f2c63abc\SKILL.md` |
-| `systematic-debugging` | Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes | user | `C:\Users\Franco\.claude\skills\systematic-debugging--d9a83639ff\SKILL.md` |
-| `test-driven-development` | Use when implementing any feature or bugfix, before writing implementation code | user | `C:\Users\Franco\.claude\skills\test-driven-development--f22c9c9eef\SKILL.md` |
-| `using-git-worktrees` | Use when starting feature work that needs isolation from current workspace or before executing implementation plans - creates isolated git worktrees with smart directory selection and safety verification | user | `C:\Users\Franco\.claude\skills\using-git-worktrees--058ef2390a\SKILL.md` |
-| `using-superpowers` | Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions | user | `C:\Users\Franco\.claude\skills\using-superpowers--9ed33a2ead\SKILL.md` |
-| `using-termcanvas` | Use when starting work in a TermCanvas-managed repo to route between direct work, Hydra, or a narrow TermCanvas skill. | user | `C:\Users\Franco\.claude\skills\using-termcanvas\SKILL.md` |
-| `verification-before-completion` | Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always | user | `C:\Users\Franco\.claude\skills\verification-before-completion--a42c12e610\SKILL.md` |
-| `work-unit-commits` | Plan commits as reviewable work units. Trigger: implementation, commit splitting, chained PRs, or keeping tests and docs with code. | user | `C:\Users\Franco\.config\opencode\skills\work-unit-commits\SKILL.md` |
-| `writing-plans` | Use when you have a spec or requirements for a multi-step task, before touching code | user | `C:\Users\Franco\.claude\skills\writing-plans--4276e6d5cb\SKILL.md` |
+| `accessibility-compliance` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\accessibility-compliance\SKILL.md` |
+| `agent-browser` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\agent-browser\SKILL.md` |
+| `anti-reversing-techniques` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\anti-reversing-techniques\SKILL.md` |
+| `api-design-principles` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\api-design-principles\SKILL.md` |
+| `api-security-best-practices` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\api-security-best-practices\SKILL.md` |
+| `architecture-decision-records` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\architecture-decision-records\SKILL.md` |
+| `architecture-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\architecture-patterns\SKILL.md` |
+| `async-python-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\async-python-patterns\SKILL.md` |
+| `attack-tree-construction` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\attack-tree-construction\SKILL.md` |
+| `auth-implementation-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\auth-implementation-patterns\SKILL.md` |
+| `bash-defensive-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\bash-defensive-patterns\SKILL.md` |
+| `branch-pr` | Create Gentle AI pull requests with issue-first checks. Trigger: creating, opening, or preparing PRs for review. | user | `C:\Users\Estudiante UCU\.config\opencode\skills\branch-pr\SKILL.md` |
+| `chained-pr` | Trigger: PRs over 400 lines, stacked PRs, review slices. Split oversized changes into chained PRs that protect review focus. | user | `C:\Users\Estudiante UCU\.config\opencode\skills\chained-pr\SKILL.md` |
+| `challenge` | Adversarial review skill. Use when the user wants to stress-test an idea, argument, proposal, or opinion from multiple independent angles. Spawns parallel Hydra workers with orthogonal analytical methodologies. | user | `C:\Users\Estudiante UCU\.claude\skills\challenge\SKILL.md` |
+| `clonedeps` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\clonedeps\SKILL.md` |
+| `code-quality` | Clean code principles, SOLID, and code review practices | user | `C:\Users\Estudiante UCU\.config\opencode\skills\code-quality\SKILL.md` |
+| `code-review` | Structured code review skill. Use when asked to "review this code", "review this PR", "check this diff", or when acting as a Hydra reviewer. Runs a multi-pass review with specialist focus areas and confidence-gated findings. | user | `C:\Users\Estudiante UCU\.claude\skills\code-review\SKILL.md` |
+| `code-review-excellence` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\code-review-excellence\SKILL.md` |
+| `codemap` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\codemap\SKILL.md` |
+| `cognitive-doc-design` | Design docs that reduce cognitive load. Trigger: writing guides, READMEs, RFCs, onboarding, architecture, or review-facing docs. | user | `C:\Users\Estudiante UCU\.config\opencode\skills\cognitive-doc-design\SKILL.md` |
+| `comment-writer` | Write warm, direct collaboration comments. Trigger: PR feedback, issue replies, reviews, Slack messages, or GitHub comments. | user | `C:\Users\Estudiante UCU\.config\opencode\skills\comment-writer\SKILL.md` |
+| `cost-optimization` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\cost-optimization\SKILL.md` |
+| `create-mcp-app` | This skill should be used when the user asks to "create an MCP App", "add a UI to an MCP tool", "build an interactive MCP View", "scaffold an MCP App", or needs guidance on MCP Apps SDK patterns, UI-resource registration, MCP App lifecycle, or host integration. Provides comprehensive guidance for building MCP Apps with interactive UIs. | user | `C:\Users\Estudiante UCU\.agents\skills\excalidraw-skill\SKILL.md` |
+| `database-migration` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\database-migration\SKILL.md` |
+| `debugging-strategies` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\debugging-strategies\SKILL.md` |
+| `deepwork` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\deepwork\SKILL.md` |
+| `dependency-upgrade` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\dependency-upgrade\SKILL.md` |
+| `design-system-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\design-system-patterns\SKILL.md` |
+| `docker-compose-orchestration` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\docker-compose-orchestration\SKILL.md` |
+| `docker-expert` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\docker-expert\SKILL.md` |
+| `docker-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\docker-patterns\SKILL.md` |
+| `dotnet-backend-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\dotnet-backend-patterns\SKILL.md` |
+| `eloquent-best-practices` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\eloquent-best-practices\SKILL.md` |
+| `frontend-design` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\frontend-design\SKILL.md` |
+| `go-concurrency-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\go-concurrency-patterns\SKILL.md` |
+| `go-testing` | Trigger: Go tests, go test coverage, Bubbletea teatest, golden files. Apply focused Go testing patterns. | user | `C:\Users\Estudiante UCU\.config\opencode\skills\go-testing\SKILL.md` |
+| `hydra` | Use when a task should run through Hydra's Lead-driven workflow for multi-agent orchestration, or when an existing workflow must be inspected or cleaned up. | user | `C:\Users\Estudiante UCU\.claude\skills\hydra\SKILL.md` |
+| `investigate` | Systematic debugging skill. Use when encountering a bug, test failure, unexpected behavior, or when asked to "investigate", "debug", "diagnose", or "figure out why". Enforces root-cause-first discipline with structured hypothesis tracking. | user | `C:\Users\Estudiante UCU\.claude\skills\investigate\SKILL.md` |
+| `issue-creation` | Create Gentle AI issues with issue-first checks. Trigger: creating GitHub issues, bug reports, or feature requests. | user | `C:\Users\Estudiante UCU\.config\opencode\skills\issue-creation\SKILL.md` |
+| `javascript-testing-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\javascript-testing-patterns\SKILL.md` |
+| `judgment-day` | Trigger: judgment day, dual review, adversarial review, juzgar. Run explicit blind dual review with at most two scoped fix/re-judgment rounds. | user | `C:\Users\Estudiante UCU\.config\opencode\skills\judgment-day\SKILL.md` |
+| `laravel-actions` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-actions\SKILL.md` |
+| `laravel-api-resource-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-api-resource-patterns\SKILL.md` |
+| `laravel-api-resources-and-pagination` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-api-resources-and-pagination\SKILL.md` |
+| `laravel-api-surface-evolution` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-api-surface-evolution\SKILL.md` |
+| `laravel-architecture` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-architecture\SKILL.md` |
+| `laravel-authorization-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-authorization-patterns\SKILL.md` |
+| `laravel-backup` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-backup\SKILL.md` |
+| `laravel-best-practices` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-best-practices\SKILL.md` |
+| `laravel-blade-component-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-blade-component-patterns\SKILL.md` |
+| `laravel-blade-components-and-layouts` | Compose UIs with Blade components, slots, and layouts; keep templates pure and testable | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-blade-components-and-layouts\SKILL.md` |
+| `laravel-bootstrap-check` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-bootstrap-check\SKILL.md` |
+| `laravel-brainstorming-01` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-brainstorming-01\SKILL.md` |
+| `laravel-brainstorming-02` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-brainstorming-02\SKILL.md` |
+| `laravel-caching-strategies` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-caching-strategies\SKILL.md` |
+| `laravel-code-review-requests` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-code-review-requests\SKILL.md` |
+| `laravel-complexity-guardrails` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-complexity-guardrails\SKILL.md` |
+| `laravel-config-env-storage` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-config-env-storage\SKILL.md` |
+| `laravel-constants-and-configuration` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-constants-and-configuration\SKILL.md` |
+| `laravel-controller-cleanup` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-controller-cleanup\SKILL.md` |
+| `laravel-controller-tests` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-controller-tests\SKILL.md` |
+| `laravel-controllers` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-controllers\SKILL.md` |
+| `laravel-custom-helpers` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-custom-helpers\SKILL.md` |
+| `laravel-daily-workflow` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-daily-workflow\SKILL.md` |
+| `laravel-data-chunking-large-datasets` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-data-chunking-large-datasets\SKILL.md` |
+| `laravel-debugging-prompts` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-debugging-prompts\SKILL.md` |
+| `laravel-dependencies-trim-packages` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-dependencies-trim-packages\SKILL.md` |
+| `laravel-documentation-best-practices` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-documentation-best-practices\SKILL.md` |
+| `laravel-dtos` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-dtos\SKILL.md` |
+| `laravel-e2e-playwright` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-e2e-playwright\SKILL.md` |
+| `laravel-effective-context` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-effective-context\SKILL.md` |
+| `laravel-eloquent-relationships` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-eloquent-relationships\SKILL.md` |
+| `laravel-enums` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-enums\SKILL.md` |
+| `laravel-event-driven-architecture` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-event-driven-architecture\SKILL.md` |
+| `laravel-exception-handling-and-logging` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-exception-handling-and-logging\SKILL.md` |
+| `laravel-exceptions` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-exceptions\SKILL.md` |
+| `laravel-executing-plans` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-executing-plans\SKILL.md` |
+| `laravel-feature-flags` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-feature-flags\SKILL.md` |
+| `laravel-filesystem-uploads` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-filesystem-uploads\SKILL.md` |
+| `laravel-form-requests` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-form-requests\SKILL.md` |
+| `laravel-horizon-metrics-and-dashboards` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-horizon-metrics-and-dashboards\SKILL.md` |
+| `laravel-http-client-resilience` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-http-client-resilience\SKILL.md` |
+| `laravel-interfaces-and-di` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-interfaces-and-di\SKILL.md` |
+| `laravel-internationalization-and-translation` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-internationalization-and-translation\SKILL.md` |
+| `laravel-iterating-on-code` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-iterating-on-code\SKILL.md` |
+| `laravel-jobs` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-jobs\SKILL.md` |
+| `laravel-laravel-prompting-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-laravel-prompting-patterns\SKILL.md` |
+| `laravel-middleware-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-middleware-patterns\SKILL.md` |
+| `laravel-migrations-and-factories` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-migrations-and-factories\SKILL.md` |
+| `laravel-models` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-models\SKILL.md` |
+| `laravel-multi-tenancy` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-multi-tenancy\SKILL.md` |
+| `laravel-notification-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-notification-patterns\SKILL.md` |
+| `laravel-nova-resource-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-nova-resource-patterns\SKILL.md` |
+| `laravel-packages` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-packages\SKILL.md` |
+| `laravel-performance-caching` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-performance-caching\SKILL.md` |
+| `laravel-performance-eager-loading` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-performance-eager-loading\SKILL.md` |
+| `laravel-performance-select-columns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-performance-select-columns\SKILL.md` |
+| `laravel-policies` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-policies\SKILL.md` |
+| `laravel-policies-and-authorization` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-policies-and-authorization\SKILL.md` |
+| `laravel-ports-and-adapters` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-ports-and-adapters\SKILL.md` |
+| `laravel-prompt-structure` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-prompt-structure\SKILL.md` |
+| `laravel-providers` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-providers\SKILL.md` |
+| `laravel-quality` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-quality\SKILL.md` |
+| `laravel-quality-checks` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-quality-checks\SKILL.md` |
+| `laravel-query-builder` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-query-builder\SKILL.md` |
+| `laravel-query-builders` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-query-builders\SKILL.md` |
+| `laravel-queue-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-queue-patterns\SKILL.md` |
+| `laravel-queues-and-horizon` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-queues-and-horizon\SKILL.md` |
+| `laravel-rate-limiting` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-rate-limiting\SKILL.md` |
+| `laravel-routes-best-practices` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-routes-best-practices\SKILL.md` |
+| `laravel-routing` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-routing\SKILL.md` |
+| `laravel-runner-selection` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-runner-selection\SKILL.md` |
+| `laravel-services` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-services\SKILL.md` |
+| `laravel-specialist` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-specialist\SKILL.md` |
+| `laravel-specifying-constraints` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-specifying-constraints\SKILL.md` |
+| `laravel-state-machines` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-state-machines\SKILL.md` |
+| `laravel-strategy-pattern` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-strategy-pattern\SKILL.md` |
+| `laravel-systematic-debugging` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-systematic-debugging\SKILL.md` |
+| `laravel-task-scheduling-01` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-task-scheduling-01\SKILL.md` |
+| `laravel-task-scheduling-02` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-task-scheduling-02\SKILL.md` |
+| `laravel-tdd` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-tdd\SKILL.md` |
+| `laravel-tdd-with-pest` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-tdd-with-pest\SKILL.md` |
+| `laravel-template-method-and-plugins` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-template-method-and-plugins\SKILL.md` |
+| `laravel-testing` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-testing\SKILL.md` |
+| `laravel-transactions-and-consistency` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-transactions-and-consistency\SKILL.md` |
+| `laravel-using-examples-in-prompts` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-using-examples-in-prompts\SKILL.md` |
+| `laravel-using-laravel-superpowers` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-using-laravel-superpowers\SKILL.md` |
+| `laravel-validation` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-validation\SKILL.md` |
+| `laravel-validation-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-validation-patterns\SKILL.md` |
+| `laravel-value-objects` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-value-objects\SKILL.md` |
+| `laravel-writing-plans` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\laravel-writing-plans\SKILL.md` |
+| `memory-forensics` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\memory-forensics\SKILL.md` |
+| `memory-safety-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\memory-safety-patterns\SKILL.md` |
+| `mobile-android-design` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\mobile-android-design\SKILL.md` |
+| `mobile-ios-design` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\mobile-ios-design\SKILL.md` |
+| `modern-javascript-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\modern-javascript-patterns\SKILL.md` |
+| `mrjmpl3-add-educational-comments` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\mrjmpl3-add-educational-comments\SKILL.md` |
+| `mrjmpl3-commit-staged` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\mrjmpl3-commit-staged\SKILL.md` |
+| `mrjmpl3-init-deep` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\mrjmpl3-init-deep\SKILL.md` |
+| `multi-stage-dockerfile` | Create optimized multi-stage Dockerfiles for any language or framework | user | `C:\Users\Estudiante UCU\.config\opencode\skills\multi-stage-dockerfile\SKILL.md` |
+| `nextjs` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\nextjs\SKILL.md` |
+| `nextjs-app-router-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\nextjs-app-router-patterns\SKILL.md` |
+| `nlm-skill` | Expert guide for the NotebookLM CLI (`nlm`) and MCP server - interfaces for Google NotebookLM. Use this skill when users want to interact with NotebookLM programmatically, including: creating/managing notebooks, adding sources (URLs, YouTube, text, Google Drive), generating content (podcasts, reports, quizzes, flashcards, mind maps, slides, infographics, videos, data tables), conducting research, chatting with sources, or automating NotebookLM workflows. Triggers on mentions of \"nlm\", \"notebooklm\", \"notebook lm\", \"podcast generation\", \"audio overview\", or any NotebookLM-related automation task. | user | `C:\Users\Estudiante UCU\.copilot\skills\nlm-skill\SKILL.md` |
+| `nodejs-backend-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\nodejs-backend-patterns\SKILL.md` |
+| `nuxt-architecture` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\nuxt-architecture\SKILL.md` |
+| `nuxt-auth` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\nuxt-auth\SKILL.md` |
+| `nuxt-components` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\nuxt-components\SKILL.md` |
+| `nuxt-composables` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\nuxt-composables\SKILL.md` |
+| `nuxt-config` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\nuxt-config\SKILL.md` |
+| `nuxt-enums` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\nuxt-enums\SKILL.md` |
+| `nuxt-errors` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\nuxt-errors\SKILL.md` |
+| `nuxt-features` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\nuxt-features\SKILL.md` |
+| `nuxt-forms` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\nuxt-forms\SKILL.md` |
+| `nuxt-layers` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\nuxt-layers\SKILL.md` |
+| `nuxt-models` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\nuxt-models\SKILL.md` |
+| `nuxt-pages` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\nuxt-pages\SKILL.md` |
+| `nuxt-realtime` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\nuxt-realtime\SKILL.md` |
+| `nuxt-repositories` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\nuxt-repositories\SKILL.md` |
+| `nuxt-tables` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\nuxt-tables\SKILL.md` |
+| `oh-my-opencode-slim` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\oh-my-opencode-slim\SKILL.md` |
+| `openapi-spec-generation` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\openapi-spec-generation\SKILL.md` |
+| `pinia` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\pinia\SKILL.md` |
+| `protocol-reverse-engineering` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\protocol-reverse-engineering\SKILL.md` |
+| `python-anti-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\python-anti-patterns\SKILL.md` |
+| `python-background-jobs` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\python-background-jobs\SKILL.md` |
+| `python-code-style` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\python-code-style\SKILL.md` |
+| `python-configuration` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\python-configuration\SKILL.md` |
+| `python-design-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\python-design-patterns\SKILL.md` |
+| `python-error-handling` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\python-error-handling\SKILL.md` |
+| `python-observability` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\python-observability\SKILL.md` |
+| `python-packaging` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\python-packaging\SKILL.md` |
+| `python-performance-optimization` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\python-performance-optimization\SKILL.md` |
+| `python-project-structure` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\python-project-structure\SKILL.md` |
+| `python-resilience` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\python-resilience\SKILL.md` |
+| `python-resource-management` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\python-resource-management\SKILL.md` |
+| `python-testing-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\python-testing-patterns\SKILL.md` |
+| `python-type-safety` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\python-type-safety\SKILL.md` |
+| `qa` | QA testing skill with real browser automation. Use when asked to "test this site", "QA this page", "check for visual bugs", "verify the deploy", or when Hydra needs browser validation for UI changes. Requires the browse binary. | user | `C:\Users\Estudiante UCU\.claude\skills\qa\SKILL.md` |
+| `react-expert` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\react-expert\SKILL.md` |
+| `react-modernization` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\react-modernization\SKILL.md` |
+| `react-native-architecture` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\react-native-architecture\SKILL.md` |
+| `react-native-design` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\react-native-design\SKILL.md` |
+| `react-state-management` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\react-state-management\SKILL.md` |
+| `react19-test-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\react19-test-patterns\SKILL.md` |
+| `readme-i18n` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\readme-i18n\SKILL.md` |
+| `reflect` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\reflect\SKILL.md` |
+| `release-smoke-test` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\release-smoke-test\SKILL.md` |
+| `responsive-design` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\responsive-design\SKILL.md` |
+| `rust-async-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\rust-async-patterns\SKILL.md` |
+| `scan` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\scan\SKILL.md` |
+| `screen-reader-testing` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\screen-reader-testing\SKILL.md` |
+| `secrets-management` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\secrets-management\SKILL.md` |
+| `security-audit` | Security audit skill. Use when asked to "audit security", "check for vulnerabilities", "security review", "pentest", or when evaluating code that handles auth, user input, secrets, or external data. Runs a phased scan covering OWASP Top 10 and STRIDE threat modeling. | user | `C:\Users\Estudiante UCU\.claude\skills\security-audit\SKILL.md` |
+| `shadcn` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\shadcn\SKILL.md` |
+| `shellcheck-configuration` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\shellcheck-configuration\SKILL.md` |
+| `similarity-search-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\similarity-search-patterns\SKILL.md` |
+| `simplify` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\simplify\SKILL.md` |
+| `skill-creator` | Trigger: new skills, agent instructions, documenting AI usage patterns. Create LLM-first skills with valid frontmatter. | user | `C:\Users\Estudiante UCU\.config\opencode\skills\skill-creator\SKILL.md` |
+| `skill-improver` | Trigger: improve skills, audit skills, refactor skills, skill quality. Audit and upgrade existing LLM-first skills. | user | `C:\Users\Estudiante UCU\.config\opencode\skills\skill-improver\SKILL.md` |
+| `slo-implementation` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\slo-implementation\SKILL.md` |
+| `software-engineer` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\software-engineer\SKILL.md` |
+| `spatie-javascript` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\spatie-javascript\SKILL.md` |
+| `spatie-laravel-php` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\spatie-laravel-php\SKILL.md` |
+| `spatie-laravel-php-standards` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\spatie-laravel-php-standards\SKILL.md` |
+| `spatie-security` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\spatie-security\SKILL.md` |
+| `sql-optimization-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\sql-optimization-patterns\SKILL.md` |
+| `tailwind-design-system` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\tailwind-design-system\SKILL.md` |
+| `threat-mitigation-mapping` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\threat-mitigation-mapping\SKILL.md` |
+| `typescript-advanced-types` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\typescript-advanced-types\SKILL.md` |
+| `typescript-expert` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\typescript-expert\SKILL.md` |
+| `ui-ux-pro-max` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\ui-ux-pro-max\SKILL.md` |
+| `unity-ecs-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\unity-ecs-patterns\SKILL.md` |
+| `using-termcanvas` | Use when starting work in a TermCanvas-managed repo to route between direct work, Hydra, or a narrow TermCanvas skill. | user | `C:\Users\Estudiante UCU\.claude\skills\using-termcanvas\SKILL.md` |
+| `uv-package-manager` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\uv-package-manager\SKILL.md` |
+| `vercel-composition-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\vercel-composition-patterns\SKILL.md` |
+| `vercel-react-best-practices` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\vercel-react-best-practices\SKILL.md` |
+| `verification-planning` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\verification-planning\SKILL.md` |
+| `visual-design-foundations` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\visual-design-foundations\SKILL.md` |
+| `vue` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\vue\SKILL.md` |
+| `vue-best-practices` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\vue-best-practices\SKILL.md` |
+| `vueuse-functions` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\vueuse-functions\SKILL.md` |
+| `wcag-audit-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\wcag-audit-patterns\SKILL.md` |
+| `web-component-design` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\web-component-design\SKILL.md` |
+| `work-unit-commits` | Plan commits as reviewable work units. Trigger: implementation, commit splitting, chained PRs, or keeping tests and docs with code. | user | `C:\Users\Estudiante UCU\.config\opencode\skills\work-unit-commits\SKILL.md` |
+| `worktrees` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\worktrees\SKILL.md` |
 
 ## Loading protocol
 

@@ -477,12 +477,189 @@ test("buildLaunchSpec wraps Windows .cmd launchers with cmd.exe", async () => {
   );
 
   assert.equal(launch.file, "C:\\Windows\\System32\\cmd.exe");
+  assert.equal(
+    launch.args,
+    '/d /s /c ""C:\\Users\\test\\AppData\\Roaming\\npm\\claude.cmd" --resume abc123"',
+  );
+});
+
+test("buildLaunchSpec quotes .cmd launcher and args with spaces (Windows username with spaces)", async () => {
+  const launch = await buildLaunchSpec(
+    {
+      cwd: "C:\\repo",
+      shell: "opencode",
+      args: ["--auto", "--prompt", "resolve issue #42 fix login bug"],
+    },
+    createWindowsDeps({
+      existsSync: (file) =>
+        [
+          "C:\\repo",
+          "C:\\Windows\\System32\\cmd.exe",
+          "C:\\Users\\Estudiante UCU\\AppData\\Roaming\\npm\\opencode.cmd",
+        ].includes(file),
+      isExecutable: (file) =>
+        [
+          "C:\\Windows\\System32\\cmd.exe",
+          "C:\\Users\\Estudiante UCU\\AppData\\Roaming\\npm\\opencode.cmd",
+        ].includes(file),
+      getShellEnv: async () => ({
+        LOCALAPPDATA: "C:\\Users\\Estudiante UCU\\AppData\\Local",
+        APPDATA: "C:\\Users\\Estudiante UCU\\AppData\\Roaming",
+        USERPROFILE: "C:\\Users\\Estudiante UCU",
+        ComSpec: "C:\\Windows\\System32\\cmd.exe",
+        PATH: "C:\\Users\\Estudiante UCU\\AppData\\Roaming\\npm",
+      }),
+    }),
+  );
+
+  assert.equal(launch.file, "C:\\Windows\\System32\\cmd.exe");
+  assert.equal(
+    launch.args,
+    '/d /s /c ""C:\\Users\\Estudiante UCU\\AppData\\Roaming\\npm\\opencode.cmd" --auto --prompt "resolve issue #42 fix login bug""',
+  );
+});
+
+const OPENCODE_SHIM = `@ECHO off
+GOTO start
+:find_dp0
+SET dp0=%~dp0
+EXIT /b
+:start
+SETLOCAL
+CALL :find_dp0
+"%dp0%\\node_modules\\opencode-ai\\bin\\opencode.exe"   %*
+`;
+
+test("buildLaunchSpec resolves npm .cmd shims to the real exe and keeps args as an array", async () => {
+  const opencodeExe =
+    "C:\\Users\\Estudiante UCU\\AppData\\Roaming\\npm\\node_modules\\opencode-ai\\bin\\opencode.exe";
+
+  const launch = await buildLaunchSpec(
+    {
+      cwd: "C:\\repo",
+      shell: "opencode",
+      args: ["--auto", "--prompt", 'resolve issue #42, closes "Closes #8"'],
+    },
+    createWindowsDeps({
+      existsSync: (file) =>
+        [
+          "C:\\repo",
+          opencodeExe,
+          "C:\\Users\\Estudiante UCU\\AppData\\Roaming\\npm\\opencode.cmd",
+        ].includes(file),
+      isExecutable: (file) =>
+        [opencodeExe, "C:\\Users\\Estudiante UCU\\AppData\\Roaming\\npm\\opencode.cmd"].includes(
+          file,
+        ),
+      readFileSync: () => OPENCODE_SHIM,
+      getShellEnv: async () => ({
+        LOCALAPPDATA: "C:\\Users\\Estudiante UCU\\AppData\\Local",
+        APPDATA: "C:\\Users\\Estudiante UCU\\AppData\\Roaming",
+        USERPROFILE: "C:\\Users\\Estudiante UCU",
+        ComSpec: "C:\\Windows\\System32\\cmd.exe",
+        PATH: "C:\\Users\\Estudiante UCU\\AppData\\Roaming\\npm",
+      }),
+    }),
+  );
+
+  assert.equal(launch.file, opencodeExe);
   assert.deepEqual(launch.args, [
-    "/d",
-    "/s",
-    "/c",
-    "C:\\Users\\test\\AppData\\Roaming\\npm\\claude.cmd",
-    "--resume",
-    "abc123",
+    "--auto",
+    "--prompt",
+    'resolve issue #42, closes "Closes #8"',
   ]);
+});
+
+const PNPM_SHIM = `@ECHO off
+GOTO start
+:find_dp0
+SET dp0=%~dp0
+EXIT /b
+:start
+SETLOCAL
+CALL :find_dp0
+
+IF EXIST "%dp0%\\node.exe" (
+  SET "_prog=%dp0%\\node.exe"
+) ELSE (
+  SET "_prog=node"
+  SET PATHEXT=%PATHEXT:;.JS;=;%
+)
+
+endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\corepack\\dist\\pnpm.js" %*
+`;
+
+test("buildLaunchSpec resolves node-based .cmd shims to node.exe with the script as prefix arg", async () => {
+  const nodeExe = "C:\\Program Files\\nodejs\\node.exe";
+  const pnpmScript =
+    "C:\\Users\\test\\AppData\\Roaming\\npm\\node_modules\\corepack\\dist\\pnpm.js";
+
+  const launch = await buildLaunchSpec(
+    {
+      cwd: "C:\\repo",
+      shell: "pnpm",
+      args: ["install", "--frozen-lockfile"],
+    },
+    createWindowsDeps({
+      existsSync: (file) =>
+        [
+          "C:\\repo",
+          nodeExe,
+          pnpmScript,
+          "C:\\Users\\test\\AppData\\Roaming\\npm\\pnpm.cmd",
+        ].includes(file),
+      isExecutable: (file) =>
+        [nodeExe, "C:\\Users\\test\\AppData\\Roaming\\npm\\pnpm.cmd"].includes(
+          file,
+        ),
+      readFileSync: () => PNPM_SHIM,
+      getShellEnv: async () => ({
+        LOCALAPPDATA: "C:\\Users\\test\\AppData\\Local",
+        APPDATA: "C:\\Users\\test\\AppData\\Roaming",
+        USERPROFILE: "C:\\Users\\test",
+        ComSpec: "C:\\Windows\\System32\\cmd.exe",
+        PATH: "C:\\Program Files\\nodejs;C:\\Users\\test\\AppData\\Roaming\\npm",
+      }),
+    }),
+  );
+
+  assert.equal(launch.file, nodeExe);
+  assert.deepEqual(launch.args, [pnpmScript, "install", "--frozen-lockfile"]);
+});
+
+test("buildLaunchSpec falls back to cmd.exe when the shim target is missing", async () => {
+  const launch = await buildLaunchSpec(
+    {
+      cwd: "C:\\repo",
+      shell: "claude",
+      args: ["--resume", "abc123"],
+    },
+    createWindowsDeps({
+      existsSync: (file) =>
+        [
+          "C:\\repo",
+          "C:\\Windows\\System32\\cmd.exe",
+          "C:\\Users\\test\\AppData\\Roaming\\npm\\claude.cmd",
+        ].includes(file),
+      isExecutable: (file) =>
+        [
+          "C:\\Windows\\System32\\cmd.exe",
+          "C:\\Users\\test\\AppData\\Roaming\\npm\\claude.cmd",
+        ].includes(file),
+      readFileSync: () => OPENCODE_SHIM,
+      getShellEnv: async () => ({
+        LOCALAPPDATA: "C:\\Users\\test\\AppData\\Local",
+        APPDATA: "C:\\Users\\test\\AppData\\Roaming",
+        USERPROFILE: "C:\\Users\\test",
+        ComSpec: "C:\\Windows\\System32\\cmd.exe",
+        PATH: "C:\\Users\\test\\AppData\\Roaming\\npm",
+      }),
+    }),
+  );
+
+  assert.equal(launch.file, "C:\\Windows\\System32\\cmd.exe");
+  assert.equal(
+    launch.args,
+    '/d /s /c ""C:\\Users\\test\\AppData\\Roaming\\npm\\claude.cmd" --resume abc123"',
+  );
 });

@@ -21,7 +21,7 @@ export interface PtyLaunchOptions {
 export interface PtyResolvedLaunchSpec {
   cwd: string;
   file: string;
-  args: string[];
+  args: string[] | string;
   env: Record<string, string>;
 }
 
@@ -304,6 +304,113 @@ function isWindowsBatchScript(file: string, platform: NodeJS.Platform): boolean 
   return lower.endsWith(".cmd") || lower.endsWith(".bat");
 }
 
+// cmd.exe parses its own command line and does NOT understand the
+// CommandLineToArgvW backslash-escaping node-pty applies to argv entries.
+// The canonical wrap for launching a batch script whose path contains
+// spaces is: cmd /c ""C:\path with spaces\script.cmd" arg1 "arg 2""
+// Passing the WHOLE line as a single string makes node-pty forward it
+// verbatim (isCommandLine path), so our quoting reaches cmd.exe intact.
+function quoteCmdLineArg(arg: string): string {
+  if (/^[^\s"&|<>^()%!]+$/.test(arg)) return arg;
+  return `"${arg.replace(/"/g, '""')}"`;
+}
+
+function buildWindowsBatchCommandLine(
+  executable: string,
+  launchArgs: string[],
+): string {
+  const argsPart = launchArgs.length
+    ? ` ${launchArgs.map(quoteCmdLineArg).join(" ")}`
+    : "";
+  return `/d /s /c ""${executable}"${argsPart}"`;
+}
+
+interface WindowsShimTarget {
+  file: string;
+  prefixArgs: string[];
+}
+
+// npm installs `.cmd` shims that only delegate to the real binary, e.g.
+//   "%dp0%\node_modules\opencode-ai\bin\opencode.exe"   %*
+// or the node-based variant:
+//   "%_prog%"  "%dp0%\node_modules\corepack\dist\pnpm.js" %*
+// Launching the target directly (instead of wrapping the shim with cmd.exe)
+// lets node-pty quote arguments with CommandLineToArgvW rules, which the
+// target parses correctly. cmd.exe cannot escape double quotes inside an
+// argument, so prompts containing e.g. "Closes #8" corrupt the command line.
+function resolveWindowsShimTarget(
+  shimPath: string,
+  env: Record<string, string>,
+  deps: Pick<
+    LaunchResolverDeps,
+    | "platform"
+    | "pathDelimiter"
+    | "existsSync"
+    | "isExecutable"
+    | "readFileSync"
+  >,
+): WindowsShimTarget | null {
+  let content: string;
+  try {
+    content = deps.readFileSync(shimPath, "utf-8");
+  } catch {
+    return null;
+  }
+
+  const execLine = content
+    .split(/\r?\n/)
+    .find((line) => line.includes("%*") && !line.trim().startsWith("@"));
+  if (!execLine) return null;
+
+  const quotedTokens = [...execLine.matchAll(/"([^"]*)"/g)].map(
+    (match) => match[1],
+  );
+  if (!quotedTokens.length) return null;
+
+  const shimDir = path.win32.dirname(shimPath);
+  const expandVars = (token: string): string | null => {
+    let expanded = token
+      .replace(/%~dp0/gi, `${shimDir}\\`)
+      .replace(/%dp0%/gi, `${shimDir}\\`)
+      .replace(/%_prog%/gi, () => {
+        const localNode = path.win32.join(shimDir, "node.exe");
+        return deps.existsSync(localNode) ? localNode : "node";
+      });
+    // %dp0% ends with a backslash, so shims like "%dp0%\node_modules\..."
+    // expand to a double backslash that Windows tolerates but path checks
+    // do not; collapse runs without touching a leading UNC prefix.
+    expanded = expanded.replace(/\\{2,}/g, (run, offset: number) =>
+      offset === 0 ? run : "\\",
+    );
+    if (/%[a-zA-Z_][a-zA-Z0-9_]*%/.test(expanded)) return null;
+    return expanded;
+  };
+
+  const tokens: string[] = [];
+  for (const raw of quotedTokens) {
+    const expanded = expandVars(raw);
+    if (expanded === null) return null;
+    tokens.push(expanded);
+  }
+
+  const resolveProgram = (name: string): string | null => {
+    const resolved = resolveExecutable(name, env, deps);
+    if (!resolved || isWindowsBatchScript(resolved, deps.platform)) return null;
+    return resolved;
+  };
+
+  const first = tokens[0];
+  if (first.toLowerCase().endsWith(".js") && deps.existsSync(first)) {
+    const node = resolveProgram("node");
+    if (!node) return null;
+    return { file: node, prefixArgs: tokens };
+  }
+
+  const program = resolveProgram(first);
+  if (!program) return null;
+  return { file: program, prefixArgs: tokens.slice(1) };
+}
+
 export function resolveUserShell(
   env: Record<string, string>,
   deps: Pick<
@@ -496,6 +603,16 @@ export async function buildLaunchSpec(
     }
 
     if (isWindowsBatchScript(executable, deps.platform)) {
+      const shimTarget = resolveWindowsShimTarget(executable, shellEnv, deps);
+      if (shimTarget) {
+        return {
+          cwd: options.cwd,
+          file: shimTarget.file,
+          args: [...shimTarget.prefixArgs, ...launchArgs],
+          env: shellEnv,
+        };
+      }
+
       const commandShell = resolveExecutable(
         shellEnv.ComSpec ?? "cmd.exe",
         shellEnv,
@@ -508,7 +625,7 @@ export async function buildLaunchSpec(
       return {
         cwd: options.cwd,
         file: commandShell,
-        args: ["/d", "/s", "/c", executable, ...launchArgs],
+        args: buildWindowsBatchCommandLine(executable, launchArgs),
         env: shellEnv,
       };
     }

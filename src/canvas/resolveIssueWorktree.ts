@@ -8,6 +8,14 @@ interface ResolveTarget {
   worktree: { path: string };
 }
 
+// git reports worktree paths with forward slashes even on Windows
+// (C:/repo/.worktrees/x), while path.join produces backslashes
+// (C:\repo\.worktrees\x). Normalize before comparing so the freshly
+// created worktree is found by path regardless of the separator style.
+function normalizePathForCompare(p: string): string {
+  return p.replace(/\\/g, "/");
+}
+
 interface CreateWorktreeResult {
   ok: true;
   path: string;
@@ -52,7 +60,10 @@ interface ResolveIssueWorktreeOptions {
   issue: IssueNodeData | undefined;
   target: ResolveTarget;
   createWorktree: CreateWorktreeFn;
-  projectLookup: { projects: ProjectForLookup[] };
+  // Live lookup, not a snapshot: the store replaces its state object on
+  // every sync, so a captured array would never see the freshly created
+  // worktree and CASE C would fail with "Worktree not found after sync".
+  getProject: (projectId: string) => ProjectForLookup | undefined;
   syncWorktrees: (projectPath: string, worktrees: { path: string; branch: string; isPrimary: boolean }[]) => void;
   createTerminal: (opts: {
     projectId: string;
@@ -119,7 +130,7 @@ export async function resolveIssueWorktree(
     issue,
     target,
     createWorktree,
-    projectLookup,
+    getProject,
     syncWorktrees,
     createTerminal,
     notify,
@@ -138,9 +149,7 @@ export async function resolveIssueWorktree(
   try {
     const branchName = buildIssueBranchName(issue);
 
-    const project = projectLookup.projects.find(
-      (p) => p.id === target.projectId,
-    );
+    const project = getProject(target.projectId);
     if (!project) {
       return { ok: false, error: "Project not found" };
     }
@@ -189,11 +198,9 @@ export async function resolveIssueWorktree(
         return { ok: false, error: result.error };
       }
       syncWorktrees(project.path, result.worktrees);
-      const syncedProject = projectLookup.projects.find(
-        (p) => p.id === target.projectId,
-      );
+      const syncedProject = getProject(target.projectId);
       const newWorktree = syncedProject?.worktrees.find(
-        (w) => w.path === result.path,
+        (w) => normalizePathForCompare(w.path) === normalizePathForCompare(result.path),
       );
       if (!newWorktree) {
         return { ok: false, error: "Worktree not found after sync" };

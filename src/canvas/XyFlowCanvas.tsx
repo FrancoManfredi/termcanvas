@@ -1169,7 +1169,10 @@ function XyFlowCanvasInner() {
                   target,
                   createWorktree: (repoPath, branch) =>
                     window.termcanvas.project.createWorktree(repoPath, branch),
-                  projectLookup: useProjectStore.getState(),
+                  getProject: (projectId) =>
+                    useProjectStore
+                      .getState()
+                      .projects.find((p) => p.id === projectId),
                   syncWorktrees: (projectPath, worktrees) =>
                     useProjectStore.getState().syncWorktrees(projectPath, worktrees),
                   createTerminal: createTerminalInScene,
@@ -1185,7 +1188,14 @@ function XyFlowCanvasInner() {
                   .then((result) => {
                     if (!result.ok || !result.case || !result.terminal) return;
                     const terminalId = result.terminal.id;
-                    if (result.case === "reused") {
+                    if (
+                      result.case === "created" ||
+                      result.case === "reused"
+                    ) {
+                      // Focus the tile so the terminal runtime actually
+                      // spawns the CLI. Without focus the tile stays inert
+                      // and a second "RESOLVER ISSUE" click is required to
+                      // resume it.
                       useProjectStore.getState().setFocusedTerminal(terminalId);
                       centerOnIssueTerminal(terminalId);
                       return;
