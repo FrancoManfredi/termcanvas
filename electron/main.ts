@@ -250,6 +250,54 @@ function emitSessionHistoryChanged(payload: SessionHistoryChangedEvent) {
   });
 }
 
+// Returns a reason string when the resolved path is too dangerous to
+// delete recursively (root, home, or an ancestor of home).
+function folderDeleteRefusalReason(resolved: string): string | null {
+  const home = os.homedir();
+  const root = path.parse(resolved).root;
+  if (
+    !path.isAbsolute(resolved) ||
+    resolved === root ||
+    resolved === home ||
+    home.startsWith(resolved + path.sep) ||
+    resolved.split(path.sep).filter(Boolean).length < 2
+  ) {
+    return `Refusing to delete unsafe path: ${resolved}`;
+  }
+  return null;
+}
+
+// Deletes a folder recursively, but only when it exists and the path
+// passes the safety check. Used to guarantee the worktree folder is gone
+// even when git leaves remnants behind. Retries a few times because on
+// Windows a recently killed terminal process may still hold the folder as
+// its cwd for a few hundred milliseconds, which makes rm fail with EBUSY.
+// Returns false when the folder still exists after all attempts.
+async function removeFolderSafely(folderPath: string): Promise<boolean> {
+  const resolved = path.resolve(folderPath);
+  if (folderDeleteRefusalReason(resolved)) {
+    return false;
+  }
+  const { access, rm } = await import("fs/promises");
+  const MAX_ATTEMPTS = 5;
+  const RETRY_DELAY_MS = 300;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      await access(resolved);
+      await rm(resolved, { recursive: true, force: true });
+      return true;
+    } catch {
+      // Folder may not exist yet (git already removed it) or is still
+      // locked by a dying process; both are retryable.
+      if (attempt === MAX_ATTEMPTS) {
+        return false;
+      }
+      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+    }
+  }
+  return false;
+}
+
 const HIDDEN_DIRS = new Set([".git"]);
 
 let mainWindow: BrowserWindow | null = null;
@@ -864,10 +912,109 @@ function setupIpc() {
       const resolvedRepo = path.resolve(repoPath);
       const resolvedWorktree = path.resolve(worktreePath);
 
+      if (resolvedWorktree === resolvedRepo) {
+        // The primary worktree cannot be removed via git, and the manual
+        // fallback would delete the whole repository. Refuse up front.
+        return {
+          ok: false as const,
+          error: "Cannot remove the primary worktree",
+        };
+      }
+
+      const { execFile } = await import("child_process");
+      const { promisify } = await import("util");
+      const execFileAsync = promisify(execFile);
+
+      // git status --porcelain is locale-independent, so dirty detection
+      // cannot break when git runs in a non-English language.
+      const hasUncommittedChanges = async (): Promise<boolean> => {
+        try {
+          const { stdout } = await execFileAsync(
+            "git",
+            ["status", "--porcelain"],
+            { cwd: resolvedWorktree, maxBuffer: 10 * 1024 * 1024 },
+          );
+          return stdout.trim().length > 0;
+        } catch {
+          // Worktree missing or inaccessible: nothing left to protect.
+          return false;
+        }
+      };
+
+      const pruneWorktrees = async (): Promise<void> => {
+        try {
+          await execFileAsync("git", ["worktree", "prune"], {
+            cwd: resolvedRepo,
+            maxBuffer: 10 * 1024 * 1024,
+          });
+        } catch {
+          // Prune is best-effort; a stale git record is harmless.
+        }
+      };
+
+      // git worktree remove leaves the branch behind, so recreating an
+      // issue worktree fails with "branch already exists". Capture the
+      // branch before removing anything, then delete it best-effort on
+      // success — same contract hydra cleanup relies on.
+      const getWorktreeBranch = async (): Promise<string | null> => {
+        try {
+          const { stdout } = await execFileAsync(
+            "git",
+            ["worktree", "list", "--porcelain"],
+            { cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
+          );
+          let currentPath = "";
+          for (const line of stdout.split("\n")) {
+            if (line.startsWith("worktree ")) {
+              currentPath = path.resolve(line.slice("worktree ".length));
+            } else if (
+              line.startsWith("branch ") &&
+              // Windows paths can differ in case and separator style
+              // between git output and the renderer; compare normalized
+              // forms instead of raw strings.
+              currentPath.toLowerCase() === resolvedWorktree.toLowerCase()
+            ) {
+              return line.slice("branch ".length).replace("refs/heads/", "");
+            }
+          }
+          return null;
+        } catch (error) {
+          console.error("[removeWorktree] failed to list worktrees:", error);
+          return null;
+        }
+      };
+
+      // TermCanvas always creates worker worktrees under
+      // .worktrees/<branch-name> (see api-server.ts), so the folder name
+      // is a reliable fallback when git cannot tell us the branch — e.g.
+      // after a failed first remove attempt left the worktree unlisted
+      // but its branch alive.
+      const worktreeFolderName = path.basename(resolvedWorktree);
+
+      const deleteWorktreeBranch = async (branch: string): Promise<void> => {
+        try {
+          await execFileAsync("git", ["branch", "-D", branch], {
+            cwd: resolvedRepo,
+            maxBuffer: 10 * 1024 * 1024,
+          });
+        } catch (error) {
+          // Branch already deleted or checked out in another worktree;
+          // git refuses and nothing needs doing.
+          console.error(`[removeWorktree] failed to delete branch ${branch}:`, error);
+        }
+      };
+
       try {
-        const { execFile } = await import("child_process");
-        const { promisify } = await import("util");
-        const execFileAsync = promisify(execFile);
+        const branch = await getWorktreeBranch();
+        // Never delete the branch that the primary worktree lives on.
+        const isPrimary = path.resolve(resolvedWorktree) === resolvedRepo;
+        // git is the primary source for the branch name; fall back to the
+        // worktree folder name (TermCanvas convention: .worktrees/<branch>)
+        // when git cannot tell us — e.g. a previous remove attempt already
+        // unlisted the worktree while its branch survived. The branch must
+        // be deleted only AFTER the worktree is gone, because git refuses
+        // to delete a branch that is still checked out.
+        const branchToDelete = branch ?? (isPrimary ? null : worktreeFolderName);
         // Reuse the shared --force builder so the renderer/IPC path matches
         // the CLI, hydra, and headless paths exactly. Without --force, git
         // refuses to remove worktrees containing modified or untracked files
@@ -875,10 +1022,52 @@ function setupIpc() {
         const args = force
           ? buildGitWorktreeRemoveArgs(resolvedWorktree)
           : ["worktree", "remove", resolvedWorktree];
-        await execFileAsync("git", args, {
-          cwd: resolvedRepo,
-          maxBuffer: 10 * 1024 * 1024,
-        });
+        try {
+          await execFileAsync("git", args, {
+            cwd: resolvedRepo,
+            maxBuffer: 10 * 1024 * 1024,
+          });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (!force && (await hasUncommittedChanges())) {
+            // git refused because the worktree has uncommitted changes.
+            // Report dirty so the renderer can ask for explicit
+            // confirmation before any data is destroyed.
+            return { ok: false as const, dirty: true as const, error: message };
+          }
+          // "not a working tree" means git already unregistered the
+          // worktree (e.g. a previous remove attempt); there is nothing
+          // left for git to do, so fall through to folder + branch cleanup.
+          const alreadyUnregistered = /is not a working tree/i.test(message);
+          if (!alreadyUnregistered) {
+            // git could not remove the worktree (locked files, stale
+            // registration, ignored files): delete the folder manually and
+            // prune the stale git record so disk state matches the panel.
+            const folderRemoved = await removeFolderSafely(resolvedWorktree);
+            await pruneWorktrees();
+            if (!folderRemoved) {
+              // The folder may be held open by a live terminal process.
+              // Still delete the branch so recreating the worktree is not
+              // blocked, and report the folder problem separately.
+              if (branchToDelete !== null) {
+                await deleteWorktreeBranch(branchToDelete);
+              }
+              return {
+                ok: false as const,
+                error: `Could not remove the worktree folder (a terminal may still be using it). ${message}`,
+              };
+            }
+          }
+        }
+        // git removes the folder on success, but on Windows locked files
+        // can leave remnants behind — guarantee the cleanup either way.
+        await removeFolderSafely(resolvedWorktree);
+        await pruneWorktrees();
+        // Without this the orphaned branch blocks recreating the worktree
+        // for the same issue ("a branch named ... already exists").
+        if (branchToDelete !== null) {
+          await deleteWorktreeBranch(branchToDelete);
+        }
         const worktrees = await projectScanner.listWorktreesAsync(resolvedRepo);
         return { ok: true as const, worktrees };
       } catch (err) {
@@ -893,20 +1082,9 @@ function setupIpc() {
     async (_event, projectPath: string) => {
       try {
         const resolved = path.resolve(projectPath);
-        const home = os.homedir();
-        const root = path.parse(resolved).root;
-        // Safety: refuse to delete obviously dangerous paths.
-        if (
-          !path.isAbsolute(resolved) ||
-          resolved === root ||
-          resolved === home ||
-          home.startsWith(resolved + path.sep) ||
-          resolved.split(path.sep).filter(Boolean).length < 2
-        ) {
-          return {
-            ok: false as const,
-            error: `Refusing to delete unsafe path: ${resolved}`,
-          };
+        const refusal = folderDeleteRefusalReason(resolved);
+        if (refusal) {
+          return { ok: false as const, error: refusal };
         }
         const { rm } = await import("fs/promises");
         await rm(resolved, { recursive: true, force: true });

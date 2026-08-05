@@ -9,6 +9,7 @@ import { ContextMenu } from "./ContextMenu";
 import { ConfirmDialog } from "./ui/ConfirmDialog";
 import { IconButton } from "./ui/IconButton";
 import { createTerminalInScene } from "../actions/terminalSceneActions";
+import { closeTerminalInScene } from "../actions/terminalSceneActions";
 import { activateWorktreeInScene } from "../actions/sceneSelectionActions";
 import { StatusBadges } from "./StatusBadges";
 import { useT } from "../i18n/useT";
@@ -209,6 +210,24 @@ function WorktreeRow({
   const performRemove = async (force: boolean) => {
     setRemoveBusy(true);
     try {
+      // Close every terminal attached to this worktree BEFORE asking git to
+      // remove the folder. A live terminal process keeps the worktree
+      // directory as its cwd, so on Windows the folder cannot be deleted
+      // while the process holds it — git would leave the folder behind and
+      // the orphan branch would block recreating the worktree.
+      const project = useProjectStore
+        .getState()
+        .projects.find((p) =>
+          p.worktrees.some((w) => w.id === group.worktreeId),
+        );
+      if (project) {
+        for (const terminal of group.terminals) {
+          closeTerminalInScene(project.id, group.worktreeId, terminal.terminalId);
+        }
+        // Give the PTY child process a moment to exit so its cwd handle is
+        // released before the remove command touches the folder.
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
       const result = await window.termcanvas.project.removeWorktree(
         projectPath,
         group.worktreePath,
@@ -225,7 +244,9 @@ function WorktreeRow({
       // Soft remove failed — if git refused because the worktree is dirty,
       // escalate to the force-confirmation dialog so the user gets a real
       // chance to opt in. Any other failure mode bubbles to the toast.
-      const dirty = /contains modified or untracked files/i.test(result.error);
+      const dirty =
+        result.dirty === true ||
+        /contains modified or untracked files/i.test(result.error);
       if (!force && dirty) {
         setRemoveStage("force");
         return;

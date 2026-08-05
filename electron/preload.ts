@@ -222,7 +222,7 @@ contextBridge.exposeInMainWorld("termcanvas", {
             ok: true;
             worktrees: { path: string; branch: string; isPrimary: boolean }[];
           }
-        | { ok: false; error: string }
+        | { ok: false; error: string; dirty?: boolean }
       >,
     deleteFolder: (projectPath: string) =>
       ipcRenderer.invoke("project:delete-folder", projectPath) as Promise<

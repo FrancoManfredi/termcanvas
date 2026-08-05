@@ -27,6 +27,35 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Kills a Windows process tree via taskkill /T /F. Unlike
+// process.kill(-pid, ...) — which is POSIX-only and never works on
+// Windows — this terminates the process AND all its children, so the
+// worktree folder they use as cwd is released for deletion.
+async function killProcessTree(pid: number): Promise<void> {
+  const { execFile } = await import("child_process");
+  const { promisify } = await import("util");
+  const execFileAsync = promisify(execFile);
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    try {
+      await execFileAsync(
+        "taskkill",
+        ["/PID", String(pid), "/T", "/F"],
+        { windowsHide: true },
+      );
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      // "not found" means the process already exited; retry transient
+      // failures until the deadline so the tree has time to unwind.
+      if (/not found/i.test(message) || /no se encontr/i.test(message)) {
+        return;
+      }
+      await sleep(100);
+    }
+  }
+}
+
 export class PtyManager {
   private instances = new Map<number, pty.IPty>();
   private outputBuffers = new Map<number, string[]>();
@@ -135,10 +164,14 @@ export class PtyManager {
       // Kill the process group before removing from map to prevent orphans.
       const inst = this.instances.get(id);
       if (inst && inst.pid > 1) {
-        try {
-          process.kill(-inst.pid, "SIGHUP");
-        } catch {
-          // Process group may already be gone.
+        if (process.platform === "win32") {
+          void killProcessTree(inst.pid);
+        } else {
+          try {
+            process.kill(-inst.pid, "SIGHUP");
+          } catch {
+            // Process group may already be gone.
+          }
         }
       }
       this.instances.delete(id);
@@ -202,15 +235,27 @@ export class PtyManager {
     this.instances.delete(id);
     this.outputBuffers.delete(id);
 
+    if (pid <= 1) {
+      return;
+    }
+
+    if (process.platform === "win32") {
+      // process.kill(-pid, ...) is POSIX-only and fails silently on
+      // Windows, leaving the CLI and its child processes alive — which
+      // keeps the worktree folder locked as their cwd. taskkill /T kills
+      // the whole process tree, the same guarantee the POSIX process
+      // group provides on Unix.
+      await killProcessTree(pid);
+      return;
+    }
+
     // Send SIGHUP to the entire process group (shell + CLI + MCP servers).
     // the master PTY FD close triggers SIGHUP to the session, giving
-    if (pid > 1) {
-      try {
-        process.kill(-pid, "SIGHUP");
-      } catch {
-        // Process group may already be gone.
-        return;
-      }
+    try {
+      process.kill(-pid, "SIGHUP");
+    } catch {
+      // Process group may already be gone.
+      return;
     }
 
     const deadline = Date.now() + 5000;

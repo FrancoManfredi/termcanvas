@@ -662,7 +662,7 @@ export interface TermCanvasAPI {
           ok: true;
           worktrees: { path: string; branch: string; isPrimary: boolean }[];
         }
-      | { ok: false; error: string }
+      | { ok: false; error: string; dirty?: boolean }
     >;
     deleteFolder: (
       projectPath: string,
