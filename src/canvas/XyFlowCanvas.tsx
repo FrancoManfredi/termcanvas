@@ -29,13 +29,33 @@ import { useTileDimensionsStore } from "../stores/tileDimensionsStore";
 import { useSidebarDragStore } from "../stores/sidebarDragStore";
 import { useNotificationStore } from "../stores/notificationStore";
 import { resolveIssueWorktree } from "./resolveIssueWorktree";
+import { reviewIssueWorktree } from "./reviewIssueWorktree";
+import { fixIssueWorktree } from "./fixIssueWorktree";
+import { resolveConflictWorktree } from "./resolveConflictWorktree";
+import {
+  REVIEW_LABEL_APPROVED,
+  REVIEW_LABEL_CHANGES,
+  REVIEW_LABEL_CONFLICT,
+  REVIEW_LABEL_FIX_APPLIED,
+  REVIEW_LABEL_PENDING,
+  canonicalReviewLabel,
+  effectiveReviewLabel,
+} from "./reviewVerdict";
 import { buildIssueResolvePrompt } from "./issueResolvePrompt";
 import { reuseTerminalForIssue } from "../actions/terminalSceneActions";
 import { useTerminalRuntimeStateStore } from "../stores/terminalRuntimeStateStore";
 import { useIssueStore, type IssueNodeData } from "../stores/issueStore";
+import { useIssueVisibilityStore } from "../stores/issueVisibilityStore";
 import { useIssueResolveStore } from "../stores/issueResolveStore";
+import { useIssueActivityStore } from "../stores/issueActivityStore";
+import {
+  applyMergeProgressEvent,
+  pickLinkedPrFromIssueData,
+  useIssueReviewStore,
+} from "../stores/issueReviewStore";
+import { MergeProgressPanel } from "../components/MergeProgressPanel";
 import { useIssueSyncStore } from "../stores/issueSyncStore";
-import { computeIssueGridPositions } from "./issueGridLayout";
+import { computeIssueGridPositions, packIssuePositions } from "./issueGridLayout";
 import {
   PANEL_TRANSITION_DURATION_MS,
   PANEL_TRANSITION_EASING_CSS,
@@ -56,11 +76,12 @@ import {
 import { resolveTerminalMountMode } from "../terminal/terminalRuntimePolicy";
 import {
   destroyTerminalRuntime,
+  hasLiveReviewOnWorktree,
   setTerminalRuntimeMode,
   updateTerminalRuntime,
 } from "../terminal/terminalRuntimeStore";
 import { fromFlowViewport, toFlowViewport } from "./viewportAdapter";
-import { buildCanvasFlowNodes, buildCanvasFlowIssueNodes } from "./nodeProjection";
+import { buildCanvasFlowNodes, buildCanvasFlowIssueNodes, issueMatchesFilter } from "./nodeProjection";
 import { xyflowNodeTypes, type CanvasFlowNode } from "./xyflowNodes";
 import {
   getCanvasLeftInset,
@@ -315,6 +336,7 @@ function XyFlowCanvasInner() {
   );
   const projects = useProjectStore((state) => state.projects);
   const issueVersion = useIssueStore((state) => state.issueVersion);
+  const issueVisibilityFilter = useIssueVisibilityStore((state) => state.filter);
   const drawingEnabled = usePreferencesStore((state) => state.drawingEnabled);
   const petEnabled = usePreferencesStore((state) => state.petEnabled);
   const activityHeatmapEnabled = usePreferencesStore(
@@ -364,6 +386,31 @@ function XyFlowCanvasInner() {
     issueNumber: number;
   } | null>(null);
 
+  // Per-issue linked PR cache lives in the review store so the IssueNode
+  // footer button and the context menu share the same lookup state:
+  // "loading" while the async lookup runs, null when the issue has no
+  // linked PR, otherwise the PR record itself.
+  const issuePrs = useIssueReviewStore((s) => s.prsByIssue);
+  const issueVerdicts = useIssueReviewStore((s) => s.verdictByIssue);
+  const issueLabels = useIssueReviewStore((s) => s.labelsByIssue);
+  const issueConflicts = useIssueReviewStore((s) => s.conflictByIssue);
+  const reviewingIssueNumber = useIssueReviewStore(
+    (s) => s.reviewingIssueNumber,
+  );
+  const isReviewing = reviewingIssueNumber !== null;
+  const fixingIssueNumber = useIssueReviewStore(
+    (s) => s.fixingIssueNumber,
+  );
+  const mergingIssueNumber = useIssueReviewStore(
+    (s) => s.mergingIssueNumber,
+  );
+  const mergingApprovedPrs = useIssueReviewStore(
+    (s) => s.mergingApprovedPrs,
+  );
+  const resolvingConflictIssueNumber = useIssueReviewStore(
+    (s) => s.resolvingConflictIssueNumber,
+  );
+
   const [resolveArrows, setResolveArrows] = useState<
     Array<{ issueId: string; terminalId: string }>
   >([]);
@@ -408,6 +455,168 @@ function XyFlowCanvasInner() {
     return { projectId, worktreeId, worktree };
   }, []);
 
+  // Look up the linked PR for an issue so the REVISAR SOLUCIÓN action can be
+  // disabled whenever there is no solution to review yet. Results are cached
+  // per issue for the session; a projectPath is used when the caller knows
+  // the issue's own repo (card footer button), otherwise falls back to the
+  // focused worktree (context menu).
+  const checkLinkedPr = useCallback(
+    (issueNumber: number, projectPath?: string, force?: boolean) => {
+      const reviewStore = useIssueReviewStore.getState();
+      // A null result is re-checked, not cached forever: the PR may be created
+      // after the first lookup and the button must enable on the next refresh.
+      // force=true re-reads even a settled PR — reviews/labels may have
+      // changed since the first lookup (a fresh review must override the
+      // card's frozen state), so state-changing flows refresh explicitly.
+      const cached = reviewStore.prsByIssue[issueNumber];
+      if (!force && cached !== undefined && cached !== null) return;
+      const path =
+        projectPath ?? resolveContextMenuTarget()?.worktree.path;
+      if (!path) return;
+      reviewStore.setPrStatus(issueNumber, "loading");
+      void window.termcanvas.github
+        .findPrForIssue(path, issueNumber)
+        .then((result) => {
+          useIssueReviewStore
+            .getState()
+            .setPrStatus(issueNumber, result.ok ? result.pr : null);
+          // The card badge must survive reloads, not just the in-memory
+          // setReviewVerdict that runs when the review terminal exits. Re-read
+          // GitHub's authoritative review decision whenever we find the PR.
+          if (result.ok && result.pr) {
+            // Narrowed copy: TS does not propagate param narrowing into
+            // nested closures, and applyReviewLabel needs the PR number.
+            const prNumber = result.pr.number;
+            const prState = result.pr.state;
+            void window.termcanvas.github
+              .getPrReviewDecision(path, prNumber)
+              .then((decisionResult) => {
+                if (decisionResult.ok) {
+                  useIssueReviewStore
+                    .getState()
+                    .setReviewVerdict(issueNumber, decisionResult.reviewDecision);
+                  // The "conflicto:main" label is real repo state (set by the
+                  // mergeador) — re-read it on every lookup so the
+                  // RESOLVER CONFLICTO button survives reloads.
+                  useIssueReviewStore
+                    .getState()
+                    .setConflictStatus(
+                      issueNumber,
+                      decisionResult.labels.includes("conflicto:main"),
+                    );
+                  // Persist the raw cycle labels: the card badge and the
+                  // fix/merge gates derive from them (source of truth), with
+                  // the in-memory verdict only covering live transitions.
+                  useIssueReviewStore
+                    .getState()
+                    .setIssueLabels(issueNumber, decisionResult.labels);
+                  // Materialize the verdict label from this deterministic
+                  // read path too: the terminal-exit flip can be skipped when
+                  // the app closes mid-review, and the bulk merge gates on
+                  // the label. Idempotent — ensure+add/remove, safe to repeat.
+                  if (decisionResult.reviewDecision) {
+                    void window.termcanvas.github
+                      .applyReviewLabel(
+                        path,
+                        prNumber,
+                        decisionResult.reviewDecision,
+                      )
+                      .catch((error) => {
+                        console.error(
+                          "[review] failed to apply review label:",
+                          error,
+                        );
+                      });
+                  }
+                  // Materialize the labels the review prompts never post —
+                  // the prompts only run while their terminal is open, so a
+                  // mid-flight close would otherwise strand the PR:
+                  // 1) "review:fix-aplicado": the head moved past the commit
+                  //    the newest review evaluated, so the fix (or conflict
+                  //    resolution) landed and awaits re-review. Only promoted
+                  //    over lesser states (pendiente/comentado); aprobado and
+                  //    conflicto keep their precedence.
+                  // 2) "review:pendiente": a brand-new PR (no cycle label yet)
+                  //    starts its cycle pending, as the resolve prompt would.
+                  // applyCycleLabel is idempotent (add target, clear the rest
+                  // of the cycle), so re-running on every lookup is safe.
+                  const canonicalLabel = canonicalReviewLabel(
+                    decisionResult.labels,
+                  );
+                  const fixAppliedTargets: Array<string | null> = [
+                    null,
+                    REVIEW_LABEL_PENDING,
+                    REVIEW_LABEL_CHANGES,
+                  ];
+                  if (
+                    decisionResult.reviewDecision === "FIX_APPLIED" &&
+                    fixAppliedTargets.includes(canonicalLabel)
+                  ) {
+                    void window.termcanvas.github
+                      .applyCycleLabel(
+                        path,
+                        prNumber,
+                        issueNumber,
+                        REVIEW_LABEL_FIX_APPLIED,
+                      )
+                      .catch((error) => {
+                        console.error(
+                          "[review] failed to apply fix-applied label:",
+                          error,
+                        );
+                      });
+                  }
+                  const pendingDecision =
+                    decisionResult.reviewDecision === null ||
+                    decisionResult.reviewDecision === "REVIEW_REQUIRED";
+                  if (
+                    canonicalLabel === null &&
+                    pendingDecision &&
+                    prState === "OPEN"
+                  ) {
+                    void window.termcanvas.github
+                      .applyCycleLabel(
+                        path,
+                        prNumber,
+                        issueNumber,
+                        REVIEW_LABEL_PENDING,
+                      )
+                      .catch((error) => {
+                        console.error(
+                          "[review] failed to apply pending label:",
+                          error,
+                        );
+                      });
+                  }
+                  // Mirror the PR's canonical review-cycle label onto the
+                  // associated issue (best-effort, idempotent): the issue must
+                  // reflect the PR state in EVERY state — approved, changes,
+                  // conflict, fix applied, pending. The canonical derivation
+                  // self-corrects stale label combinations on each refresh.
+                  void window.termcanvas.github
+                    .syncIssueReviewLabel(
+                      path,
+                      issueNumber,
+                      decisionResult.labels,
+                    )
+                    .catch((error) => {
+                      console.error(
+                        "[review] failed to sync issue label:",
+                        error,
+                      );
+                    });
+                }
+              })
+              .catch(() => {});
+          }
+        })
+        .catch(() => {
+          useIssueReviewStore.getState().setPrStatus(issueNumber, null);
+        });
+    },
+    [resolveContextMenuTarget],
+  );
+
   const handleContextMenuPick = useCallback(
     (type: TerminalType) => {
       if (!contextMenu) return;
@@ -449,6 +658,19 @@ function XyFlowCanvasInner() {
         title: "GitHub Issues Error",
         message: dialogMessage,
       });
+    },
+    [],
+  );
+
+  // Seed the review store with the native linked-PR data the main issues
+  // query already fetched, so the card button is correct without an extra
+  // IPC round trip. Never overwrites an IPC lookup result that ran first.
+  const seedPrFromIssueData = useCallback(
+    (issueNumber: number, raw: Record<string, unknown>) => {
+      const reviewStore = useIssueReviewStore.getState();
+      if (reviewStore.prsByIssue[issueNumber] !== undefined) return;
+      const pr = pickLinkedPrFromIssueData(raw);
+      if (pr) reviewStore.setPrStatus(issueNumber, pr);
     },
     [],
   );
@@ -503,6 +725,7 @@ function XyFlowCanvasInner() {
               issueNumber: issueNum,
               __worktreePath: target.worktree.path,
             } as Partial<IssueNodeData>);
+            seedPrFromIssueData(issueNum, raw);
             addedCount++;
             continue;
           }
@@ -518,6 +741,7 @@ function XyFlowCanvasInner() {
             y: pos.y,
             __worktreePath: target.worktree.path,
           } as unknown as IssueNodeData);
+          seedPrFromIssueData(issueNum, raw);
           addedCount++;
         }
 
@@ -540,7 +764,7 @@ function XyFlowCanvasInner() {
         useIssueSyncStore.getState().setFetchingIssues(false);
       }
     },
-    [resolveContextMenuTarget, handleIssueFetchError],
+    [resolveContextMenuTarget, handleIssueFetchError, seedPrFromIssueData],
   );
 
   const handleIssueContextMenuPick = useCallback(async () => {
@@ -661,7 +885,33 @@ function XyFlowCanvasInner() {
       flowCenter = { x: flowCenter.x - tileW / 2, y: flowCenter.y };
       const promptInput = { issueNumber: issue.issueNumber, title: issue.title, body: issue.body };
       const initialPrompt = buildIssueResolvePrompt(promptInput, "new");
-      const resumePrompt = buildIssueResolvePrompt(promptInput, "resume");
+      let resumePrompt = buildIssueResolvePrompt(promptInput, "resume");
+      // If the reviewer requested changes, surface their feedback in the
+      // resume prompt so the implementer addresses it on the next turn
+      // instead of rediscovering it.
+      void (async () => {
+        const verdict =
+          useIssueReviewStore.getState().verdictByIssue[issue.issueNumber];
+        if (verdict !== "CHANGES_REQUESTED") return;
+        try {
+          const prResult = await window.termcanvas.github.findPrForIssue(
+            target.worktree.path,
+            issue.issueNumber,
+          );
+          if (!prResult.ok || !prResult.pr) return;
+          const feedback = await window.termcanvas.github.getPrComments(
+            target.worktree.path,
+            prResult.pr.number,
+          );
+          if (!feedback.ok || !feedback.text) return;
+          resumePrompt +=
+            ` | FEEDBACK DEL REVIEW DEL PR #${prResult.pr.number}: el reviewer pidió cambios. ` +
+            `Corregí los puntos señalados antes de continuar y luego volvé a abrir el flujo de revisión (gh pr review de nuevo). ` +
+            `Comentarios del review:\n${feedback.text}`;
+        } catch (error) {
+          console.error("[resolve] error leyendo feedback del review:", error);
+        }
+      })();
       const isIssueTerminalLive = (terminalId: string): boolean => {
         const runtime = useTerminalRuntimeStateStore.getState().terminals[terminalId];
         if (runtime?.ptyId != null) return true;
@@ -684,6 +934,9 @@ function XyFlowCanvasInner() {
           { zoom: reactFlow.getZoom(), duration: 300 },
         );
       };
+      useIssueActivityStore
+        .getState()
+        .recordActivity(target.worktree.path, issue.issueNumber, "resolve");
       useIssueResolveStore.getState().setResolvingIssueNumber(issue.issueNumber);
       void resolveIssueWorktree({
         issue,
@@ -745,25 +998,470 @@ function XyFlowCanvasInner() {
     };
   }, [handleResolveIssue]);
 
+  const handleReviewIssue = useCallback(
+    (issueNumber: number) => {
+      if (useIssueResolveStore.getState().resolvingIssueNumber !== null) return;
+      if (useIssueReviewStore.getState().reviewingIssueNumber !== null) return;
+      if (useIssueReviewStore.getState().fixingIssueNumber !== null) return;
+      const target = resolveContextMenuTarget();
+      if (!target) return;
+      const issueStore = useIssueStore.getState();
+      const issue = issueStore.getIssue(issueNumber);
+      if (!issue) return;
+      // Measure the actual issue card DOM rect and convert to flow coords —
+      // same placement contract as RESOLVER ISSUE.
+      const issueNodeId = `issue-${issue.issueNumber}`;
+      const issueEl = document.querySelector(`[data-id="${issueNodeId}"]`);
+      const rect = issueEl?.getBoundingClientRect();
+      if (!rect) return;
+      // Bottom-center of the card in screen-space → convert to flow-space
+      const screenCenter = { x: rect.left + rect.width / 2, y: rect.bottom + 12 };
+      let flowCenter = reactFlow.screenToFlowPosition(screenCenter);
+      // Center the terminal: subtract half terminal width in FLOW units
+      const stored = usePreferencesStore.getState().defaultTerminalSize;
+      const tileW = stored?.w ?? useTileDimensionsStore.getState().w;
+      flowCenter = { x: flowCenter.x - tileW / 2, y: flowCenter.y };
+      const centerOnReviewTerminal = (terminalId: string) => {
+        const node = reactFlow.getNode(terminalId);
+        if (!node) return;
+        const w = typeof node.measured?.width === "number" ? node.measured.width : 300;
+        const h = typeof node.measured?.height === "number" ? node.measured.height : 200;
+        void reactFlow.setCenter(
+          node.position.x + w / 2,
+          node.position.y + h / 2,
+          { zoom: reactFlow.getZoom(), duration: 300 },
+        );
+      };
+      useIssueActivityStore
+        .getState()
+        .recordActivity(target.worktree.path, issue.issueNumber, "review");
+      useIssueReviewStore.getState().setReviewingIssueNumber(issue.issueNumber);
+      void reviewIssueWorktree({
+        issue,
+        target,
+        getProject: (projectId) =>
+          useProjectStore
+            .getState()
+            .projects.find((p) => p.id === projectId),
+        syncWorktrees: (projectPath, worktrees) =>
+          useProjectStore.getState().syncWorktrees(projectPath, worktrees),
+        createReviewWorktree: (repoPath, baseName, branch) =>
+          window.termcanvas.project.createReviewWorktree(
+            repoPath,
+            baseName,
+            branch,
+          ),
+        removeWorktree: (repoPath, worktreePath, force) =>
+          window.termcanvas.project.removeWorktree(
+            repoPath,
+            worktreePath,
+            force,
+          ),
+        isReviewWorktreeInUse: (worktreeId) =>
+          hasLiveReviewOnWorktree(worktreeId),
+        findPrForIssue: (cwd, number) =>
+          window.termcanvas.github.findPrForIssue(cwd, number),
+        getReviewContext: (cwd, number, targetDir) =>
+          window.termcanvas.github.getReviewContext(cwd, number, targetDir),
+        createTerminal: createTerminalInScene,
+        notify: (type, message) =>
+          useNotificationStore.getState().notify(type, message),
+        setResolveArrows,
+        issueNodeId,
+        position: flowCenter,
+      })
+        .then((result) => {
+          if (!result.ok || !result.terminal) return;
+          const terminalId = result.terminal.id;
+          // Focus the tile so the terminal runtime actually spawns the CLI.
+          useProjectStore.getState().setFocusedTerminal(terminalId);
+          centerOnReviewTerminal(terminalId);
+        })
+        .finally(() => {
+          useIssueReviewStore.getState().setReviewingIssueNumber(null);
+        });
+    },
+    [reactFlow, resolveContextMenuTarget],
+  );
+
+  // Apply the reviewer's requested changes on the SAME PR. Only reachable
+  // while the review verdict is COMMENTED/CHANGES_REQUESTED (the context menu
+  // gates it); the fix runs in the implementer worktree so the push updates
+  // the existing PR. Once the terminal is created the verdict flips to
+  // FIX_APPLIED so the menu item disappears until the next review.
+  const handleFixIssue = useCallback(
+    (issueNumber: number) => {
+      if (useIssueResolveStore.getState().resolvingIssueNumber !== null) return;
+      if (useIssueReviewStore.getState().reviewingIssueNumber !== null) return;
+      if (useIssueReviewStore.getState().fixingIssueNumber !== null) return;
+      const target = resolveContextMenuTarget();
+      if (!target) return;
+      const issueStore = useIssueStore.getState();
+      const issue = issueStore.getIssue(issueNumber);
+      if (!issue) return;
+      const pr = useIssueReviewStore.getState().prsByIssue[issueNumber];
+      if (!pr || typeof pr === "string") return;
+      // Gate on the persisted cycle label (source of truth) with the
+      // in-memory verdict as fallback, mirroring the context menu.
+      const effective = effectiveReviewLabel(
+        useIssueReviewStore.getState().labelsByIssue[issueNumber] ?? [],
+        useIssueReviewStore.getState().verdictByIssue[issueNumber],
+      );
+      if (effective !== REVIEW_LABEL_CHANGES) return;
+      // Measure the actual issue card DOM rect and convert to flow coords —
+      // same placement contract as RESOLVER ISSUE / REVISAR SOLUCIÓN.
+      const issueNodeId = `issue-${issue.issueNumber}`;
+      const issueEl = document.querySelector(`[data-id="${issueNodeId}"]`);
+      const rect = issueEl?.getBoundingClientRect();
+      if (!rect) return;
+      const screenCenter = { x: rect.left + rect.width / 2, y: rect.bottom + 12 };
+      let flowCenter = reactFlow.screenToFlowPosition(screenCenter);
+      const stored = usePreferencesStore.getState().defaultTerminalSize;
+      const tileW = stored?.w ?? useTileDimensionsStore.getState().w;
+      flowCenter = { x: flowCenter.x - tileW / 2, y: flowCenter.y };
+      const centerOnFixTerminal = (terminalId: string) => {
+        const node = reactFlow.getNode(terminalId);
+        if (!node) return;
+        const w = typeof node.measured?.width === "number" ? node.measured.width : 300;
+        const h = typeof node.measured?.height === "number" ? node.measured.height : 200;
+        void reactFlow.setCenter(
+          node.position.x + w / 2,
+          node.position.y + h / 2,
+          { zoom: reactFlow.getZoom(), duration: 300 },
+        );
+      };
+      useIssueActivityStore
+        .getState()
+        .recordActivity(target.worktree.path, issue.issueNumber, "fix");
+      useIssueReviewStore.getState().setFixingIssueNumber(issue.issueNumber);
+      void fixIssueWorktree({
+        issue,
+        projectId: target.projectId,
+        pr,
+        getProject: (projectId) =>
+          useProjectStore
+            .getState()
+            .projects.find((p) => p.id === projectId),
+        restoreWorktree: (repoPath, branch) =>
+          window.termcanvas.project.restoreWorktree(repoPath, branch),
+        syncWorktrees: (projectPath, worktrees) =>
+          useProjectStore.getState().syncWorktrees(projectPath, worktrees),
+        getReviewContext: (cwd, number, targetDir) =>
+          window.termcanvas.github.getReviewContext(cwd, number, targetDir),
+        createTerminal: createTerminalInScene,
+        notify: (type, message) =>
+          useNotificationStore.getState().notify(type, message),
+        setResolveArrows,
+        issueNodeId,
+        position: flowCenter,
+      })
+        .then((result) => {
+          if (!result.ok || !result.terminal) return;
+          const terminalId = result.terminal.id;
+          // Focus the tile so the terminal runtime actually spawns the CLI.
+          useProjectStore.getState().setFocusedTerminal(terminalId);
+          centerOnFixTerminal(terminalId);
+          // The fix is underway — flip the badge so the button disappears
+          // until the reviewer takes another look.
+          useIssueReviewStore
+            .getState()
+            .setReviewVerdict(issue.issueNumber, "FIX_APPLIED");
+        })
+        .finally(() => {
+          useIssueReviewStore.getState().setFixingIssueNumber(null);
+        });
+    },
+    [reactFlow, resolveContextMenuTarget],
+  );
+
+  // Resolve a merge conflict on the SAME PR after the mergeador flagged it
+  // with the "conflicto:main" label. Only reachable while the card carries a
+  // real PR and the conflict flag is set (the context menu gates it); like
+  // the fix flow it runs in the implementer worktree so the resolution push
+  // updates the existing PR. The conflict flag stays until the agent removes
+  // the label.
+  const handleResolveConflict = useCallback(
+    (issueNumber: number) => {
+      if (
+        useIssueReviewStore.getState().resolvingConflictIssueNumber !== null
+      ) {
+        return;
+      }
+      if (useIssueResolveStore.getState().resolvingIssueNumber !== null) return;
+      if (useIssueReviewStore.getState().reviewingIssueNumber !== null) return;
+      if (useIssueReviewStore.getState().fixingIssueNumber !== null) return;
+      const target = resolveContextMenuTarget();
+      if (!target) return;
+      const issueStore = useIssueStore.getState();
+      const issue = issueStore.getIssue(issueNumber);
+      if (!issue) return;
+      const pr = useIssueReviewStore.getState().prsByIssue[issueNumber];
+      if (!pr || typeof pr === "string") return;
+      if (!useIssueReviewStore.getState().conflictByIssue[issueNumber]) return;
+      // Measure the actual issue card DOM rect and convert to flow coords —
+      // same placement contract as RESOLVER ISSUE / REVISAR SOLUCIÓN.
+      const issueNodeId = `issue-${issue.issueNumber}`;
+      const issueEl = document.querySelector(`[data-id="${issueNodeId}"]`);
+      const rect = issueEl?.getBoundingClientRect();
+      if (!rect) return;
+      const screenCenter = { x: rect.left + rect.width / 2, y: rect.bottom + 12 };
+      let flowCenter = reactFlow.screenToFlowPosition(screenCenter);
+      const stored = usePreferencesStore.getState().defaultTerminalSize;
+      const tileW = stored?.w ?? useTileDimensionsStore.getState().w;
+      flowCenter = { x: flowCenter.x - tileW / 2, y: flowCenter.y };
+      const centerOnConflictTerminal = (terminalId: string) => {
+        const node = reactFlow.getNode(terminalId);
+        if (!node) return;
+        const w = typeof node.measured?.width === "number" ? node.measured.width : 300;
+        const h = typeof node.measured?.height === "number" ? node.measured.height : 200;
+        void reactFlow.setCenter(
+          node.position.x + w / 2,
+          node.position.y + h / 2,
+          { zoom: reactFlow.getZoom(), duration: 300 },
+        );
+      };
+      useIssueReviewStore
+        .getState()
+        .setResolvingConflictIssueNumber(issue.issueNumber);
+      void resolveConflictWorktree({
+        issue,
+        projectId: target.projectId,
+        pr,
+        getProject: (projectId) =>
+          useProjectStore
+            .getState()
+            .projects.find((p) => p.id === projectId),
+        restoreWorktree: (repoPath, branch) =>
+          window.termcanvas.project.restoreWorktree(repoPath, branch),
+        syncWorktrees: (projectPath, worktrees) =>
+          useProjectStore.getState().syncWorktrees(projectPath, worktrees),
+        getConflict: (repoPath, branch, prNumber) =>
+          window.termcanvas.github.getConflictFiles(repoPath, branch, prNumber),
+        createTerminal: createTerminalInScene,
+        notify: (type, message) =>
+          useNotificationStore.getState().notify(type, message),
+        setResolveArrows,
+        issueNodeId,
+        position: flowCenter,
+      })
+        .then((result) => {
+          if (!result.ok || !result.terminal) return;
+          const terminalId = result.terminal.id;
+          // Focus the tile so the terminal runtime actually spawns the CLI.
+          useProjectStore.getState().setFocusedTerminal(terminalId);
+          centerOnConflictTerminal(terminalId);
+        })
+        .finally(() => {
+          useIssueReviewStore
+            .getState()
+            .setResolvingConflictIssueNumber(null);
+        });
+    },
+    [reactFlow, resolveContextMenuTarget],
+  );
+
+  // Merge the reviewed PR once the reviewer verdict is APPROVED. Only
+  // reachable while the card carries a real PR and an APPROVED verdict (the
+  // context menu gates it); a merge needs no terminal — the action runs
+  // directly against GitHub and the verdict badge is cleared on success.
+  const handleMergeIssue = useCallback(
+    (issueNumber: number) => {
+      if (useIssueReviewStore.getState().mergingIssueNumber !== null) return;
+      const target = resolveContextMenuTarget();
+      if (!target) return;
+      const issueStore = useIssueStore.getState();
+      const issue = issueStore.getIssue(issueNumber);
+      if (!issue) return;
+      const pr = useIssueReviewStore.getState().prsByIssue[issueNumber];
+      if (!pr || typeof pr === "string") return;
+      // Gate on the persisted cycle label (source of truth) with the
+      // in-memory verdict as fallback, mirroring the context menu.
+      const effective = effectiveReviewLabel(
+        useIssueReviewStore.getState().labelsByIssue[issueNumber] ?? [],
+        useIssueReviewStore.getState().verdictByIssue[issueNumber],
+      );
+      if (effective !== REVIEW_LABEL_APPROVED) return;
+      useIssueActivityStore
+        .getState()
+        .recordActivity(target.worktree.path, issue.issueNumber, "merge");
+      useIssueReviewStore.getState().setMergingIssueNumber(issue.issueNumber);
+      window.termcanvas.github
+        .mergePr(target.worktree.path, pr.number)
+        .then((result) => {
+          if (result.ok) {
+            useNotificationStore
+              .getState()
+              .notify("info", `PR #${pr.number} merged successfully.`);
+            useIssueReviewStore
+              .getState()
+              .setReviewVerdict(issue.issueNumber, null);
+            // Force a re-read of the PR so the card leaves the approved
+            // state immediately (the PR is now merged; the session cache
+            // would otherwise keep it APPROVED forever).
+            useIssueReviewStore
+              .getState()
+              .requestPrLookup(issue.issueNumber, target.worktree.path, true);
+          } else {
+            useNotificationStore
+              .getState()
+              .notify("error", `Merge PR #${pr.number}: ${result.error}`);
+          }
+        })
+        .catch((error) => {
+          useNotificationStore
+            .getState()
+            .notify(
+              "error",
+              `Merge PR #${pr.number}: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+        })
+        .finally(() => {
+          useIssueReviewStore.getState().setMergingIssueNumber(null);
+        });
+    },
+    [resolveContextMenuTarget],
+  );
+
+  // Bulk-merge every open PR carrying the "review:aprobado" label, one by
+  // one, in the main process (which test-merges each against origin/main in a
+  // throwaway worktree). Clean PRs come back in `merged`; conflicting PRs in
+  // `conflicted` and were tagged with "conflicto:main", which flips the
+  // RESOLVER CONFLICTO button on for their issue cards.
+  const handleMergeApprovedPrs = useCallback(() => {
+    const target = resolveContextMenuTarget();
+    if (!target) return;
+    const reviewStore = useIssueReviewStore.getState();
+    if (reviewStore.mergingApprovedPrs) return;
+    if (reviewStore.mergingIssueNumber !== null) return;
+    const notify = useNotificationStore.getState().notify;
+    reviewStore.setMergingApprovedPrs(true);
+    const issueForPr = (prNumber: number): number | undefined => {
+      const prs = useIssueReviewStore.getState().prsByIssue;
+      for (const [issueNumber, status] of Object.entries(prs)) {
+        if (status && typeof status === "object" && status.number === prNumber) {
+          return Number(issueNumber);
+        }
+      }
+      return undefined;
+    };
+    void window.termcanvas.github
+      .mergeApprovedPrs(target.worktree.path)
+      .then((result) => {
+        if (!result.ok) {
+          notify("error", `Mergear PRs aprobados: ${result.error}`);
+          return;
+        }
+        const { merged, conflicted } = result.summary;
+        for (const prNumber of merged) {
+          const issueNumber = issueForPr(prNumber);
+          if (issueNumber !== undefined) {
+            useIssueReviewStore
+              .getState()
+              .setReviewVerdict(issueNumber, null);
+          }
+        }
+        for (const conflict of conflicted) {
+          const issueNumber = issueForPr(conflict.number);
+          if (issueNumber !== undefined) {
+            useIssueReviewStore
+              .getState()
+              .setConflictStatus(issueNumber, true);
+          }
+        }
+        console.log(
+          `[mergeador] summary: merged=[${merged.join(", ")}] conflicted=[${conflicted.map((c) => `#${c.number} (${c.files.length} files)`).join(", ")}]`,
+        );
+        if (merged.length === 0 && conflicted.length === 0) {
+          notify("info", "No hay PRs aprobados para mergear.");
+        } else if (merged.length > 0 && conflicted.length === 0) {
+          notify("info", `PRs aprobados mergeados: #${merged.join(", #")}.`);
+        } else if (merged.length === 0 && conflicted.length > 0) {
+          notify(
+            "warn",
+            `PRs con conflicto contra main: #${conflicted.map((c) => c.number).join(", #")} — revisá el comentario [mergeador] en el PR y usá RESOLVER CONFLICTO en la card.`,
+          );
+        } else {
+          notify(
+            "warn",
+            `Mergeados: #${merged.join(", #")}. Con conflicto: #${conflicted.map((c) => c.number).join(", #")} (archivos en el comentario [mergeador]) — usá RESOLVER CONFLICTO en la card.`,
+          );
+        }
+      })
+      .catch((error) => {
+        notify(
+          "error",
+          `Mergear PRs aprobados: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      })
+      .finally(() => {
+        useIssueReviewStore.getState().setMergingApprovedPrs(false);
+      });
+  }, [resolveContextMenuTarget]);
+
+  // Forward the bulk-merge progress stream (github:merge-approved-prs) into
+  // the issue review store, which drives the MergeProgressPanel.
+  useEffect(() => {
+    const unsubscribe = window.termcanvas.github.onMergeProgress((event) => {
+      applyMergeProgressEvent(useIssueReviewStore.getState(), event);
+    });
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    const reviewStore = useIssueReviewStore.getState();
+    reviewStore.registerReviewHandler(handleReviewIssue);
+    reviewStore.registerFixHandler(handleFixIssue);
+    reviewStore.registerMergeHandler(handleMergeIssue);
+    reviewStore.registerPrLookupHandler(checkLinkedPr);
+    return () => {
+      const current = useIssueReviewStore.getState();
+      current.registerReviewHandler(null);
+      current.registerFixHandler(null);
+      current.registerMergeHandler(null);
+      current.registerPrLookupHandler(null);
+    };
+  }, [handleReviewIssue, handleFixIssue, handleMergeIssue, checkLinkedPr]);
+
   const projectedNodes = useMemo(() => {
     const terminalNodes = buildCanvasFlowNodes(projects);
 
     const issues = useIssueStore.getState().getAllIssues();
     console.log(`[projectedNodes] terminals=${terminalNodes.length}, issues=${issues.length}, issueVersion=${issueVersion}`);
     const issueNodes = issues.length > 0
-      ? buildCanvasFlowIssueNodes(issues)
+      ? buildCanvasFlowIssueNodes(issues, { filter: issueVisibilityFilter })
       : [];
 
     return [...issueNodes, ...terminalNodes];
-  }, [layoutKey, issueVersion]);
+  }, [layoutKey, issueVersion, issueVisibilityFilter]);
   const [nodes, setNodes, onNodesChange] =
     useNodesState<CanvasFlowNode>(projectedNodes);
+
+  useEffect(() => {
+    // Re-pack the visible issue cards whenever the issue set or the active
+    // visibility filter changes: hidden closed cards must not leave holes
+    // behind, so the survivors are re-flowed consecutively by number. The
+    // positions are written back into the store so a scene capture persists
+    // the packed layout.
+    const all = useIssueStore.getState().getAllIssues();
+    const visible = all.filter((issue) =>
+      issueMatchesFilter(issue, issueVisibilityFilter),
+    );
+    if (visible.length === 0) return;
+    useIssueStore.getState().applyPackedLayout(packIssuePositions(visible));
+  }, [issueVersion, issueVisibilityFilter]);
 
   useEffect(() => {
     setNodes((currentNodes) => {
       const existing = new Map(currentNodes.map((n) => [n.id, n]));
       return projectedNodes.map((pn) => {
         const cur = existing.get(pn.id);
+        // Issue cards always follow the packed store layout — the re-pack
+        // effect moves them, so a stale node position must not win here.
+        if (pn.type === "issue") return pn;
         // Preserve user-dragged positions for existing nodes of the same type
         if (cur && cur.type === pn.type) {
           return { ...pn, position: cur.position };
@@ -868,13 +1566,18 @@ function XyFlowCanvasInner() {
     (event: React.MouseEvent, node: CanvasFlowNode) => {
       event.preventDefault();
       if (node.type !== "issue") return;
+      const issueNumber = (node.data as Record<string, unknown>).number as number;
       setIssueContextMenu({
         clientX: event.clientX,
         clientY: event.clientY,
-        issueNumber: (node.data as Record<string, unknown>).number as number,
+        issueNumber,
       });
+      // Kick off the linked-PR lookup for this issue so the menu can show
+      // whether a review is possible (falls back to the focused worktree
+      // repo; the card footer button already started its own lookup).
+      checkLinkedPr(issueNumber);
     },
-    [],
+    [checkLinkedPr],
   );
 
   const handleNodeDragStart = useCallback<OnNodeDrag<CanvasFlowNode>>(() => {
@@ -1306,6 +2009,16 @@ function XyFlowCanvasInner() {
                       void handleRefreshIssues();
                     },
                   } as const,
+                  {
+                    label: mergingApprovedPrs
+                      ? "Mergeando PRs aprobados..."
+                      : "MERGEAR PRs APROBADOS",
+                    disabled:
+                      mergingApprovedPrs || mergingIssueNumber !== null
+                        ? (true as const)
+                        : undefined,
+                    onClick: () => handleMergeApprovedPrs(),
+                  } as const,
                 ]
               : []),
             {
@@ -1333,7 +2046,19 @@ function XyFlowCanvasInner() {
         />
       )}
 
-      {issueContextMenu && (
+      {issueContextMenu && (() => {
+        const menuPrState = issuePrs[issueContextMenu.issueNumber];
+        const menuVerdict = issueVerdicts[issueContextMenu.issueNumber];
+        // The menu gates derive from the PR's persisted cycle label (source
+        // of truth) with the in-memory verdict as fallback: an approved PR
+        // whose label flip was missed would otherwise show MERGEAR PR with
+        // no approval, and a changes-requested review would hide IMPLEMENTAR
+        // FIX forever.
+        const menuEffective = effectiveReviewLabel(
+          issueLabels[issueContextMenu.issueNumber] ?? [],
+          menuVerdict,
+        );
+        return (
         <ContextMenu
           x={issueContextMenu.clientX}
           y={issueContextMenu.clientY}
@@ -1342,10 +2067,91 @@ function XyFlowCanvasInner() {
               label: isResolving ? "Resolviendo issue..." : "RESOLVER ISSUE",
               onClick: () => handleResolveIssue(issueContextMenu.issueNumber),
             },
+            (() => {
+              if (menuPrState === "loading") {
+                return {
+                  label: "Buscando PR...",
+                  disabled: true as const,
+                  onClick: () => {},
+                };
+              }
+              if (menuPrState == null) {
+                return {
+                  label: "REVISAR SOLUCIÓN (sin PR)",
+                  disabled: true as const,
+                  onClick: () => {},
+                };
+              }
+              return {
+                label: isReviewing
+                  ? "Revisando solución..."
+                  : `REVISAR SOLUCIÓN (PR #${menuPrState.number})`,
+                disabled: isReviewing ? (true as const) : undefined,
+                onClick: () => handleReviewIssue(issueContextMenu.issueNumber),
+              };
+            })(),
+            // IMPLEMENTAR FIX only exists when the last review asked for
+            // changes: inline comments without a verdict (COMMENTED) or an
+            // explicit request-changes. Approved or never-reviewed PRs have
+            // no fix button.
+            ...(menuEffective === REVIEW_LABEL_CHANGES
+              ? [
+                  {
+                    label: fixingIssueNumber !== null
+                      ? "Aplicando fix..."
+                      : "IMPLEMENTAR FIX",
+                    disabled: fixingIssueNumber !== null
+                      ? (true as const)
+                      : undefined,
+                    onClick: () => handleFixIssue(issueContextMenu.issueNumber),
+                  } as const,
+                ]
+              : []),
+            // RESOLVER CONFLICTO only exists when the mergeador flagged the
+            // PR with the "conflicto:main" label: the bulk merge found
+            // conflicts against main and left a [mergeador] comment listing
+            // the files. The flag clears when the agent removes the label.
+            ...(issueConflicts[issueContextMenu.issueNumber] === true &&
+            menuPrState !== null &&
+            menuPrState !== "loading"
+              ? [
+                  {
+                    label: resolvingConflictIssueNumber !== null
+                      ? "Resolviendo conflicto..."
+                      : "RESOLVER CONFLICTO",
+                    disabled: resolvingConflictIssueNumber !== null
+                      ? (true as const)
+                      : undefined,
+                    onClick: () =>
+                      handleResolveConflict(issueContextMenu.issueNumber),
+                  } as const,
+                ]
+              : []),
+            // MERGEAR PR only exists when the PR carries the approved cycle
+            // label (the persisted source of truth, with the in-memory
+            // verdict as fallback) and is still open. Never shown for
+            // fixable verdicts (COMMENTED/CHANGES_REQUESTED).
+            ...(menuEffective === REVIEW_LABEL_APPROVED &&
+            menuPrState !== null &&
+            menuPrState !== "loading"
+              ? [
+                  {
+                    label: mergingIssueNumber !== null
+                      ? "Mergeando PR..."
+                      : `MERGEAR PR (#${menuPrState.number})`,
+                    disabled: mergingIssueNumber !== null
+                      ? (true as const)
+                      : undefined,
+                    onClick: () =>
+                      handleMergeIssue(issueContextMenu.issueNumber),
+                  } as const,
+                ]
+              : []),
           ]}
           onClose={() => setIssueContextMenu(null)}
         />
-      )}
+        );
+      })()}
 
       {ghErrorDialog && (
         <ConfirmDialog
@@ -1383,6 +2189,8 @@ function XyFlowCanvasInner() {
       {projects.length === 0 && (
         <CanvasEmptyState isDragOver={dragOverState.isDragOver} />
       )}
+
+      <MergeProgressPanel />
     </div>
   );
 }

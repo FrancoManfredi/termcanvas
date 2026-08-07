@@ -4,6 +4,7 @@ export const RENDER_DIAGNOSTICS_SCHEMA_VERSION =
 export interface RenderDiagnosticEventInput {
   kind: string;
   terminalId?: string;
+  issueNumber?: number;
   data?: Record<string, unknown>;
 }
 

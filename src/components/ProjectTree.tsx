@@ -458,6 +458,7 @@ function ProjectRow({
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleteInput, setDeleteInput] = useState("");
   const [deleting, setDeleting] = useState(false);
+  const [cleaningReview, setCleaningReview] = useState(false);
 
   const handleNewTerminal = () => {
     const projects = useProjectStore.getState().projects;
@@ -539,6 +540,46 @@ function ProjectRow({
         );
     } finally {
       setDeleting(false);
+    }
+  };
+
+  // Remove every `*-review` worktree left behind by a finished (or crashed)
+  // review session. Review worktrees are disposable by design, so force is
+  // always applied; the implementer's worktrees are never touched.
+  const cleanReviewWorktrees = async () => {
+    if (cleaningReview) return;
+    const projects = useProjectStore.getState().projects;
+    const liveProject = projects.find((p) => p.id === project.projectId);
+    if (!liveProject) return;
+    const reviewWorktrees = liveProject.worktrees.filter((wt) =>
+      wt.path.replace(/\\/g, "/").split("/").pop()?.endsWith("-review"),
+    );
+    if (reviewWorktrees.length === 0) {
+      useNotificationStore.getState().notify("info", "No hay worktrees de review para limpiar.");
+      return;
+    }
+    setCleaningReview(true);
+    try {
+      let removed = 0;
+      for (const wt of reviewWorktrees) {
+        const result = await window.termcanvas.project.removeWorktree(
+          liveProject.path,
+          wt.path,
+          true,
+        );
+        if (result.ok) {
+          removed += 1;
+          useProjectStore.getState().syncWorktrees(liveProject.path, result.worktrees);
+        }
+      }
+      useNotificationStore
+        .getState()
+        .notify(
+          "info",
+          `Worktrees de review: ${removed} eliminado${removed !== 1 ? "s" : ""}.`,
+        );
+    } finally {
+      setCleaningReview(false);
     }
   };
 
@@ -672,6 +713,16 @@ function ProjectRow({
                     store.toggle(project.projectId);
                   }
                   setCreating(true);
+                },
+              },
+              { type: "separator" as const },
+              {
+                label: cleaningReview
+                  ? "Limpiando..."
+                  : "Limpiar worktrees de review",
+                disabled: cleaningReview,
+                onClick: () => {
+                  void cleanReviewWorktrees();
                 },
               },
               { type: "separator" as const },

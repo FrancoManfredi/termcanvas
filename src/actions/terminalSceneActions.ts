@@ -27,6 +27,8 @@ interface CreateTerminalInSceneOptions {
   parentTerminalId?: string;
   position?: { x: number; y: number };
   issueNumber?: number;
+  reviewIssueNumber?: number;
+  reviewPrNumber?: number;
 }
 
 interface WorktreeGroupMovePreview {
@@ -118,6 +120,8 @@ export function createTerminalInScene({
   parentTerminalId,
   position,
   issueNumber,
+  reviewIssueNumber,
+  reviewPrNumber,
 }: CreateTerminalInSceneOptions): TerminalData {
   const baseTerminal =
     terminal ??
@@ -162,6 +166,8 @@ export function createTerminalInScene({
     x: placement.x,
     y: placement.y,
     ...(issueNumber !== undefined ? { issueNumber } : {}),
+    ...(reviewIssueNumber !== undefined ? { reviewIssueNumber } : {}),
+    ...(reviewPrNumber !== undefined ? { reviewPrNumber } : {}),
   };
 
   // Apply collision-resolved nudges to existing tiles.

@@ -5,6 +5,7 @@ import type {
 } from "../shared/render-diagnostics";
 import type { SessionHistoryChangedEvent } from "../shared/sessions";
 import type { TelemetryProvider } from "../shared/telemetry";
+import type { MergeProgressEvent } from "../src/types";
 
 type SessionTelemetryProvider = Exclude<TelemetryProvider, "unknown">;
 
@@ -202,6 +203,37 @@ contextBridge.exposeInMainWorld("termcanvas", {
       ipcRenderer.invoke(
         "project:create-worktree",
         repoPath,
+        branch,
+      ) as Promise<
+        | {
+            ok: true;
+            path: string;
+            worktrees: { path: string; branch: string; isPrimary: boolean }[];
+          }
+        | { ok: false; error: string }
+      >,
+    restoreWorktree: (repoPath: string, branch: string) =>
+      ipcRenderer.invoke(
+        "project:restore-worktree",
+        repoPath,
+        branch,
+      ) as Promise<
+        | {
+            ok: true;
+            path: string;
+            worktrees: { path: string; branch: string; isPrimary: boolean }[];
+          }
+        | { ok: false; error: string }
+      >,
+    createReviewWorktree: (
+      repoPath: string,
+      baseName: string,
+      branch: string,
+    ) =>
+      ipcRenderer.invoke(
+        "project:create-review-worktree",
+        repoPath,
+        baseName,
         branch,
       ) as Promise<
         | {
@@ -810,6 +842,131 @@ contextBridge.exposeInMainWorld("termcanvas", {
         | { ok: true }
         | { ok: false; error: string }
       >,
+    findPrForIssue: (cwd: string, issueNumber: number) =>
+      ipcRenderer.invoke("github:find-pr-for-issue", cwd, issueNumber) as Promise<
+        | {
+            ok: true;
+            pr: {
+              number: number;
+              title: string;
+              url: string;
+              state: string;
+              headRefName: string;
+              headRefOid: string;
+            } | null;
+          }
+        | { ok: false; error: string }
+      >,
+    getPrReviewDecision: (cwd: string, prNumber: number) =>
+      ipcRenderer.invoke("github:get-pr-review-decision", cwd, prNumber) as Promise<
+        | {
+            ok: true;
+            reviewDecision:
+              | "APPROVED"
+              | "CHANGES_REQUESTED"
+              | "REVIEW_REQUIRED"
+              | "COMMENTED"
+              | "FIX_APPLIED"
+              | null;
+            bodyVerdict: "APROBADO" | "CAMBIOS_PEDIDOS" | null;
+            labels: string[];
+            headRefOid: string | null;
+            lastReviewCommitId: string | null;
+          }
+        | { ok: false; error: string }
+      >,
+    getPrComments: (cwd: string, prNumber: number) =>
+      ipcRenderer.invoke("github:get-pr-comments", cwd, prNumber) as Promise<
+        | { ok: true; text: string }
+        | { ok: false; error: string }
+      >,
+    getReviewContext: (cwd: string, prNumber: number, targetDir: string) =>
+      ipcRenderer.invoke("github:get-review-context", cwd, prNumber, targetDir) as Promise<
+        | {
+            ok: true;
+            context: string;
+            diffFilePath: string | null;
+            templateFilePath: string | null;
+            headRefOid: string | null;
+            lastReviewCommitId: string | null;
+          }
+        | { ok: false; error: string }
+      >,
+    getConflictFiles: (cwd: string, branch: string, prNumber: number) =>
+      ipcRenderer.invoke("github:get-conflict-files", cwd, branch, prNumber) as Promise<
+        | { ok: true; conflictFiles: string[] }
+        | { ok: false; error: string }
+      >,
+    applyReviewLabel: (
+      cwd: string,
+      prNumber: number,
+      verdict:
+        | "APPROVED"
+        | "CHANGES_REQUESTED"
+        | "COMMENTED"
+        | "REVIEW_REQUIRED"
+        | "FIX_APPLIED"
+        | null,
+    ) =>
+      ipcRenderer.invoke(
+        "github:apply-review-label",
+        cwd,
+        prNumber,
+        verdict,
+      ) as Promise<{ ok: true } | { ok: false; error: string }>,
+    applyCycleLabel: (
+      cwd: string,
+      prNumber: number,
+      issueNumber: number | null,
+      label:
+        | "review:pendiente"
+        | "review:comentado"
+        | "review:fix-aplicado"
+        | "review:aprobado"
+        | "conflicto:main",
+    ) =>
+      ipcRenderer.invoke(
+        "github:apply-cycle-label",
+        cwd,
+        prNumber,
+        issueNumber,
+        label,
+      ) as Promise<{ ok: true } | { ok: false; error: string }>,
+    syncIssueReviewLabel: (
+      cwd: string,
+      issueNumber: number,
+      prLabels: string[],
+    ) =>
+      ipcRenderer.invoke(
+        "github:sync-issue-review-label",
+        cwd,
+        issueNumber,
+        prLabels,
+      ) as Promise<{ ok: true } | { ok: false; error: string }>,
+    mergePr: (cwd: string, prNumber: number) =>
+      ipcRenderer.invoke("github:merge-pr", cwd, prNumber) as Promise<
+        | { ok: true; prUrl: string }
+        | { ok: false; error: string }
+      >,
+    mergeApprovedPrs: (cwd: string) =>
+      ipcRenderer.invoke("github:merge-approved-prs", cwd) as Promise<
+        | {
+            ok: true;
+            summary: {
+              merged: number[];
+              conflicted: Array<{ number: number; files: string[] }>;
+            };
+          }
+        | { ok: false; error: string }
+      >,
+    onMergeProgress: (callback: (event: MergeProgressEvent) => void) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        progress: MergeProgressEvent,
+      ) => callback(progress);
+      ipcRenderer.on("merge:progress", listener);
+      return () => ipcRenderer.removeListener("merge:progress", listener);
+    },
   },
   agent: {
     start: (

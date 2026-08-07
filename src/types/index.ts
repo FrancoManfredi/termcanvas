@@ -27,6 +27,31 @@ export type PinEvent =
   | { type: "pin:updated"; pin: Pin; repo: string }
   | { type: "pin:removed"; id: string; repo: string };
 
+// Progress events streamed from the main process while the bulk merge runs
+// (github:merge-approved-prs). The renderer maps them into the merge progress
+// panel; "done"/"error" are always emitted before the invoke resolves, so the
+// panel can outlive the operation for review.
+export type MergePhase =
+  | "label"
+  | "fetch"
+  | "worktree"
+  | "test-merge"
+  | "merge";
+
+export type MergeProgressEvent =
+  | { type: "start"; prNumbers: number[] }
+  | { type: "pr-start"; prNumber: number }
+  | { type: "step"; prNumber: number; phase: MergePhase }
+  | { type: "pr-merged"; prNumber: number }
+  | { type: "pr-conflicted"; prNumber: number; files: string[] }
+  | { type: "pr-error"; prNumber: number; message: string }
+  | {
+      type: "done";
+      merged: number[];
+      conflicted: Array<{ number: number; files: string[] }>;
+    }
+  | { type: "error"; message: string };
+
 export * from "./scene";
 
 export type TerminalType =
@@ -140,6 +165,12 @@ export interface TerminalData {
   stashed?: boolean;
   stashedAt?: number;
   issueNumber?: number;
+  // Set on review terminals: the runtime auto-cleans the review worktree
+  // when the CLI process exits, so review sessions never leave garbage.
+  reviewIssueNumber?: number;
+  // Captured when the review terminal is created, so the runtime can read
+  // GitHub's reviewDecision from the PR before the worktree is deleted.
+  reviewPrNumber?: number;
 }
 
 export interface TerminalRuntimeState {
@@ -653,6 +684,29 @@ export interface TermCanvasAPI {
         }
       | { ok: false; error: string }
     >;
+    restoreWorktree: (
+      repoPath: string,
+      branch: string,
+    ) => Promise<
+      | {
+          ok: true;
+          path: string;
+          worktrees: { path: string; branch: string; isPrimary: boolean }[];
+        }
+      | { ok: false; error: string }
+    >;
+    createReviewWorktree: (
+      repoPath: string,
+      baseName: string,
+      branch: string,
+    ) => Promise<
+      | {
+          ok: true;
+          path: string;
+          worktrees: { path: string; branch: string; isPrimary: boolean }[];
+        }
+      | { ok: false; error: string }
+    >;
     removeWorktree: (
       repoPath: string,
       worktreePath: string,
@@ -1054,6 +1108,117 @@ export interface TermCanvasAPI {
       | { ok: true }
       | { ok: false; error: string }
     >;
+    findPrForIssue: (
+      cwd: string,
+      issueNumber: number,
+    ) => Promise<
+      | {
+          ok: true;
+          pr: {
+            number: number;
+            title: string;
+            url: string;
+            state: string;
+            headRefName: string;
+            headRefOid: string;
+          } | null;
+        }
+      | { ok: false; error: string }
+    >;
+    getPrReviewDecision: (
+      cwd: string,
+      prNumber: number,
+    ) => Promise<
+      | {
+          ok: true;
+          reviewDecision:
+            | "APPROVED"
+            | "CHANGES_REQUESTED"
+            | "REVIEW_REQUIRED"
+            | "COMMENTED"
+            | "FIX_APPLIED"
+            | null;
+          bodyVerdict: "APROBADO" | "CAMBIOS_PEDIDOS" | null;
+          labels: string[];
+          headRefOid: string | null;
+          lastReviewCommitId: string | null;
+        }
+      | { ok: false; error: string }
+    >;
+    getPrComments: (
+      cwd: string,
+      prNumber: number,
+    ) => Promise<
+      | { ok: true; text: string }
+      | { ok: false; error: string }
+    >;
+    getReviewContext: (
+      cwd: string,
+      prNumber: number,
+      targetDir: string,
+    ) => Promise<
+      | {
+          ok: true;
+          context: string;
+          diffFilePath: string | null;
+          templateFilePath: string | null;
+          headRefOid: string | null;
+          lastReviewCommitId: string | null;
+        }
+      | { ok: false; error: string }
+    >;
+    getConflictFiles: (
+      cwd: string,
+      branch: string,
+      prNumber: number,
+    ) => Promise<
+      | { ok: true; conflictFiles: string[] }
+      | { ok: false; error: string }
+    >;
+    applyReviewLabel: (
+      cwd: string,
+      prNumber: number,
+      verdict:
+        | "APPROVED"
+        | "CHANGES_REQUESTED"
+        | "COMMENTED"
+        | "REVIEW_REQUIRED"
+        | "FIX_APPLIED"
+        | null,
+    ) => Promise<{ ok: true } | { ok: false; error: string }>;
+    applyCycleLabel: (
+      cwd: string,
+      prNumber: number,
+      issueNumber: number | null,
+      label:
+        | "review:pendiente"
+        | "review:comentado"
+        | "review:fix-aplicado"
+        | "review:aprobado"
+        | "conflicto:main",
+    ) => Promise<{ ok: true } | { ok: false; error: string }>;
+    syncIssueReviewLabel: (
+      cwd: string,
+      issueNumber: number,
+      prLabels: string[],
+    ) => Promise<{ ok: true } | { ok: false; error: string }>;
+    mergePr: (
+      cwd: string,
+      prNumber: number,
+    ) => Promise<{ ok: true; prUrl: string } | { ok: false; error: string }>;
+    mergeApprovedPrs: (
+      cwd: string,
+    ) => Promise<
+      | {
+          ok: true;
+          summary: {
+            merged: number[];
+            conflicted: Array<{ number: number; files: string[] }>;
+          };
+        }
+      | { ok: false; error: string }
+    >;
+    onMergeProgress: (callback: (event: MergeProgressEvent) => void) => () => void;
   };
   agent: {
     start: (

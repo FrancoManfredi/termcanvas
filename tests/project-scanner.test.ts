@@ -44,3 +44,53 @@ test("listChildGitRepos returns direct child repositories only", async () => {
     await rm(rootDir, { force: true, recursive: true });
   }
 });
+
+test("listWorktrees labels review worktrees as '<source> (review)' instead of '(detached)'", async () => {
+  const repoDir = mkdtempSync(
+    path.join(os.tmpdir(), "termcanvas-review-marker-"),
+  );
+
+  try {
+    writeFileSync(path.join(repoDir, "a.txt"), "hello");
+    execFileSync("git", ["init"], { cwd: repoDir, stdio: "ignore" });
+    execFileSync("git", ["add", "-A"], { cwd: repoDir, stdio: "ignore" });
+    execFileSync(
+      "git",
+      ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "init"],
+      { cwd: repoDir, stdio: "ignore" },
+    );
+    execFileSync(
+      "git", ["branch", "issue-42-fix-login-bug"],
+      { cwd: repoDir, stdio: "ignore" },
+    );
+
+    const reviewPath = path.join(
+      repoDir, ".worktrees", "issue-42-fix-login-bug-review",
+    );
+    execFileSync(
+      "git",
+      ["worktree", "add", "--detach", reviewPath, "issue-42-fix-login-bug"],
+      { cwd: repoDir, stdio: "ignore" },
+    );
+    // The create-review-worktree handler writes this marker file.
+    const adminDir = path.join(
+      repoDir, ".git", "worktrees", path.basename(reviewPath),
+    );
+    mkdirSync(adminDir, { recursive: true });
+    writeFileSync(
+      path.join(adminDir, "review-source-branch"),
+      "issue-42-fix-login-bug",
+      "utf-8",
+    );
+
+    const worktrees = new ProjectScanner().listWorktrees(repoDir);
+    const review = worktrees.find((w) =>
+      w.path.includes("issue-42-fix-login-bug-review"),
+    );
+    assert.ok(review, "review worktree must be listed");
+    assert.equal(review.branch, "issue-42-fix-login-bug (review)");
+    assert.equal(review.isPrimary, false);
+  } finally {
+    await rm(repoDir, { force: true, recursive: true });
+  }
+});

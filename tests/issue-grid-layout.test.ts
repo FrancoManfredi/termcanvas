@@ -40,3 +40,44 @@ test("computeIssueGridPositions offset from origin", async () => {
   assert.equal(p50.x, 51000); // 50 * 1020
   assert.equal(p50.y, 50);
 });
+
+test("packIssuePositions packs sorted by number with gaps from anchor", async () => {
+  const { packIssuePositions, issueGridSpacing } = await import(
+    "../src/canvas/issueGridLayout.ts"
+  );
+
+  const positions = packIssuePositions([
+    { issueNumber: 1, worktreeId: "w1", x: 0, y: 50 },
+    { issueNumber: 2, worktreeId: "w1", x: 1000, y: 60 },
+    { issueNumber: 3, worktreeId: "w1", x: 3000, y: 80 },
+  ]);
+
+  const spacing = issueGridSpacing();
+  // Anchor = leftmost card (issue 1 at x=0, y=50).
+  assert.deepEqual(positions.get(1), { x: 0, y: 50 });
+  assert.deepEqual(positions.get(2), { x: spacing, y: 50 });
+  assert.deepEqual(positions.get(3), { x: spacing * 2, y: 50 });
+});
+
+test("packIssuePositions groups by worktreeId", async () => {
+  const { packIssuePositions } = await import(
+    "../src/canvas/issueGridLayout.ts"
+  );
+
+  const positions = packIssuePositions([
+    { issueNumber: 5, worktreeId: "w1", x: 100, y: 10 },
+    { issueNumber: 6, worktreeId: "w2", x: 500, y: 30 },
+  ]);
+
+  assert.deepEqual(positions.get(5), { x: 100, y: 10 });
+  assert.deepEqual(positions.get(6), { x: 500, y: 30 });
+  assert.equal(positions.size, 2);
+});
+
+test("packIssuePositions is empty for no issues", async () => {
+  const { packIssuePositions } = await import(
+    "../src/canvas/issueGridLayout.ts"
+  );
+
+  assert.equal(packIssuePositions([]).size, 0);
+});

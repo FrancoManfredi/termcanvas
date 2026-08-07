@@ -7,6 +7,7 @@ export type MenuItem =
       label: string;
       active?: boolean;
       danger?: boolean;
+      disabled?: boolean;
       onClick: () => void;
     }
   | { type: "separator" };
@@ -120,15 +121,19 @@ export function ContextMenu({ x, y, items, onClose }: Props) {
             key={`${item.label}-${i}`}
             role="menuitem"
             tabIndex={-1}
+            disabled={item.disabled}
             className={`w-full px-3 py-1.5 text-left text-[12px] transition-colors duration-quick ${
-              item.active
-                ? "text-[var(--accent)] bg-[var(--accent)]/10"
-                : item.danger
-                  ? "text-[var(--red)] hover:text-[var(--red-soft)] hover:bg-[var(--border)]"
-                  : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--border)]"
+              item.disabled
+                ? "text-[var(--text-faint)] cursor-default"
+                : item.active
+                  ? "text-[var(--accent)] bg-[var(--accent)]/10"
+                  : item.danger
+                    ? "text-[var(--red)] hover:text-[var(--red-soft)] hover:bg-[var(--border)]"
+                    : "text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:bg-[var(--border)]"
             }`}
             style={{ fontFamily: '"Geist Mono", monospace' }}
             onClick={() => {
+              if (item.disabled) return;
               item.onClick();
               onClose();
             }}

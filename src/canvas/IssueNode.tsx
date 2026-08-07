@@ -1,8 +1,18 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { Node, NodeProps } from "@xyflow/react";
 import type { IssueNodeData } from "../stores/issueStore";
 import { useIssueStore } from "../stores/issueStore";
 import { useIssueResolveStore } from "../stores/issueResolveStore";
+import { useIssueReviewStore } from "../stores/issueReviewStore";
+import { useIssueActivityStore } from "../stores/issueActivityStore";
+import {
+  REVIEW_LABEL_APPROVED,
+  REVIEW_LABEL_CHANGES,
+  REVIEW_LABEL_CONFLICT,
+  REVIEW_LABEL_FIX_APPLIED,
+  REVIEW_LABEL_PENDING,
+  effectiveReviewLabel,
+} from "./reviewVerdict";
 import { renderMarkdown } from "../utils/markdownClass";
 
 type IssueFlowNode = Node<IssueNodeData, "issue">;
@@ -57,6 +67,32 @@ export function IssueNode({ data }: NodeProps<IssueFlowNode>) {
     (s) => s.resolvingIssueNumber,
   );
   const issueNumber = num(data.number);
+  const prStatus = useIssueReviewStore((s) => s.prsByIssue[issueNumber]);
+  const reviewVerdict = useIssueReviewStore(
+    (s) => s.verdictByIssue[issueNumber] ?? null,
+  );
+  // Select the labels map itself (stable reference) and derive the issue's
+  // array from it: a selector like `labelsByIssue[n] ?? []` would return a
+  // fresh array on every evaluation, which useSyncExternalStore treats as a
+  // snapshot change and re-renders forever.
+  const labelsByIssue = useIssueReviewStore((s) => s.labelsByIssue);
+  const prLabels = labelsByIssue[issueNumber] ?? [];
+  // Persisted PR cycle label wins over the in-memory verdict (source of
+  // truth); the verdict only covers live transitions until the next lookup.
+  const effective = effectiveReviewLabel(prLabels, reviewVerdict);
+  const reviewingIssueNumber = useIssueReviewStore(
+    (s) => s.reviewingIssueNumber,
+  );
+  const mergingIssueNumber = useIssueReviewStore(
+    (s) => s.mergingIssueNumber,
+  );
+  // Local activity log: select the map itself (stable reference) and derive
+  // the per-issue array — same pattern as labelsByIssue above, to avoid a
+  // fresh array snapshot on every evaluation. Keyed by the issue's own repo
+  // path so activity from another PC (same repo) shows up on load.
+  const worktreePath = str((data as Record<string, unknown>).__worktreePath);
+  const activityByRepo = useIssueActivityStore((s) => s.activityByRepo);
+  const activity = (worktreePath ? activityByRepo[worktreePath]?.[issueNumber] : undefined) ?? [];
   const title = str(data.title, `Issue ${issueNumber}`);
   const url = str(data.url);
   const state = str(data.state, "OPEN");
@@ -82,30 +118,63 @@ export function IssueNode({ data }: NodeProps<IssueFlowNode>) {
   const handleMinimize = useCallback((e: React.MouseEvent) => { e.stopPropagation(); setMinimized((m) => !m); }, []);
   const openUrl = useCallback((e: React.MouseEvent, link: string) => { e.stopPropagation(); if (link) void window.termcanvas.github.openUrl(link); }, []);
 
-  // Linked PRs from CrossReferencedEvent
+  // Kick off the linked-PR lookup as soon as the card renders so the
+  // "Revisar Solución" button resolves to orange/disabled without waiting
+  // for a context-menu right-click. Uses the issue's own repo path when the
+  // card carries one (multi-project canvases). The lookup is forced on every
+  // card OPEN (mount): reviews/labels may have changed since the last
+  // session lookup, so a fresh verdict must never stay frozen in the card.
+  // Guarded to first mount only — `data` refreshes on every issue sync,
+  // which must not spam the PR lookup.
+  const initialPrLookupRef = useRef(false);
+  useEffect(() => {
+    if (initialPrLookupRef.current) return;
+    initialPrLookupRef.current = true;
+    useIssueReviewStore
+      .getState()
+      .requestPrLookup(issueNumber, worktreePath || undefined, true);
+    void useIssueActivityStore.getState().loadActivity(worktreePath);
+  }, [issueNumber, data, worktreePath]);
+
+  // Linked PRs: prefer the native `closedByPullRequestsReferences` field (the
+  // data backing GitHub's "Development" panel); fall back to
+  // CrossReferencedEvent sources from the timeline when the field is empty.
+  const closedByPrs = nodes<Record<string, unknown>>(
+    data.closedByPullRequestsReferences,
+  );
   const linkedPRs: Array<Record<string, unknown>> = [];
-  for (const ti of timelineItems) {
-    const src = ti.source as Record<string, unknown> | undefined;
-    if (src && str(src.__typename) === "PullRequest") linkedPRs.push(src);
+  for (const pr of closedByPrs) {
+    if (str(pr.__typename) === "PullRequest" || num(pr.number) > 0) {
+      linkedPRs.push(pr);
+    }
+  }
+  if (linkedPRs.length === 0) {
+    for (const ti of timelineItems) {
+      const src = ti.source as Record<string, unknown> | undefined;
+      if (src && str(src.__typename) === "PullRequest") linkedPRs.push(src);
+    }
   }
 
   // Build relation cards from first-class GraphQL fields (NO dedup — dual states allowed)
-  const relationCards: Array<{ number: number; title: string; url: string; label: string; icon: string }> = [];
+  const relationCards: Array<{ number: number; title: string; url: string; label: string; icon: string; state: string }> = [];
 
   if (parent && num(parent.number) > 0) {
-    relationCards.push({ number: num(parent.number), title: str(parent.title), url: str(parent.url), label: "Parent", icon: "parent" });
+    relationCards.push({ number: num(parent.number), title: str(parent.title), url: str(parent.url), label: "Parent", icon: "parent", state: str(parent.state, "OPEN") });
   }
   for (const b of blockedByList) {
-    relationCards.push({ number: num(b.number), title: str(b.title), url: str(b.url), label: "Blocked by", icon: "blockedBy" });
+    relationCards.push({ number: num(b.number), title: str(b.title), url: str(b.url), label: "Blocked by", icon: "blockedBy", state: str(b.state, "OPEN") });
   }
   for (const b of blockingList) {
-    relationCards.push({ number: num(b.number), title: str(b.title), url: str(b.url), label: "Blocking", icon: "blocking" });
+    relationCards.push({ number: num(b.number), title: str(b.title), url: str(b.url), label: "Blocking", icon: "blocking", state: str(b.state, "OPEN") });
   }
   for (const si of subIssues) {
-    relationCards.push({ number: num(si.number), title: str(si.title), url: str(si.url), label: "Sub-issue", icon: "subIssue" });
+    relationCards.push({ number: num(si.number), title: str(si.title), url: str(si.url), label: "Sub-issue", icon: "subIssue", state: str(si.state, "OPEN") });
   }
 
   console.log("[IssueNode]", `#${issueNumber}`, "parent:", !!parent, "blockedBy:", blockedByList.length, "blocking:", blockingList.length, "subIssues:", subIssues.length, "timeline:", timelineItems.length);
+  if (closedByPrs.length > 0) {
+    console.log("[IssueNode]", `#${issueNumber}`, "closedByPRs:", JSON.stringify(closedByPrs.map(p => ({ number: num(p.number), title: str(p.title), state: str(p.state) }))));
+  }
   if (projectItems.length > 0) {
     console.log("[IssueNode]", `#${issueNumber}`, "projectItems:", JSON.stringify(projectItems.map(pi => ({
       project: (pi.project as Record<string,unknown>)?.title,
@@ -195,22 +264,66 @@ export function IssueNode({ data }: NodeProps<IssueFlowNode>) {
               </div>
             )}
 
-            {/* Activity */}
+            {/* Comments */}
             <div className="border-t border-[#30363d]">
               <div className="px-4 py-2 bg-[#161b22] border-b border-[#21262d]">
-                <span className="text-xs font-semibold text-[#c9d1d9]">Activity</span>
-                <span className="text-[11px] text-[#8b949e] ml-2">{comments.length} comment{comments.length !== 1 ? "s" : ""} · {timelineItems.length} event{timelineItems.length !== 1 ? "s" : ""}</span>
+                <span className="text-xs font-semibold text-[#c9d1d9]">Comments</span>
+                <span className="text-[11px] text-[#8b949e] ml-2">{comments.length} comment{comments.length !== 1 ? "s" : ""}</span>
+              </div>
+              <div className="divide-y divide-[#21262d] max-h-[320px] overflow-auto">
+                {[...comments]
+                  .sort((a, b) => new Date(str(a.createdAt)).getTime() - new Date(str(b.createdAt)).getTime())
+                  .map((cmt, i) => {
+                    const cAuthor = cmt.author as Record<string, unknown> | undefined;
+                    const cLogin = str(cAuthor?.login, "ghost");
+                    return (
+                      <div key={`c-${str(cmt.createdAt)}-${i}`} className="px-4 py-3 flex gap-3">
+                        {str(cAuthor?.avatarUrl) && <img alt="" className="w-10 h-10 rounded-md bg-[#0d1117] object-cover shrink-0" src={str(cAuthor?.avatarUrl)} />}
+                        <div className="flex-1 min-w-0 border border-[#30363d] rounded-md bg-[#0d1117] flex flex-col">
+                          <div className="flex items-center justify-between px-4 py-2 bg-[#161b22] border-b border-[#30363d] rounded-t-md text-sm">
+                            <div className="flex items-center flex-wrap gap-1">
+                              <span className="font-semibold text-[#e6edf3]">{cLogin}</span>
+                              <span className="text-[#8b949e]">commented</span>
+                              <span className="text-[#8b949e]">{relativeTime(str(cmt.createdAt))}</span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {cLogin === authorLogin && (
+                                <span className="border border-[#21262d] rounded-full px-2 py-0.5 text-xs text-[#8b949e] hidden sm:inline-block">Author</span>
+                              )}
+                              <button type="button" className="text-[#8b949e] hover:text-[#e6edf3] p-1" title="Más opciones">
+                                <svg aria-hidden="true" className="fill-current" height="16" viewBox="0 0 16 16" width="16"><path d="M8 9a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3ZM1.5 9a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Zm13 0a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z"/></svg>
+                              </button>
+                            </div>
+                          </div>
+                          <div className="p-4 text-[14px] leading-relaxed break-words text-[#e6edf3] flex-grow">
+                            {str(cmt.body) ? (
+                              <div className={issueMarkdownClass} dangerouslySetInnerHTML={{ __html: renderMarkdown(str(cmt.body)) }} />
+                            ) : (
+                              <p className="text-[#8b949e] italic text-sm">No comment body.</p>
+                            )}
+                          </div>
+                          <div className="px-4 py-1.5 border-t border-[#30363d] bg-[#0d1117] rounded-b-md flex items-center">
+                            <button type="button" className="text-[#8b949e] hover:text-[#58a6ff] hover:bg-[rgba(110,118,129,0.1)] rounded p-1 transition-colors" title="Reaccionar con 😄">
+                              <svg aria-hidden="true" className="fill-current" height="16" viewBox="0 0 16 16" width="16"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Zm3.75-2.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm5.5 0a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0Zm-6.55 3.3a.75.75 0 0 1 1.06-.05 3.5 3.5 0 0 0 4.48 0 .75.75 0 1 1 1.02 1.1 5 5 0 0 1-6.41 0 .75.75 0 0 1-.15-1.05Z" /></svg>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                {comments.length === 0 && (
+                  <div className="px-4 py-3 text-xs text-[#8b949e] italic">No comments yet.</div>
+                )}
+              </div>
+            </div>
+
+            {/* Timeline */}
+            <div className="border-t border-[#30363d]">
+              <div className="px-4 py-2 bg-[#161b22] border-b border-[#21262d]">
+                <span className="text-xs font-semibold text-[#c9d1d9]">Timeline</span>
+                <span className="text-[11px] text-[#8b949e] ml-2">{timelineItems.length} event{timelineItems.length !== 1 ? "s" : ""}</span>
               </div>
               <div className="divide-y divide-[#21262d] max-h-[180px] overflow-auto">
-                {comments.slice(0, 15).map((cmt, i) => (
-                  <div key={i} className="px-4 py-3 flex gap-3">
-                    {str((cmt.author as Record<string,unknown>|undefined)?.avatarUrl) && <img alt="" className="w-6 h-6 rounded-full mt-0.5 shrink-0" src={str((cmt.author as Record<string,unknown>|undefined)?.avatarUrl)} />}
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-baseline gap-2 mb-1"><span className="text-xs font-semibold text-[#c9d1d9]">{str((cmt.author as Record<string,unknown>|undefined)?.login)}</span><span className="text-[11px] text-[#8b949e]">{relativeTime(str(cmt.createdAt))}</span></div>
-                      <div className="text-xs text-[#e6edf3]" style={{ whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{str(cmt.body).slice(0, 500)}{str(cmt.body).length > 500 ? "…" : ""}</div>
-                    </div>
-                  </div>
-                ))}
                 {timelineItems.slice(0, 10).map((ti, i) => {
                   const actor = ti.actor as Record<string, unknown> | undefined;
                   const actorLogin = str(actor?.login);
@@ -243,8 +356,46 @@ export function IssueNode({ data }: NodeProps<IssueFlowNode>) {
                     </div>
                   );
                 })}
-                {comments.length === 0 && timelineItems.length === 0 && (
-                  <div className="px-4 py-3 text-xs text-[#8b949e] italic">No activity yet.</div>
+                {timelineItems.length === 0 && (
+                  <div className="px-4 py-3 text-xs text-[#8b949e] italic">No timeline events yet.</div>
+                )}
+              </div>
+            </div>
+
+            {/* Actividad local */}
+            <div className="border-t border-[#30363d]">
+              <div className="px-4 py-2 bg-[#161b22] border-b border-[#21262d]">
+                <span className="text-xs font-semibold text-[#c9d1d9]">Tu actividad</span>
+                <span className="text-[11px] text-[#8b949e] ml-2">{activity.length} action{activity.length !== 1 ? "s" : ""}</span>
+              </div>
+              <div className="divide-y divide-[#21262d] max-h-[180px] overflow-auto">
+                {activity.slice(-10).map((entry, i) => {
+                  const label =
+                    entry.type === "resolve"
+                      ? "Resolver Issue"
+                      : entry.type === "review"
+                        ? "Revisar Solución"
+                        : entry.type === "fix"
+                          ? "Implementar Fix"
+                          : "Mergear PR";
+                  const dotColor =
+                    entry.type === "resolve"
+                      ? "#238636"
+                      : entry.type === "review"
+                        ? "#db6d28"
+                        : entry.type === "fix"
+                          ? "#58a6ff"
+                          : "#8957e5";
+                  return (
+                    <div key={`act-${i}`} className="px-4 py-1.5 text-xs text-[#8b949e] flex items-center gap-2">
+                      <span className="inline-block w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: dotColor }} aria-hidden="true" />
+                      <span className="text-[#c9d1d9] font-medium">{label}</span>
+                      <span className="text-[#8b949e]">{relativeTime(new Date(entry.at).toISOString())}</span>
+                    </div>
+                  );
+                })}
+                {activity.length === 0 && (
+                  <div className="px-4 py-3 text-xs text-[#8b949e] italic">No local activity yet.</div>
                 )}
               </div>
             </div>
@@ -265,6 +416,81 @@ export function IssueNode({ data }: NodeProps<IssueFlowNode>) {
                 {resolvingIssueNumber === issueNumber ? "Resolviendo..." : "Resolver Issue"}
                 <svg aria-hidden="true" className="fill-current opacity-70" height="12" width="12" viewBox="0 0 16 16"><path d="M4.5 2.75v10.5a.75.75 0 0 0 1.144.636l8.25-5.25a.75.75 0 0 0 0-1.272l-8.25-5.25A.75.75 0 0 0 4.5 2.75Z" /></svg>
               </button>
+              <button
+                type="button"
+                disabled={reviewingIssueNumber !== null || prStatus == null}
+                title={prStatus !== "loading" && prStatus != null ? `Review PR #${prStatus.number}` : undefined}
+                className={
+                  prStatus === "loading"
+                    ? "flex items-center gap-1.5 bg-[#21262d] border border-[rgba(240,246,252,0.1)] rounded-md px-3 py-1.5 text-xs font-medium text-[#8b949e] cursor-wait"
+                    : prStatus == null
+                      ? "flex items-center gap-1.5 bg-[#21262d] border border-[rgba(240,246,252,0.1)] rounded-md px-3 py-1.5 text-xs font-medium text-[#8b949e] opacity-50 cursor-not-allowed"
+                      : "flex items-center gap-1.5 bg-[#db6d28] hover:bg-[#f0883e] border border-[rgba(240,136,62,0.4)] rounded-md px-3 py-1.5 text-xs font-medium text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                }
+                onClick={(e) => {
+                  e.stopPropagation();
+                  useIssueReviewStore.getState().reviewHandler?.(issueNumber);
+                }}>
+                {reviewingIssueNumber === issueNumber
+                  ? "Revisando..."
+                  : prStatus === "loading"
+                    ? "Buscando PR..."
+                    : "Revisar Solución"}
+                <svg aria-hidden="true" className="fill-current opacity-70" height="12" width="12" viewBox="0 0 16 16"><path d="M8 2c1.981 0 3.671.992 4.933 2.078 1.27 1.091 2.187 2.345 2.637 3.023a1.62 1.62 0 0 1 0 1.798c-.45.678-1.367 1.932-2.637 3.023C11.67 13.008 9.981 14 8 14c-1.981 0-3.671-.992-4.933-2.078C1.797 10.83.88 9.576.43 8.898a1.62 1.62 0 0 1 0-1.798c.45-.677 1.367-1.931 2.637-3.022C4.33 2.992 6.019 2 8 2ZM1.679 7.932a.12.12 0 0 0 0 .136c.411.622 1.241 1.75 2.366 2.717C5.176 11.758 6.527 12.5 8 12.5c1.473 0 2.825-.742 3.955-1.715 1.124-.967 1.954-2.096 2.366-2.717a.12.12 0 0 0 0-.136c-.412-.621-1.242-1.75-2.366-2.717C10.824 4.242 9.473 3.5 8 3.5c-1.473 0-2.825.742-3.955 1.715-1.124.967-1.954 2.096-2.366 2.717ZM8 10a2 2 0 1 1 0-4 2 2 0 0 1 0 4Z" /></svg>
+              </button>
+              {effective === REVIEW_LABEL_APPROVED &&
+                prStatus !== null &&
+                prStatus !== "loading" &&
+                prStatus.state === "OPEN" && (
+                <button
+                  type="button"
+                  disabled={mergingIssueNumber !== null}
+                  title={`Merge PR #${prStatus.number}`}
+                  className="flex items-center gap-1.5 bg-[#238636] hover:bg-[#2ea043] border border-[rgba(46,160,67,0.4)] rounded-md px-3 py-1.5 text-xs font-medium text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    useIssueReviewStore.getState().mergeHandler?.(issueNumber);
+                  }}>
+                  {mergingIssueNumber === issueNumber ? "Mergeando..." : "Merge PR"}
+                  <svg aria-hidden="true" className="fill-current opacity-70" height="12" width="12" viewBox="0 0 16 16"><path d="M1 7.5V2.75A.75.75 0 0 1 1.75 2H7v5h1.5v-5h5.25a.75.75 0 0 1 .75.75V7.5a1.5 1.5 0 1 1-1.5 0V3.5h-3.5v8.5h2v-1h1.5v2.5H1.5v-2.5H3v-1H1.5v1H1v-4.5h.75v-1H1Zm1 0h1v-3.5h2.5V7.5H2Zm0 6h1v-3.5h1.5v3.5H2Z" /></svg>
+                </button>
+              )}
+              {effective === REVIEW_LABEL_CONFLICT && (
+                <span className="inline-flex items-center gap-1.5 bg-[#f85149]/10 border border-[rgba(248,81,73,0.5)] text-[#f85149] rounded-full px-2 py-0.5 text-[11px] font-medium">
+                  <span className="w-2 h-2 rounded-full bg-current" />
+                  Conflicto con main
+                </span>
+              )}
+              {effective === REVIEW_LABEL_APPROVED && (
+                <span className="inline-flex items-center gap-1.5 bg-[#238636]/15 border border-[rgba(35,134,54,0.5)] text-[#3fb950] rounded-full px-2 py-0.5 text-[11px] font-medium">
+                  <span className="w-2 h-2 rounded-full bg-current" />
+                  Review: aprobado
+                </span>
+              )}
+              {effective === REVIEW_LABEL_CHANGES && (
+                <span className="inline-flex items-center gap-1.5 bg-[#f85149]/10 border border-[rgba(248,81,73,0.5)] text-[#f85149] rounded-full px-2 py-0.5 text-[11px] font-medium">
+                  <span className="w-2 h-2 rounded-full bg-current" />
+                  Review: cambios pedidos
+                </span>
+              )}
+              {effective === REVIEW_LABEL_FIX_APPLIED && (
+                <span className="inline-flex items-center gap-1.5 bg-[#58a6ff]/10 border border-[rgba(88,166,255,0.5)] text-[#58a6ff] rounded-full px-2 py-0.5 text-[11px] font-medium">
+                  <span className="w-2 h-2 rounded-full bg-current" />
+                  Review: fix aplicado
+                </span>
+              )}
+              {effective === REVIEW_LABEL_PENDING && (
+                <span className="inline-flex items-center gap-1.5 bg-[#d29922]/10 border border-[rgba(210,153,34,0.5)] text-[#d29922] rounded-full px-2 py-0.5 text-[11px] font-medium">
+                  <span className="w-2 h-2 rounded-full bg-current" />
+                  Review: pendiente
+                </span>
+              )}
+              {effective === null && (
+                <span className="inline-flex items-center gap-1.5 bg-[#21262d]/60 border border-[rgba(240,246,252,0.15)] text-[#8b949e] rounded-full px-2 py-0.5 text-[11px] font-medium opacity-60">
+                  <span className="w-2 h-2 rounded-full bg-current" />
+                  Review: sin veredicto
+                </span>
+              )}
               <span className="flex-1" />
               <span className="text-[11px] text-[#8b949e]">#{issueNumber} · {state.toLowerCase()}</span>
             </div>
@@ -389,27 +615,36 @@ export function IssueNode({ data }: NodeProps<IssueFlowNode>) {
                             return (
                               <div key={`rc-${rc.number}-${rc.label}`} className="border border-[#30363d] rounded-md p-2 bg-[#010409] flex items-start gap-2">
                                 <div className="shrink-0" style={{ width: 24, height: 24 }}>
-                                  {isBlocking && (
+                                  {rc.state === "CLOSED" ? (
                                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-                                      <circle cx="12" cy="12" r="9" stroke="#3FB950" strokeWidth="2"/>
-                                      <circle cx="12" cy="12" r="2" fill="#3FB950"/>
-                                      <g transform="translate(14, 14)">
-                                        <circle cx="5" cy="5" r="4.5" fill="#10141a" stroke="#F85149" strokeWidth="1"/>
-                                        <rect x="2.5" y="4.5" width="5" height="1" rx="0.5" fill="#F85149"/>
-                                      </g>
+                                      <circle cx="12" cy="12" r="9" stroke="#8957E5" strokeWidth="2"/>
+                                      <path d="M8 12L11 15L16 9" stroke="#8957E5" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
                                     </svg>
-                                  )}
-                                  {isBlockedBy && (
-                                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-                                      <circle cx="12" cy="12" r="9" stroke="#F85149" strokeWidth="2"/>
-                                      <circle cx="12" cy="12" r="2" fill="#F85149"/>
-                                    </svg>
-                                  )}
-                                  {!isBlockedBy && !isBlocking && (
-                                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
-                                      <circle cx="12" cy="12" r="9" stroke="#3FB950" strokeWidth="2"/>
-                                      <circle cx="12" cy="12" r="2" fill="#3FB950"/>
-                                    </svg>
+                                  ) : (
+                                    <>
+                                      {isBlocking && (
+                                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                                          <circle cx="12" cy="12" r="9" stroke="#3FB950" strokeWidth="2"/>
+                                          <circle cx="12" cy="12" r="2" fill="#3FB950"/>
+                                          <g transform="translate(14, 14)">
+                                            <circle cx="5" cy="5" r="4.5" fill="#10141a" stroke="#F85149" strokeWidth="1"/>
+                                            <rect x="2.5" y="4.5" width="5" height="1" rx="0.5" fill="#F85149"/>
+                                          </g>
+                                        </svg>
+                                      )}
+                                      {isBlockedBy && (
+                                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                                          <circle cx="12" cy="12" r="9" stroke="#F85149" strokeWidth="2"/>
+                                          <circle cx="12" cy="12" r="2" fill="#F85149"/>
+                                        </svg>
+                                      )}
+                                      {!isBlockedBy && !isBlocking && (
+                                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                                          <circle cx="12" cy="12" r="9" stroke="#3FB950" strokeWidth="2"/>
+                                          <circle cx="12" cy="12" r="2" fill="#3FB950"/>
+                                        </svg>
+                                      )}
+                                    </>
                                   )}
                                 </div>
                                 <div className="flex flex-col min-w-0 flex-1">

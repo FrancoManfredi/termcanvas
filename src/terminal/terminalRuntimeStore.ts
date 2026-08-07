@@ -34,6 +34,7 @@ import {
   type TerminalRendererMode,
 } from "../stores/preferencesStore";
 import { useProjectStore } from "../stores/projectStore";
+import { useIssueReviewStore } from "../stores/issueReviewStore";
 import { useTerminalFindStore } from "../stores/terminalFindStore";
 import { getTerminalDisplayTitle } from "../stores/terminalState";
 import {
@@ -284,6 +285,27 @@ export const useTerminalRuntimeStore = create<TerminalRuntimeStoreState>(
 function getT() {
   const locale = useLocaleStore.getState().locale;
   return { ...en, ...dictionaries[locale] };
+}
+
+// Issue-flow terminals (resolver/fix/conflict/review) pass `issueNumber` in
+// their meta and run the CLI unattended (review terminals included: the
+// reviewer posts its VEREDICTO review in its final turn): the agent pushes
+// and flips the PR's cycle labels before its turn ends. A completed turn is
+// therefore the signal that the linked PR's state changed — force a re-read
+// so the card's badge and menu gates (derived from the persisted labels)
+// update without waiting for a card reopen or a clean CLI exit (which a tab
+// close skips). The review exit path also refreshes — redundant but
+// idempotent.
+function refreshLinkedPrAfterAgentTurn(runtime: ManagedTerminalRuntime): void {
+  const issueNumber = runtime.meta.terminal.issueNumber;
+  if (issueNumber === undefined) return;
+  const project = useProjectStore
+    .getState()
+    .projects.find((p) => p.id === runtime.meta.projectId);
+  const projectPath = project?.path ?? runtime.meta.worktreePath;
+  useIssueReviewStore
+    .getState()
+    .requestPrLookup(issueNumber, projectPath, true);
 }
 
 function updateRuntimeSnapshot(
@@ -1873,6 +1895,86 @@ function startTerminalRuntime(runtime: ManagedTerminalRuntime) {
         return;
       }
 
+      // Review terminals are single-use: when the reviewer CLI exits, close
+      // the tile and remove the isolated review worktree. No shell demotion
+      // — the worktree would be gone, leaving a shell with a dead cwd.
+      if (runtime.meta.terminal.reviewIssueNumber !== undefined) {
+        const { projectId, worktreeId, worktreePath, terminal } = runtime.meta;
+        const project = useProjectStore
+          .getState()
+          .projects.find((p) => p.id === projectId);
+        const projectPath = project?.path ?? worktreePath;
+        // Persist the review verdict BEFORE removing the worktree: the PR
+        // branch is still pushed, so gh can read it from the repo root.
+        const reviewIssueNumber = runtime.meta.terminal.reviewIssueNumber;
+        const reviewPrNumber = runtime.meta.terminal.reviewPrNumber;
+          if (reviewPrNumber !== undefined) {
+            void window.termcanvas.github
+              .getPrReviewDecision(projectPath, reviewPrNumber)
+              .then((result) => {
+                if (result.ok && result.reviewDecision) {
+                  useIssueReviewStore
+                    .getState()
+                    .setReviewVerdict(reviewIssueNumber, result.reviewDecision);
+                  // Flip the real PR label to match the verdict line the review
+                  // body is required to carry, so the card shows review/merge
+                  // state even after a reload.
+                  void window.termcanvas.github
+                    .applyReviewLabel(
+                      projectPath,
+                      reviewPrNumber,
+                      result.reviewDecision,
+                    )
+                    .then(() => {
+                      // Force a re-read of the PR after the label flip: the
+                      // card's badge and menu gates derive from the persisted
+                      // cycle labels, which the session cache would otherwise
+                      // keep frozen in their pre-review state.
+                      useIssueReviewStore
+                        .getState()
+                        .requestPrLookup(reviewIssueNumber, projectPath, true);
+                    })
+                    .catch((error) => {
+                      console.error(
+                        "[review] failed to apply review label:",
+                        error,
+                      );
+                    });
+                }
+              })
+            .catch((error) => {
+              console.error(
+                "[review] failed to fetch review decision:",
+                error,
+              );
+            });
+        }
+        void window.termcanvas.project
+          .removeWorktree(projectPath, worktreePath, true)
+          .then((result) => {
+            if (result.ok) {
+              useProjectStore
+                .getState()
+                .syncWorktrees(projectPath, result.worktrees);
+            }
+          })
+          .catch((error) => {
+            console.error("[review] failed to remove review worktree:", error);
+          });
+        destroyTerminalRuntime(terminal.id, {
+          caller: "review-terminal-exit",
+          reason: "review_finished",
+        });
+        useProjectStore
+          .getState()
+          .removeTerminal(projectId, worktreeId, terminal.id);
+        notify(
+          "info",
+          `Review terminado (exit ${exitCode}) — worktree de review eliminado.`,
+        );
+        return;
+      }
+
       if (runtime.waitingTimer) {
         clearTimeout(runtime.waitingTimer);
         runtime.waitingTimer = null;
@@ -1946,6 +2048,7 @@ function startTerminalRuntime(runtime: ManagedTerminalRuntime) {
       return;
     runtime.lastTurnCompletedAt = now;
     setStatus(runtime, "completed");
+    refreshLinkedPrAfterAgentTurn(runtime);
   };
 
   runtime.removeTurnComplete = window.termcanvas.session.onTurnComplete(
@@ -2278,6 +2381,25 @@ export function destroyTerminalRuntime(
   }
   runtime.globalDisposers = [];
 
+  // A terminal closed by the user (tab X) or removed while its CLI session
+  // never exited cleanly skips the exit path where issue-flow labels are
+  // persisted — leaving the linked PR's state frozen (a fresh review would
+  // never reach the card). Force a re-read from the repo root so the card
+  // reflects whatever the agent pushed or posted before the close. Skipped
+  // on app shutdown: the renderer is going away anyway.
+  if (cause?.reason !== "destroy_all_terminal_runtimes") {
+    const terminalMeta = runtime.meta.terminal;
+    if (terminalMeta.issueNumber !== undefined) {
+      const project = useProjectStore
+        .getState()
+        .projects.find((p) => p.id === runtime.meta.projectId);
+      const projectPath = project?.path ?? runtime.meta.worktreePath;
+      useIssueReviewStore
+        .getState()
+        .requestPrLookup(terminalMeta.issueNumber, projectPath, true);
+    }
+  }
+
   if (runtime.ptyId !== null) {
     const ptyId = runtime.ptyId;
     setPtyId(runtime, null);
@@ -2337,6 +2459,21 @@ export function getTerminalRuntime(
   terminalId: string,
 ): ManagedTerminalRuntime | null {
   return runtimeRegistry.get(terminalId) ?? null;
+}
+
+/**
+ * True when any live (non-disposed) terminal currently runs an unattended
+ * review session against the given worktree. Review worktrees are single-use
+ * and auto-removed on CLI exit; a lingering copy with no live reviewer on it
+ * is stale and can be discarded safely.
+ */
+export function hasLiveReviewOnWorktree(worktreeId: string): boolean {
+  for (const runtime of runtimeRegistry.values()) {
+    if (runtime.disposed) continue;
+    if (runtime.meta.worktreeId !== worktreeId) continue;
+    if (runtime.meta.terminal.reviewIssueNumber !== undefined) return true;
+  }
+  return false;
 }
 
 /**

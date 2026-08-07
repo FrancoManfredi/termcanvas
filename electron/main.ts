@@ -106,6 +106,20 @@ import {
 } from "./session-history-events.ts";
 import type { SessionHistoryChangedEvent } from "../shared/sessions.ts";
 import {
+  REVIEW_CYCLE_LABELS,
+  REVIEW_LABEL_APPROVED,
+  REVIEW_LABEL_CHANGES,
+  REVIEW_LABEL_CONFLICT,
+  REVIEW_LABEL_FIX_APPLIED,
+  REVIEW_LABEL_PENDING,
+  canonicalReviewLabel,
+  parseReviewBodyVerdict,
+  reviewDecisionFromBodyVerdict,
+  reviewDecisionWithFixApplied,
+  reviewLabelsForVerdict,
+} from "../src/canvas/reviewVerdict";
+import type { MergeProgressEvent } from "../src/types";
+import {
   checkoutGitRef,
   createCommit,
   discardFiles,
@@ -896,6 +910,158 @@ function setupIpc() {
           ["worktree", "add", "-b", trimmedBranch, worktreePath],
           { cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
         );
+        const worktrees = await projectScanner.listWorktreesAsync(resolvedRepo);
+        return { ok: true as const, path: worktreePath, worktrees };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        // git errors often include stderr on a trailing line
+        return { ok: false as const, error: message };
+      }
+    },
+  );
+
+  // Re-create a worktree for a branch whose implementer worktree no longer
+  // exists (deleted terminal, pruned checkout). The branch must already
+  // exist — locally or on origin — because this restores the PR head ref
+  // instead of creating a fresh branch: the fix/conflict session pushes
+  // back onto the same PR. Used by the RESOLVER CONFLICTO / IMPLEMENTAR
+  // FIX flows when their branch lookup comes up empty.
+  ipcMain.handle(
+    "project:restore-worktree",
+    async (_event, repoPath: string, branch: string) => {
+      const trimmedBranch = (branch ?? "").trim();
+      if (!trimmedBranch) {
+        return { ok: false as const, error: "Branch name is required" };
+      }
+      if (
+        /[\s~^:?*\[\\]/.test(trimmedBranch) ||
+        trimmedBranch.startsWith("-")
+      ) {
+        return { ok: false as const, error: "Invalid branch name" };
+      }
+
+      const resolvedRepo = path.resolve(repoPath);
+      const sanitizedDirName = trimmedBranch.replace(/[\\/]/g, "-");
+      const worktreePath = path.join(
+        resolvedRepo,
+        ".worktrees",
+        sanitizedDirName,
+      );
+
+      try {
+        const { execFile } = await import("child_process");
+        const { promisify } = await import("util");
+        const execFileAsync = promisify(execFile);
+        const branchExists = async (ref: string) => {
+          try {
+            await execFileAsync("git", ["rev-parse", "--verify", ref], {
+              cwd: resolvedRepo,
+            });
+            return true;
+          } catch {
+            return false;
+          }
+        };
+        if (await branchExists(`refs/heads/${trimmedBranch}`)) {
+          await execFileAsync(
+            "git",
+            ["worktree", "add", worktreePath, trimmedBranch],
+            { cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
+          );
+        } else if (
+          await branchExists(`refs/remotes/origin/${trimmedBranch}`)
+        ) {
+          await execFileAsync(
+            "git",
+            [
+              "worktree",
+              "add",
+              "-b",
+              trimmedBranch,
+              worktreePath,
+              `origin/${trimmedBranch}`,
+            ],
+            { cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
+          );
+        } else {
+          return {
+            ok: false as const,
+            error: `Branch "${trimmedBranch}" not found locally or on origin — the PR head ref is unreachable`,
+          };
+        }
+        const worktrees = await projectScanner.listWorktreesAsync(resolvedRepo);
+        return { ok: true as const, path: worktreePath, worktrees };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { ok: false as const, error: message };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    "project:create-review-worktree",
+    async (_event, repoPath: string, baseName: string, branch: string) => {
+      const trimmedBase = (baseName ?? "").trim();
+      if (!trimmedBase) {
+        return { ok: false as const, error: "Worktree base name is required" };
+      }
+      if (/[\\/:*?"<>|]/.test(trimmedBase)) {
+        return { ok: false as const, error: "Invalid worktree base name" };
+      }
+      const trimmedBranch = (branch ?? "").trim();
+      if (!trimmedBranch) {
+        return { ok: false as const, error: "Branch name is required" };
+      }
+      if (
+        /[\s~^:?*\[\]\\]/.test(trimmedBranch) ||
+        trimmedBranch.startsWith("-")
+      ) {
+        return { ok: false as const, error: "Invalid branch name" };
+      }
+
+      const resolvedRepo = path.resolve(repoPath);
+      // Reuse the implementer's worktree directory name with a "-review"
+      // suffix so both worktrees of one issue share a base name and cleanup
+      // can target the reviewer by suffix alone.
+      const sanitizedDirName = trimmedBase.replace(/[\\/]/g, "-");
+      const worktreePath = path.join(
+        resolvedRepo,
+        ".worktrees",
+        `${sanitizedDirName}-review`,
+      );
+
+      try {
+        const { execFile } = await import("child_process");
+        const { promisify } = await import("util");
+        const execFileAsync = promisify(execFile);
+        // The PR branch stays bound to the implementer's worktree and the
+        // reviewer must never create its own branch or PR, so the review
+        // copy is a detached checkout of the PR branch's commit.
+        await execFileAsync(
+          "git",
+          ["worktree", "add", "--detach", worktreePath, trimmedBranch],
+          { cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
+        );
+        // Persist the source branch so the scanner can display
+        // "<branch> (review)" instead of "(detached)". Stored in git's
+        // per-worktree admin dir, where the scanner reads it back on every
+        // worktree listing.
+        try {
+          const adminDir = path.join(
+            resolvedRepo,
+            ".git",
+            "worktrees",
+            path.basename(worktreePath),
+          );
+          fs.mkdirSync(adminDir, { recursive: true });
+          fs.writeFileSync(
+            path.join(adminDir, "review-source-branch"),
+            trimmedBranch,
+            "utf-8",
+          );
+        } catch {
+          // Cosmetic only — the review worktree still works without it.
+        }
         const worktrees = await projectScanner.listWorktreesAsync(resolvedRepo);
         return { ok: true as const, path: worktreePath, worktrees };
       } catch (err) {
@@ -2543,14 +2709,17 @@ function setupIpc() {
                   subIssues(first: 20) {
                     nodes { number title url state }
                   }
-                  parent { number title url }
+                  parent { number title url state }
                   blockedBy(first: 20) {
-                    nodes { number title url }
+                    nodes { number title url state }
                   }
                   blocking(first: 20) {
-                    nodes { number title url }
+                    nodes { number title url state }
                   }
-                  comments(first: 30) {
+                  closedByPullRequestsReferences(first: 10) {
+                    nodes { number title state url headRefName headRefOid }
+                  }
+                  comments(first: 100) {
                     nodes {
                       author { login avatarUrl }
                       body
@@ -2750,6 +2919,559 @@ function setupIpc() {
     }
   });
 
+  // Detect the pull request linked to an issue (the "Development" panel
+  // data). Uses the native `closedByPullRequestsReferences` field — the
+  // older `development.pulls` field no longer exists on Issue and made this
+  // handler fail silently. Returns the OPEN PR, else the most recent one,
+  // else null. GraphQL errors are surfaced as `ok: false` instead of being
+  // mistaken for "no PR".
+  ipcMain.handle(
+    "github:find-pr-for-issue",
+    async (
+      _event,
+      cwd: string,
+      issueNumber: number,
+    ): Promise<
+      | {
+          ok: true;
+          pr: {
+            number: number;
+            title: string;
+            url: string;
+            state: string;
+            headRefName: string;
+            headRefOid: string;
+          } | null;
+        }
+      | { ok: false; error: string }
+    > => {
+      const { execFile } = await import("child_process");
+      const { promisify } = await import("util");
+      const execFileAsync = promisify(execFile);
+      const execEnv: NodeJS.ProcessEnv = { ...process.env };
+      if (!execEnv.GH_TOKEN && process.env.GITHUB_TOKEN) {
+        execEnv.GH_TOKEN = process.env.GITHUB_TOKEN;
+      }
+      if (!execEnv.GITHUB_TOKEN && process.env.GH_TOKEN) {
+        execEnv.GITHUB_TOKEN = process.env.GH_TOKEN;
+      }
+      try {
+        let owner: string;
+        let repo: string;
+        try {
+          const { stdout: remoteUrl } = await execFileAsync(
+            "git", ["remote", "get-url", "origin"],
+            { cwd, timeout: 10_000, env: execEnv },
+          );
+          const match = remoteUrl.trim().match(
+            /github\.com[:/]([^/]+)\/([^/\s.]+?)(?:\.git)?$/i,
+          );
+          if (!match) {
+            return {
+              ok: false as const,
+              error: `Could not parse GitHub owner/repo from remote: ${remoteUrl.trim()}`,
+            };
+          }
+          owner = match[1];
+          repo = match[2];
+        } catch {
+          return {
+            ok: false as const,
+            error: "No git remote 'origin' found. Add a GitHub remote first.",
+          };
+        }
+
+        const query = `
+          query($owner: String!, $repo: String!, $number: Int!) {
+            repository(owner: $owner, name: $repo) {
+              issue(number: $number) {
+                closedByPullRequestsReferences(first: 10) {
+                  nodes {
+                    number
+                    title
+                    url
+                    state
+                    headRefName
+                    headRefOid
+                  }
+                }
+              }
+            }
+          }`;
+
+        const { stdout } = await execFileAsync(
+          "gh", [
+            "api", "graphql",
+            "-F", `owner=${owner}`,
+            "-F", `repo=${repo}`,
+            "-F", `number=${issueNumber}`,
+            "-f", `query=${query}`,
+          ],
+          { cwd, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, env: execEnv },
+        );
+
+        const data = JSON.parse(stdout);
+        const graphqlErrors: Array<{ message: string }> = data?.errors ?? [];
+        if (graphqlErrors.length > 0) {
+          return {
+            ok: false as const,
+            error: `GitHub GraphQL: ${graphqlErrors[0].message}`,
+          };
+        }
+        const pulls: Array<{
+          number: number;
+          title: string;
+          url: string;
+          state: string;
+          headRefName: string;
+          headRefOid: string;
+        }> =
+          data?.data?.repository?.issue?.closedByPullRequestsReferences
+            ?.nodes ?? [];
+        if (pulls.length === 0) {
+          return { ok: true as const, pr: null };
+        }
+        const openPr = pulls.find((p) => p.state === "OPEN") ?? pulls[0];
+        return { ok: true as const, pr: openPr };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { ok: false as const, error: message };
+      }
+    },
+  );
+
+  // Read the aggregate review decision of a PR. The review terminal persists
+  // this right before the runtime deletes the worktree, so the issue card can
+  // show whether the reviewer approved or requested changes.
+  //
+  // The binary verdict ("VEREDICTO: APROBADO" / "VEREDICTO: CAMBIOS_PEDIDOS")
+  // that reviews are now required to lead with takes precedence over GitHub's
+  // own reviewDecision: a PR reviewed with event=COMMENT still records
+  // reviewDecision="COMMENTED", but the body line is the actual contract that
+  // TermCanvas parses to flip the issue label and gate the fix/merge buttons.
+  ipcMain.handle(
+    "github:get-pr-review-decision",
+    async (
+      _event,
+      cwd: string,
+      prNumber: number,
+    ): Promise<
+      | {
+          ok: true;
+          reviewDecision:
+            | "APPROVED"
+            | "CHANGES_REQUESTED"
+            | "REVIEW_REQUIRED"
+            | "COMMENTED"
+            | "FIX_APPLIED"
+            | null;
+          bodyVerdict: "APROBADO" | "CAMBIOS_PEDIDOS" | null;
+          labels: string[];
+          headRefOid: string | null;
+          lastReviewCommitId: string | null;
+        }
+      | { ok: false; error: string }
+    > => {
+      const { execFile } = await import("child_process");
+      const { promisify } = await import("util");
+      const execFileAsync = promisify(execFile);
+      const execEnv: NodeJS.ProcessEnv = { ...process.env };
+      if (!execEnv.GH_TOKEN && process.env.GITHUB_TOKEN) {
+        execEnv.GH_TOKEN = process.env.GITHUB_TOKEN;
+      }
+      if (!execEnv.GITHUB_TOKEN && process.env.GH_TOKEN) {
+        execEnv.GITHUB_TOKEN = process.env.GH_TOKEN;
+      }
+      try {
+        const { stdout } = await execFileAsync(
+          "gh",
+          [
+            "pr", "view", String(prNumber),
+            "--json", "reviewDecision,reviews,labels,headRefOid",
+            "--jq", "{ decision: .reviewDecision, headRefOid: .headRefOid, reviews: [.reviews[] | { state: .state, body: .body, submittedAt: .submittedAt, commitOid: .commit.oid }], labels: [.labels[].name] }",
+          ],
+          { cwd, timeout: 15_000, maxBuffer: 10 * 1024 * 1024, env: execEnv },
+        );
+        const parsed = JSON.parse(stdout);
+        const decision = parsed?.decision;
+        const headRefOid: string | null =
+          typeof parsed?.headRefOid === "string" ? parsed.headRefOid : null;
+        const reviews: Array<{ state: string; body: string; submittedAt: string; commitOid: string | null }> =
+          Array.isArray(parsed?.reviews) ? parsed.reviews : [];
+        const labels: string[] = Array.isArray(parsed?.labels)
+          ? (parsed.labels as string[])
+          : [];
+
+        // The NEWEST review whose body carries the binary verdict line wins.
+        // gh returns reviews oldest-first (verified empirically), so keep
+        // scanning and let the last match override — a re-review must beat
+        // the original verdict, otherwise a stale "changes requested" would
+        // block the merge after the fix round.
+        let bodyVerdict: "APROBADO" | "CAMBIOS_PEDIDOS" | null = null;
+        for (const review of reviews) {
+          const parsed = parseReviewBodyVerdict(review.body);
+          if (parsed) {
+            bodyVerdict = parsed;
+          }
+        }
+
+        const states: string[] = reviews.map((r) => r.state);
+        const fallbackDecision =
+          decision === "APPROVED" ||
+          decision === "CHANGES_REQUESTED" ||
+          decision === "REVIEW_REQUIRED"
+            ? (decision as "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED")
+            // A human review that only commented leaves reviewDecision empty
+            // but still counts as feedback: surface it instead of "sin veredicto".
+            : states.includes("COMMENTED")
+              ? "COMMENTED"
+              : null;
+
+        // The commit the NEWEST review evaluated (gh returns reviews
+        // oldest-first, so the last entry wins). Drives the fix-applied fold:
+        // a head that moved past that commit means a fix (or conflict
+        // resolution) was pushed since the review — awaiting re-review.
+        const lastReviewCommitId: string | null =
+          reviews.length > 0 ? (reviews[reviews.length - 1].commitOid ?? null) : null;
+
+        const reviewDecision = reviewDecisionWithFixApplied(
+          reviewDecisionFromBodyVerdict(bodyVerdict) ?? fallbackDecision,
+          headRefOid,
+          lastReviewCommitId,
+        );
+
+        return {
+          ok: true as const,
+          reviewDecision,
+          bodyVerdict,
+          labels,
+          headRefOid,
+          lastReviewCommitId,
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { ok: false as const, error: message };
+      }
+    },
+  );
+
+  // Return the review thread of a PR (bodies of submitted reviews and inline
+  // comments) as plain text. Injected into the implementer's resume prompt
+  // after a "changes requested" verdict so they address the feedback.
+  ipcMain.handle(
+    "github:get-pr-comments",
+    async (
+      _event,
+      cwd: string,
+      prNumber: number,
+    ): Promise<
+      | { ok: true; text: string }
+      | { ok: false; error: string }
+    > => {
+      const { execFile } = await import("child_process");
+      const { promisify } = await import("util");
+      const execFileAsync = promisify(execFile);
+      const execEnv: NodeJS.ProcessEnv = { ...process.env };
+      if (!execEnv.GH_TOKEN && process.env.GITHUB_TOKEN) {
+        execEnv.GH_TOKEN = process.env.GITHUB_TOKEN;
+      }
+      if (!execEnv.GITHUB_TOKEN && process.env.GH_TOKEN) {
+        execEnv.GITHUB_TOKEN = process.env.GH_TOKEN;
+      }
+      try {
+        const { stdout } = await execFileAsync(
+          "gh",
+          ["pr", "view", String(prNumber), "--comments"],
+          { cwd, timeout: 20_000, maxBuffer: 10 * 1024 * 1024, env: execEnv },
+        );
+        const full = stdout.trim();
+        const MAX_COMMENT_CHARS = 5000;
+        const text =
+          full.length > MAX_COMMENT_CHARS
+            ? `${full.slice(0, MAX_COMMENT_CHARS)}... (feedback truncado — revisá el PR en GitHub para el resto)`
+            : full;
+        return { ok: true as const, text };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { ok: false as const, error: message };
+      }
+    },
+  );
+
+  // Snapshot the PR state the review/fix prompt needs, so the agent receives
+  // deterministic facts instead of re-deriving them with gh calls that are
+  // easy to get wrong (headRefOid, the last review, the latest inline batch).
+  //
+  // Returns a single flattened text block (newlines stripped — the opencode
+  // prompt breaks on them on Windows) plus the path of a worktree-local diff
+  // file that holds the real diff, because a full diff cannot survive the
+  // one-line prompt transform. The agent reads that file instead of fetching
+  // the diff itself.
+  ipcMain.handle(
+    "github:get-review-context",
+    async (
+      _event,
+      cwd: string,
+      prNumber: number,
+      targetDir: string,
+    ): Promise<
+      | {
+          ok: true;
+          context: string;
+          diffFilePath: string | null;
+          templateFilePath: string | null;
+          headRefOid: string | null;
+          lastReviewCommitId: string | null;
+        }
+      | { ok: false; error: string }
+    > => {
+      const { execFile } = await import("child_process");
+      const { promisify } = await import("util");
+      const execEnv: NodeJS.ProcessEnv = { ...process.env };
+      if (!execEnv.GH_TOKEN && process.env.GITHUB_TOKEN) {
+        execEnv.GH_TOKEN = process.env.GITHUB_TOKEN;
+      }
+      if (!execEnv.GITHUB_TOKEN && process.env.GH_TOKEN) {
+        execEnv.GITHUB_TOKEN = process.env.GH_TOKEN;
+      }
+      try {
+        const execFileAsync = promisify(execFile);
+        const run = (
+          args: string[],
+          timeout = 15_000,
+        ): Promise<string> =>
+          execFileAsync("gh", args, {
+            cwd,
+            timeout,
+            maxBuffer: 10 * 1024 * 1024,
+            env: execEnv,
+          }).then((r) => r.stdout);
+
+        const viewOut = await run([
+          "pr", "view", String(prNumber),
+          "--json", "headRefOid,title,reviews",
+          "--jq", "{ headRefOid: .headRefOid, title: .title, reviews: [.reviews[] | { state: .state, body: .body, submittedAt: .submittedAt, commitOid: .commit.oid }] }",
+        ]);
+        const view = JSON.parse(viewOut);
+        const headRefOid: string | null =
+          typeof view?.headRefOid === "string" ? view.headRefOid : null;
+        const reviews: Array<{ state: string; body: string; submittedAt: string; commitOid: string | null }> =
+          Array.isArray(view?.reviews) ? view.reviews : [];
+
+        // gh returns reviews oldest-first (verified empirically): the last
+        // entry is the most recent round, which the fix prompt must answer.
+        const latestReview =
+          reviews.length > 0 ? reviews[reviews.length - 1] : null;
+        const flatten = (s: string | undefined | null): string =>
+          (s ?? "").replace(/\s*\n\s*/g, " | ").replace(/\s+/g, " ").trim();
+
+        // The latest batch of inline review comments, newest first — this is
+        // what the fix prompt should address, not every historical comment.
+        const nameWithOwner = (
+          await run(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"])
+            .catch(() => "")
+        ).trim();
+        let latestInlineComments: Array<{
+          path: string;
+          line: number | null;
+          body: string;
+        }> = [];
+        if (nameWithOwner) {
+          const commentsOut = await run(
+            [
+              "api", `repos/${nameWithOwner}/pulls/${prNumber}/comments`,
+            ],
+            20_000,
+          ).catch(() => "[]");
+          const parsedComments = JSON.parse(commentsOut);
+          if (Array.isArray(parsedComments)) {
+            // Pull review comments come out chronological ascending; reverse
+            // to the newest batch and cap it so the prompt stays tight.
+            latestInlineComments = (parsedComments as Array<{
+              path?: string;
+              line?: number;
+              start_line?: number;
+              body?: string;
+            }>)
+              .slice(-10)
+              .reverse()
+              .map((c) => ({
+                path: c.path ?? "?",
+                line: typeof c.line === "number" ? c.line : (c.start_line ?? null),
+                body: flatten(c.body).slice(0, 400),
+              }));
+          }
+        }
+
+        // Write the real diff to a worktree-local file so the agent anchors
+        // comments to actual line numbers without running gh (the prompt is
+        // one line, so the diff cannot be embedded in it directly).
+        let diffFilePath: string | null = null;
+        let templateFilePath: string | null = null;
+        if (targetDir) {
+          const diffOut = await run(["pr", "diff", String(prNumber)], 20_000);
+          const { join } = await import("path");
+          const { writeFile } = await import("fs/promises");
+          const diffAbs = join(targetDir, `review-context-${prNumber}.diff`);
+          await writeFile(diffAbs, diffOut, "utf8");
+          diffFilePath = `review-context-${prNumber}.diff`;
+
+          // Pre-generate the fixed review JSON skeleton with the real
+          // commit_id so the agent only fills in body and comments — the
+          // schema (event: COMMENT, line/side) never changes, so the app
+          // owns it instead of letting the agent reinvent it per round.
+          const reviewTemplate = {
+            commit_id: headRefOid ?? "el hash actual (git rev-parse HEAD)",
+            event: "COMMENT" as const,
+            body: "primera línea: VEREDICTO: APROBADO o VEREDICTO: CAMBIOS_PEDIDOS; después el resumen general del review",
+            comments: [
+              {
+                path: "ruta/relativa/al/archivo.ext",
+                line: 42,
+                side: "RIGHT",
+                body: "observación específica de esa fila (si es opcional, empezá con 'no bloqueante: ')",
+              },
+            ],
+          };
+          const templateAbs = join(targetDir, `review-template-${prNumber}.json`);
+          await writeFile(templateAbs, JSON.stringify(reviewTemplate, null, 2), "utf8");
+          templateFilePath = `review-template-${prNumber}.json`;
+        }
+
+        const context = [
+          headRefOid ? `PR head (headRefOid): ${headRefOid}` : "",
+          latestReview
+            ? `Última review: ${latestReview.state} (commit ${latestReview.commitOid ?? "?"}) — ${flatten(latestReview.body).slice(0, 800)}`
+            : "Sin reviews aún",
+          latestInlineComments.length > 0
+            ? `Última tanda de comentarios inline: ${latestInlineComments
+                .map((c) => `${c.path}${c.line != null ? `:${c.line}` : ""} → ${c.body}`)
+                .join(" ; ")}`
+            : "",
+          diffFilePath
+            ? `Diff del PR disponible en ${diffFilePath} (dentro del worktree) con números de línea reales — usalo como referencia, no corras gh pr diff para leerlo.`
+            : "",
+          templateFilePath
+            ? `Esqueleto del review listo en ${templateFilePath} (dentro del worktree): completá body y comments, NO cambies event ni la estructura — subilo con gh api ... --input ${templateFilePath}.`
+            : "",
+        ]
+          .filter(Boolean)
+          .join(" | ");
+
+        return {
+          ok: true as const,
+          context,
+          diffFilePath,
+          templateFilePath,
+          headRefOid,
+          lastReviewCommitId: latestReview?.commitOid ?? null,
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { ok: false as const, error: message };
+      }
+    },
+  );
+
+  // Detect the ACTUAL conflict state of a "conflicto:main"-flagged PR before
+  // the runner opens a resolution session. Runs the same throwaway test-merge
+  // the mergeador uses (--no-commit --no-ff against origin/main, zero risk to
+  // the implementer worktree: the temp worktree is force-removed afterwards)
+  // and returns the unmerged file list. An empty list means the branch already
+  // integrates cleanly — the runner skips the session. The result is also what
+  // the prompt injects, so the agent never re-derives the list with gh.
+  ipcMain.handle(
+    "github:get-conflict-files",
+    async (
+      _event,
+      cwd: string,
+      branch: string,
+      prNumber: number,
+    ): Promise<
+      | { ok: true; conflictFiles: string[] }
+      | { ok: false; error: string }
+    > => {
+      const { execFile } = await import("child_process");
+      const { promisify } = await import("util");
+      const execFileAsync = promisify(execFile);
+      const gitOpts = {
+        timeout: 30_000,
+        maxBuffer: 10 * 1024 * 1024,
+      };
+      const worktreePath = path.join(
+        cwd,
+        ".worktrees",
+        `conflict-check-${prNumber}`,
+      );
+      try {
+        // Same fetch pattern as the mergeador: the PR branch is fetched by
+        // ref so the detached throwaway worktree can be created at it.
+        await execFileAsync("git", ["fetch", "origin", "main"], {
+          cwd,
+          ...gitOpts,
+        });
+        await execFileAsync(
+          "git",
+          ["fetch", "origin", `refs/heads/${branch}`],
+          { cwd, ...gitOpts },
+        );
+        await execFileAsync(
+          "git",
+          ["worktree", "add", "--detach", worktreePath, `origin/${branch}`],
+          { cwd, ...gitOpts },
+        );
+        let conflictFiles: string[] = [];
+        try {
+          await execFileAsync(
+            "git",
+            ["merge", "origin/main", "--no-commit", "--no-ff"],
+            { cwd: worktreePath, ...gitOpts },
+          );
+          // Clean merge → the branch already integrates with main.
+        } catch {
+          // Conflict (expected) or a real failure: the unmerged file list is
+          // the ground truth either way. A broken non-conflict failure (e.g.
+          // the throwaway checkout is dirty) yields zero files, which the
+          // runner treats as "no conflict".
+          const { stdout } = await execFileAsync(
+            "git",
+            ["diff", "--name-only", "--diff-filter=U"],
+            { cwd: worktreePath, ...gitOpts },
+          );
+          conflictFiles = stdout
+            .split(/\r?\n/)
+            .map((s) => s.trim())
+            .filter(Boolean);
+        }
+        return { ok: true as const, conflictFiles };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { ok: false as const, error: message };
+      } finally {
+        // Best-effort cleanup: abort does nothing on a clean merge, and the
+        // worktree remove clears the temp checkout regardless. A failure here
+        // never blocks the result — a leftover detached worktree is harmless.
+        try {
+          await execFileAsync("git", ["merge", "--abort"], {
+            cwd: worktreePath,
+            ...gitOpts,
+          });
+        } catch {
+          // No MERGE_HEAD — nothing to abort.
+        }
+        try {
+          await execFileAsync(
+            "git",
+            ["worktree", "remove", "--force", worktreePath],
+            { cwd, ...gitOpts },
+          );
+        } catch {
+          // Best-effort cleanup.
+        }
+      }
+    },
+  );
+
   // ── GitHub Issue Mutations ──
 
   ipcMain.handle("github:list-labels", async (_event, cwd: string) => {
@@ -2829,6 +3551,615 @@ function setupIpc() {
       return { ok: false as const, error: String(err) };
     }
   });
+
+  // Review labels are a real repo-level state: they live on the PR itself, so
+  // anyone looking at the repo (or the card after a reload) can tell whether
+  // the last review approved or asked for changes. The label is flipped from
+  // the binary verdict line the review prompt is contractually required to
+  // lead with ("VEREDICTO: APROBADO"/"VEREDICTO: CAMBIOS_PEDIDOS"). FUENTE DE
+  // VERDAD: the review-cycle labels live on the PR, and the associated issue
+  // mirrors the canonical one (syncReviewLabelToIssue) so the status shows
+  // everywhere — the issue additionally keeps status:approved from the SDD
+  // pipeline, untouched. Every label is created on demand with gh label
+  // create so a missing label can never silently break a flow again.
+  const REVIEW_LABEL_COLORS: Record<string, string> = {
+    [REVIEW_LABEL_PENDING]: "d4a017",
+    [REVIEW_LABEL_CHANGES]: "e5534b",
+    [REVIEW_LABEL_FIX_APPLIED]: "d4c5f9",
+    [REVIEW_LABEL_APPROVED]: "0e8a16",
+    [REVIEW_LABEL_CONFLICT]: "b60205",
+  };
+
+  // Create a label in the repo if it does not exist yet (gh label create
+  // errors when the label is already there — ignore that specific case).
+  type ExecFileAsync = (
+    file: string,
+    args: string[],
+    opts: object,
+  ) => Promise<{ stdout: string }>;
+  async function ensureReviewLabel(
+    execFileAsync: ExecFileAsync,
+    cwd: string,
+    labelName: string,
+  ): Promise<void> {
+    try {
+      await execFileAsync(
+        "gh",
+        ["label", "create", labelName, "--color", REVIEW_LABEL_COLORS[labelName] ?? "d4c5f9", "--force"],
+        { cwd, timeout: 15_000, env: { ...process.env } },
+      );
+    } catch {
+      // Already exists (or the repo is read-only) — applying the label below
+      // will surface the real problem if there is one.
+    }
+  }
+
+  // Resolve the issue a PR will close from its body ("Closes #N" / "fixes #N"
+  // contract of the SDD pipeline). Returns null when the PR does not
+  // reference an issue — the issue mirror is skipped then.
+  async function issueNumberForPr(
+    execFileAsync: ExecFileAsync,
+    cwd: string,
+    prNumber: number,
+  ): Promise<number | null> {
+    try {
+      const { stdout: prBody } = await execFileAsync(
+        "gh",
+        ["pr", "view", String(prNumber), "--json", "body", "--jq", ".body"],
+        { cwd, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, env: { ...process.env } },
+      );
+      const match = prBody.match(
+        /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b/i,
+      );
+      return match ? Number(match[1]) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // Mirror the canonical review-cycle label onto the associated issue: the PR
+  // owns the state, the issue reflects it so the repo shows the status
+  // everywhere. A null canonical clears every cycle label from the issue.
+  // Best-effort by design — the mirror must never break the main flow.
+  async function syncReviewLabelToIssue(
+    execFileAsync: ExecFileAsync,
+    cwd: string,
+    issueNumber: number,
+    canonical: string | null,
+  ): Promise<void> {
+    try {
+      for (const labelName of REVIEW_CYCLE_LABELS) {
+        await ensureReviewLabel(execFileAsync, cwd, labelName);
+      }
+      const args = ["issue", "edit", String(issueNumber)];
+      if (canonical) {
+        args.push("--add-label", canonical);
+      }
+      for (const other of REVIEW_CYCLE_LABELS) {
+        if (other !== canonical) {
+          args.push("--remove-label", other);
+        }
+      }
+      await execFileAsync("gh", args, {
+        cwd,
+        timeout: 15_000,
+        env: { ...process.env },
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.log(`[review] failed to sync issue #${issueNumber} label: ${message}`);
+    }
+  }
+
+  ipcMain.handle(
+    "github:apply-review-label",
+    async (
+      _event,
+      cwd: string,
+      prNumber: number,
+      verdict: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "REVIEW_REQUIRED" | "FIX_APPLIED" | null,
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
+      const { execFile } = await import("child_process");
+      const { promisify } = await import("util");
+      const execFileAsync = promisify(execFile);
+      const execEnv: NodeJS.ProcessEnv = { ...process.env };
+      if (!execEnv.GH_TOKEN && process.env.GITHUB_TOKEN) {
+        execEnv.GH_TOKEN = process.env.GITHUB_TOKEN;
+      }
+      if (!execEnv.GITHUB_TOKEN && process.env.GH_TOKEN) {
+        execEnv.GITHUB_TOKEN = process.env.GH_TOKEN;
+      }
+      try {
+        // The review prompts always post with event=COMMENT (GitHub refuses
+        // self-approval), so the PR's own reviewDecision is not enough: the
+        // verdict line in the review body is the source of truth.
+        const labels = reviewLabelsForVerdict(verdict);
+        if (!labels) {
+          return { ok: true as const };
+        }
+        await ensureReviewLabel(execFileAsync, cwd, labels.target);
+        // A fresh review supersedes the "fix applied, awaiting re-review"
+        // state, so the fix label must be cleared along with the opposite
+        // verdict label — otherwise it would stick on the PR forever. The
+        // "no review yet" label also goes away: the PR now has one.
+        await ensureReviewLabel(execFileAsync, cwd, labels.other);
+        await ensureReviewLabel(execFileAsync, cwd, REVIEW_LABEL_FIX_APPLIED);
+        await ensureReviewLabel(execFileAsync, cwd, REVIEW_LABEL_PENDING);
+        const args = [
+          "issue", "edit", String(prNumber),
+          "--add-label", labels.target,
+          "--remove-label", labels.other,
+          "--remove-label", REVIEW_LABEL_FIX_APPLIED,
+          "--remove-label", REVIEW_LABEL_PENDING,
+        ];
+        await execFileAsync("gh", args, { cwd, timeout: 15_000, env: execEnv });
+        // Mirror the new state onto the associated issue (best-effort).
+        const issueNumber = await issueNumberForPr(execFileAsync, cwd, prNumber);
+        if (issueNumber !== null) {
+          await syncReviewLabelToIssue(
+            execFileAsync,
+            cwd,
+            issueNumber,
+            labels.target,
+          );
+        }
+        return { ok: true as const };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { ok: false as const, error: message };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    "github:sync-issue-review-label",
+    async (
+      _event,
+      cwd: string,
+      issueNumber: number,
+      prLabels: string[],
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
+      const { execFile } = await import("child_process");
+      const { promisify } = await import("util");
+      const execFileAsync = promisify(execFile);
+      const execEnv: NodeJS.ProcessEnv = { ...process.env };
+      if (!execEnv.GH_TOKEN && process.env.GITHUB_TOKEN) {
+        execEnv.GH_TOKEN = process.env.GITHUB_TOKEN;
+      }
+      if (!execEnv.GITHUB_TOKEN && process.env.GH_TOKEN) {
+        execEnv.GITHUB_TOKEN = process.env.GH_TOKEN;
+      }
+      try {
+        // The canonical label is derived from the PR's raw labels (conflict
+        // beats approved, etc.), so any stale combination self-corrects on
+        // the next card refresh. null canonical clears the cycle labels.
+        const canonical = canonicalReviewLabel(prLabels);
+        await syncReviewLabelToIssue(
+          execFileAsync,
+          cwd,
+          issueNumber,
+          canonical,
+        );
+        return { ok: true as const };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { ok: false as const, error: message };
+      }
+    },
+  );
+
+  // Apply an exact review-cycle label to a PR and mirror it to the issue.
+  // Unlike apply-review-label this accepts the final label directly (not a
+  // verdict), which lets the renderer materialize derived states such as
+  // "review:fix-aplicado" — a label the review prompts never post, but that
+  // code can detect when a push landed after the last review. Any other cycle
+  // label on the PR is removed so the canonical state stays unambiguous.
+  ipcMain.handle(
+    "github:apply-cycle-label",
+    async (
+      _event,
+      cwd: string,
+      prNumber: number,
+      issueNumber: number | null,
+      label: (typeof REVIEW_CYCLE_LABELS)[number],
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
+      const { execFile } = await import("child_process");
+      const { promisify } = await import("util");
+      const execFileAsync = promisify(execFile);
+      const execEnv: NodeJS.ProcessEnv = { ...process.env };
+      if (!execEnv.GH_TOKEN && process.env.GITHUB_TOKEN) {
+        execEnv.GH_TOKEN = process.env.GITHUB_TOKEN;
+      }
+      if (!execEnv.GITHUB_TOKEN && process.env.GH_TOKEN) {
+        execEnv.GITHUB_TOKEN = process.env.GH_TOKEN;
+      }
+      try {
+        if (!REVIEW_CYCLE_LABELS.includes(label)) {
+          return { ok: false as const, error: `Label fuera del ciclo de review: ${label}` };
+        }
+        await ensureReviewLabel(execFileAsync, cwd, label);
+        const args = ["issue", "edit", String(prNumber), "--add-label", label];
+        for (const other of REVIEW_CYCLE_LABELS) {
+          if (other !== label) args.push("--remove-label", other);
+        }
+        await execFileAsync("gh", args, { cwd, timeout: 15_000, env: execEnv });
+        // The PR may be brand-new and not reference its issue yet; only sync
+        // when the renderer already resolved it.
+        if (issueNumber !== null) {
+          await syncReviewLabelToIssue(execFileAsync, cwd, issueNumber, label);
+        }
+        return { ok: true as const };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { ok: false as const, error: message };
+      }
+    },
+  );
+
+  ipcMain.handle(
+    "github:merge-pr",
+    async (
+      _event,
+      cwd: string,
+      prNumber: number,
+    ): Promise<{ ok: true; prUrl: string } | { ok: false; error: string }> => {
+      const { execFile } = await import("child_process");
+      const { promisify } = await import("util");
+      const execFileAsync = promisify(execFile);
+      const execEnv: NodeJS.ProcessEnv = { ...process.env };
+      if (!execEnv.GH_TOKEN && process.env.GITHUB_TOKEN) {
+        execEnv.GH_TOKEN = process.env.GITHUB_TOKEN;
+      }
+      if (!execEnv.GITHUB_TOKEN && process.env.GH_TOKEN) {
+        execEnv.GITHUB_TOKEN = process.env.GH_TOKEN;
+      }
+      try {
+        // gh pr merge has no --comment flag; --squash -b sets the body of the
+        // squash commit. The PR body is kept (it carries "Closes #N", which is
+        // what auto-closes the issue) and the suffix documents who merged.
+        const { stdout: prBody } = await execFileAsync(
+          "gh",
+          ["pr", "view", String(prNumber), "--json", "body", "--jq", ".body"],
+          { cwd, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, env: execEnv },
+        );
+        const mergeBody = [prBody.trim(), "Merged via TermCanvas"]
+          .filter(Boolean)
+          .join("\n\n");
+        const { stdout } = await execFileAsync(
+          "gh",
+          ["pr", "merge", String(prNumber), "--squash", "-b", mergeBody],
+          { cwd, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, env: execEnv },
+        );
+        const prUrl = stdout.trim() || `https://github.com/owner/repo/pull/${prNumber}`;
+        return { ok: true as const, prUrl };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { ok: false as const, error: message };
+      }
+    },
+  );
+
+  // Bulk-merge every open PR carrying the "review:aprobado" label. Each PR is
+  // test-merged against origin/main in a throwaway worktree first: clean PRs
+  // are merged with --squash, conflicting PRs are left untouched but get a
+  // [mergeador] comment listing the conflicting files plus the
+  // "conflicto:main" label so the card can offer RESOLVER CONFLICTO.
+  // Processing is strictly sequential (never parallel): the next PR must see
+  // a main already updated by the previous merge.
+  ipcMain.handle(
+    "github:merge-approved-prs",
+    async (
+      _event,
+      cwd: string,
+    ): Promise<
+      | {
+          ok: true;
+          summary: {
+            merged: number[];
+            conflicted: Array<{ number: number; files: string[] }>;
+          };
+        }
+      | { ok: false; error: string }
+    > => {
+      const { execFile } = await import("child_process");
+      const { promisify } = await import("util");
+      const execFileAsync = promisify(execFile);
+      const execEnv: NodeJS.ProcessEnv = { ...process.env };
+      if (!execEnv.GH_TOKEN && process.env.GITHUB_TOKEN) {
+        execEnv.GH_TOKEN = process.env.GITHUB_TOKEN;
+      }
+      if (!execEnv.GITHUB_TOKEN && process.env.GH_TOKEN) {
+        execEnv.GITHUB_TOKEN = process.env.GH_TOKEN;
+      }
+      const gitOpts = {
+        timeout: 30_000,
+        maxBuffer: 10 * 1024 * 1024,
+      };
+      const ghOpts = {
+        timeout: 60_000,
+        maxBuffer: 10 * 1024 * 1024,
+        env: execEnv,
+      };
+
+      // Live progress stream for the merge progress panel: the bulk merge is
+      // a batch of slow operations (fetch, throwaway worktree, test merge),
+      // so the renderer shows per-PR state instead of a silent spinner.
+      const emitMergeProgress = (event: MergeProgressEvent) => {
+        mainWindow?.webContents.send("merge:progress", event);
+      };
+
+      try {
+        // The approved label must exist before any PR can receive it via
+        // `gh issue edit --add-label` below (gh errors on unknown labels).
+        await ensureReviewLabel(execFileAsync, cwd, REVIEW_LABEL_APPROVED);
+        // List ALL open PRs (not filtered by label): the label is the primary
+        // contract, but the review verdict line is the fallback — the label
+        // flip only runs when the review terminal exits, and if that never
+        // happened (closed app, crashed terminal) an approved PR would be
+        // invisible to the bulk merge. A PR is approved when it carries the
+        // label OR its newest review body says "VEREDICTO: APROBADO".
+        const { stdout } = await execFileAsync(
+          "gh",
+          [
+            "pr", "list",
+            "--state", "open",
+            "--json", "number,headRefName,title,labels,reviews",
+            "--jq", "[.[] | {number, headRefName, title, labels: [.labels[].name], reviews: [.reviews[] | .body]}]",
+            "--limit", "100",
+          ],
+          { cwd, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, env: execEnv },
+        );
+        const openPrs = JSON.parse(stdout) as Array<{
+          number: number;
+          headRefName: string;
+          title: string;
+          labels: string[];
+          reviews: Array<string | null>;
+        }>;
+        // Same contract as getPrReviewDecision: the NEWEST review whose body
+        // carries the verdict line wins (gh returns reviews oldest-first).
+        const prs = openPrs
+          .filter((pr) => {
+            if (pr.labels.includes(REVIEW_LABEL_APPROVED)) return true;
+            let approved = false;
+            for (const body of pr.reviews) {
+              approved = parseReviewBodyVerdict(body) === "APROBADO";
+            }
+            return approved;
+          })
+          .map(({ number, headRefName, title }) => ({ number, headRefName, title }))
+          .sort((a, b) => a.number - b.number);
+
+        const merged: number[] = [];
+        const conflicted: Array<{ number: number; files: string[] }> = [];
+        if (prs.length === 0) {
+          console.log("[mergeador] No approved PRs to merge");
+          return { ok: true as const, summary: { merged, conflicted } };
+        }
+        emitMergeProgress({ type: "start", prNumbers: prs.map((p) => p.number) });
+
+        // The conflict label must exist before any PR can receive it.
+        await ensureReviewLabel(execFileAsync, cwd, REVIEW_LABEL_CONFLICT);
+
+        for (const pr of prs) {
+          const worktreePath = path.join(
+            cwd,
+            ".worktrees",
+            `merge-check-${pr.number}`,
+          );
+          const log = (message: string) =>
+            console.log(`[mergeador] PR #${pr.number}: ${message}`);
+          try {
+            emitMergeProgress({ type: "pr-start", prNumber: pr.number });
+            // Materialize the approved label before merging: a PR approved by
+            // verdict (not by label) must end up labeled too, so the repo
+            // state matches the contract for future runs.
+            await ensureReviewLabel(execFileAsync, cwd, REVIEW_LABEL_CHANGES);
+            await ensureReviewLabel(execFileAsync, cwd, REVIEW_LABEL_FIX_APPLIED);
+            await ensureReviewLabel(execFileAsync, cwd, REVIEW_LABEL_PENDING);
+            await execFileAsync(
+              "gh",
+              [
+                "issue", "edit", String(pr.number),
+                "--add-label", REVIEW_LABEL_APPROVED,
+                "--remove-label", REVIEW_LABEL_CHANGES,
+                "--remove-label", REVIEW_LABEL_FIX_APPLIED,
+                "--remove-label", REVIEW_LABEL_PENDING,
+              ],
+              { cwd, ...ghOpts },
+            );
+            // Mirror the approved state onto the associated issue so the
+            // issue reflects the PR in every state, not just conflict.
+            const approvedIssueNumber = await issueNumberForPr(
+              execFileAsync,
+              cwd,
+              pr.number,
+            );
+            if (approvedIssueNumber !== null) {
+              await syncReviewLabelToIssue(
+                execFileAsync,
+                cwd,
+                approvedIssueNumber,
+                REVIEW_LABEL_APPROVED,
+              );
+            }
+            log("fetching main and branch");
+            emitMergeProgress({ type: "step", prNumber: pr.number, phase: "fetch" });
+            await execFileAsync("git", ["fetch", "origin", "main"], {
+              cwd,
+              ...gitOpts,
+            });
+            await execFileAsync(
+              "git",
+              ["fetch", "origin", `refs/heads/${pr.headRefName}`],
+              { cwd, ...gitOpts },
+            );
+            // --detach is required: the PR branch is checked out in the
+            // implementer worktree, and git refuses a second checkout of the
+            // same branch.
+            log("creating throwaway worktree");
+            emitMergeProgress({ type: "step", prNumber: pr.number, phase: "worktree" });
+            await execFileAsync(
+              "git",
+              [
+                "worktree", "add", "--detach",
+                worktreePath, `origin/${pr.headRefName}`,
+              ],
+              { cwd, ...gitOpts },
+            );
+            let mergeClean = false;
+            try {
+              emitMergeProgress({ type: "step", prNumber: pr.number, phase: "test-merge" });
+              await execFileAsync(
+                "git",
+                ["merge", "origin/main", "--no-commit", "--no-ff"],
+                { cwd: worktreePath, ...gitOpts },
+              );
+              mergeClean = true;
+            } catch {
+              // Conflict (or a real failure): handled below from the
+              // worktree state.
+            }
+            if (mergeClean) {
+              log("merging with --squash");
+              emitMergeProgress({ type: "step", prNumber: pr.number, phase: "merge" });
+              await execFileAsync(
+                "gh",
+                ["pr", "merge", String(pr.number), "--squash"],
+                { cwd, ...ghOpts },
+              );
+              merged.push(pr.number);
+              emitMergeProgress({ type: "pr-merged", prNumber: pr.number });
+              log("merged");
+            } else {
+              // Capture the conflicting files WHILE the merge is still in
+              // progress: `git merge --abort` below clears the index, after
+              // which --diff-filter=U would find nothing to report.
+              let files: string[] = [];
+              try {
+                const { stdout: diffOut } = await execFileAsync(
+                  "git",
+                  ["diff", "--name-only", "--diff-filter=U"],
+                  { cwd: worktreePath, ...gitOpts },
+                );
+                files = diffOut
+                  .split(/\r?\n/)
+                  .map((s) => s.trim())
+                  .filter(Boolean);
+              } catch {
+                // Aborting below will surface any real problem.
+              }
+              // Best-effort abort: it is a no-op when the test merge was
+              // "Already up to date" (no MERGE_HEAD was created, e.g. main has
+              // not advanced past the branch) and required when the merge left
+              // the index dirty.
+              try {
+                await execFileAsync("git", ["merge", "--abort"], {
+                  cwd: worktreePath,
+                  ...gitOpts,
+                });
+              } catch {
+                // MERGE_HEAD missing — nothing to abort, state is already
+                // clean. Not a merge blocker.
+              }
+              if (files.length > 0) {
+                await ensureReviewLabel(
+                  execFileAsync,
+                  cwd,
+                  REVIEW_LABEL_CONFLICT,
+                );
+                const body = [
+                  "[mergeador] Conflicto al integrar con main. El test-merge falló en estos archivos:",
+                  "",
+                  ...files.map((f) => `- ${f}`),
+                  "",
+                  "Para resolverlo, en tu rama local: `git merge origin/main`, resolvé los marcadores <<<<<<< / ======= / >>>>>>> preservando la intención de ambos lados, después `git add` los archivos y `git commit`. Pusheá el resultado (`git push`) y el mergeador reintentará cuando el PR vuelva a quedar aprobado.",
+                ].join("\n");
+                await execFileAsync(
+                  "gh",
+                  ["issue", "comment", String(pr.number), "--body", body],
+                  { cwd, ...ghOpts },
+                );
+                await execFileAsync(
+                  "gh",
+                  [
+                    "issue", "edit", String(pr.number),
+                    "--add-label", REVIEW_LABEL_CONFLICT,
+                    // A conflicting PR must never stay approved: dropping the
+                    // approved label (and every other cycle label) prevents a
+                    // future run from merging it again before a re-review.
+                    "--remove-label", REVIEW_LABEL_APPROVED,
+                    "--remove-label", REVIEW_LABEL_CHANGES,
+                    "--remove-label", REVIEW_LABEL_FIX_APPLIED,
+                    "--remove-label", REVIEW_LABEL_PENDING,
+                  ],
+                  { cwd, ...ghOpts },
+                );
+                // Mirror the conflict state onto the associated issue.
+                const conflictIssueNumber = await issueNumberForPr(
+                  execFileAsync,
+                  cwd,
+                  pr.number,
+                );
+                if (conflictIssueNumber !== null) {
+                  await syncReviewLabelToIssue(
+                    execFileAsync,
+                    cwd,
+                    conflictIssueNumber,
+                    REVIEW_LABEL_CONFLICT,
+                  );
+                }
+                conflicted.push({ number: pr.number, files });
+                emitMergeProgress({ type: "pr-conflicted", prNumber: pr.number, files });
+                log(`conflict in ${files.length} file(s)`);
+              } else {
+                // A failed test merge with zero unmerged files means the
+                // checkout itself is broken (e.g. local changes in the
+                // throwaway worktree). Surface it as an error so the PR never
+                // stalls silently in "Procesando".
+                const message =
+                  "El test-merge falló sin archivos en conflicto detectables. Revisá el estado del worktree de prueba.";
+                log("merge check failed (no conflicting files)");
+                emitMergeProgress({ type: "pr-error", prNumber: pr.number, message });
+              }
+            }
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            log(`check failed: ${message}`);
+            emitMergeProgress({ type: "pr-error", prNumber: pr.number, message });
+          } finally {
+            try {
+              await execFileAsync(
+                "git",
+                ["worktree", "remove", "--force", worktreePath],
+                { cwd, ...gitOpts },
+              );
+            } catch {
+              // Best-effort cleanup: a failed add leaves nothing to remove.
+            }
+            try {
+              await execFileAsync("git", ["worktree", "prune"], {
+                cwd,
+                ...gitOpts,
+              });
+            } catch {
+              // Prune is cosmetic.
+            }
+          }
+        }
+
+        console.log(
+          `[mergeador] Done: merged ${merged.length}, conflicted ${conflicted.length}`,
+        );
+        emitMergeProgress({ type: "done", merged, conflicted });
+        return { ok: true as const, summary: { merged, conflicted } };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        emitMergeProgress({ type: "error", message });
+        return { ok: false as const, error: message };
+      }
+    },
+  );
 
   ipcMain.handle(
     "pin:save-attachment",

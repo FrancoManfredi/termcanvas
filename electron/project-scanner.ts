@@ -1,5 +1,5 @@
 import { execFile, execFileSync, execSync } from "child_process";
-import { existsSync, readdirSync } from "fs";
+import { existsSync, readFileSync, readdirSync } from "fs";
 import path from "path";
 
 interface WorktreeInfo {
@@ -20,6 +20,30 @@ export interface ChildGitRepoInfo {
 }
 
 const IGNORED_CHILD_DIRS = new Set([".git", "node_modules"]);
+
+// Review worktrees are created detached (the reviewer must not create
+// branches), so git reports no branch for them. The create handler stores
+// the source branch in the per-worktree admin dir; read it back to render
+// "<branch> (review)" instead of a bare "(detached)" label.
+function readReviewSourceBranch(
+  repoPath: string,
+  worktreePath: string,
+): string | null {
+  try {
+    const marker = path.join(
+      repoPath,
+      ".git",
+      "worktrees",
+      path.basename(worktreePath),
+      "review-source-branch",
+    );
+    if (!existsSync(marker)) return null;
+    const source = readFileSync(marker, "utf-8").trim();
+    return source ? `${source} (review)` : null;
+  } catch {
+    return null;
+  }
+}
 
 function parseWorktreesOutput(
   output: string,
@@ -46,7 +70,10 @@ function parseWorktreesOutput(
       if (current.path && !current.prunable && existsSync(current.path)) {
         worktrees.push({
           path: current.path,
-          branch: current.branch ?? "(detached)",
+          branch:
+            current.branch ??
+            readReviewSourceBranch(resolvedRepo, current.path) ??
+            "(detached)",
           isPrimary: path.resolve(current.path) === resolvedRepo,
         });
       }

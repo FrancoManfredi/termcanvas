@@ -35,6 +35,7 @@ interface IssueStore {
   getAllIssues: () => IssueNodeData[];
   getIssue: (issueNumber: number) => IssueNodeData | undefined;
   updateIssuePosition: (issueNumber: number, x: number, y: number) => void;
+  applyPackedLayout: (positions: Map<number, { x: number; y: number }>) => void;
   clearIssues: () => void;
   hydrateIssues: (issues: IssueNodeData[]) => void;
 }
@@ -90,6 +91,22 @@ export const useIssueStore = create<IssueStore>((set, get) => ({
     // Position is stored on the React Flow node, not in the issue store.
     // This method exists for interface completeness; the persistence layer
     // reads positions from the canvas node state, not from here.
+  },
+
+  applyPackedLayout: (positions) => {
+    const { issues, issueVersion } = get();
+    const next = new Map(issues);
+    let changed = false;
+    for (const [issueNumber, pos] of positions) {
+      const existing = next.get(issueNumber);
+      if (existing && (existing.x !== pos.x || existing.y !== pos.y)) {
+        next.set(issueNumber, { ...existing, x: pos.x, y: pos.y });
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    set({ issues: next, issueVersion: issueVersion + 1 });
+    markDirty();
   },
 
   clearIssues: () => {

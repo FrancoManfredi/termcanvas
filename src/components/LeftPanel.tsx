@@ -2,7 +2,9 @@ import { useCallback, useState, useRef, useMemo, useEffect } from "react";
 import { useCanvasStore, COLLAPSED_TAB_WIDTH } from "../stores/canvasStore";
 import { useProjectStore } from "../stores/projectStore";
 import { useIssueStore } from "../stores/issueStore";
+import { useIssueVisibilityStore } from "../stores/issueVisibilityStore";
 import { useIssueSyncStore } from "../stores/issueSyncStore";
+import { issueMatchesFilter } from "../canvas/nodeProjection";
 import { useTerminalRuntimeStore } from "../terminal/terminalRuntimeStore";
 import { useSessionStore } from "../stores/sessionStore";
 import { useCompletionSeenStore } from "../stores/completionSeenStore";
@@ -10,6 +12,7 @@ import { useT } from "../i18n/useT";
 import { useSidebarDragStore } from "../stores/sidebarDragStore";
 import { useViewportFocusStore } from "../stores/viewportFocusStore";
 import { panToTerminal } from "../utils/panToTerminal";
+import { panToIssue } from "../utils/panToIssue";
 import {
   PANEL_TRANSITION_DURATION_MS,
   PANEL_TRANSITION_EASING_FN,
@@ -482,8 +485,14 @@ function IssuesSection() {
   const t = useT();
   const issueVersion = useIssueStore((s) => s.issueVersion);
   const isFetchingIssues = useIssueSyncStore((s) => s.isFetchingIssues);
+  const issueFilter = useIssueVisibilityStore((s) => s.filter);
+  const setIssueFilter = useIssueVisibilityStore((s) => s.setFilter);
   // Read issues imperatively — avoid Map reference loop in selector
   const issues = useMemo(() => Array.from(useIssueStore.getState().issues.values()), [issueVersion]);
+  const visibleIssues = useMemo(
+    () => issues.filter((issue) => issueMatchesFilter(issue, issueFilter)),
+    [issues, issueFilter],
+  );
 
   if (issues.length === 0) {
     return (
@@ -507,11 +516,31 @@ function IssuesSection() {
 
   return (
     <div className="flex flex-col gap-0.5 p-2">
-      <div className="tc-caption px-2 py-1 text-[var(--text-muted)]"
-        style={{ fontSize: "var(--text-xs)" }}>
-        {issues.length} issue{issues.length !== 1 ? "s" : ""}
+      <div className="flex items-center gap-2 px-2 py-1">
+        <div className="tc-caption flex-1 text-[var(--text-muted)]"
+          style={{ fontSize: "var(--text-xs)" }}>
+          {visibleIssues.length} issue{visibleIssues.length !== 1 ? "s" : ""}
+        </div>
+        <select
+          value={issueFilter}
+          onChange={(e) =>
+            setIssueFilter(e.target.value as typeof issueFilter)
+          }
+          className="tc-row-icon rounded-md px-1.5 py-0.5 text-[var(--text-muted)] hover:text-[var(--text-secondary)] hover:bg-[var(--surface-hover)] bg-transparent"
+          title="Filtro de issues"
+        >
+          <option value="open">Abiertas</option>
+          <option value="closed">Cerradas</option>
+          <option value="all">Todas</option>
+        </select>
       </div>
-      {issues.map((issue) => {
+      {visibleIssues.length === 0 ? (
+        <div className="px-2 py-2 text-[var(--text-muted)] tc-caption"
+          style={{ fontSize: "var(--text-xs)" }}>
+          Sin issues en este filtro.
+        </div>
+      ) : (
+        visibleIssues.map((issue) => {
         const num = (issue as Record<string, unknown>).number as number ?? 0;
         const title = (issue as Record<string, unknown>).title as string ?? `#${num}`;
         const state = ((issue as Record<string, unknown>).state as string ?? "OPEN").toLowerCase();
@@ -521,6 +550,14 @@ function IssuesSection() {
             role="button"
             tabIndex={0}
             className="tc-row-icon group w-full rounded-md flex items-center gap-2 text-left cursor-pointer px-2 py-1.5 bg-[var(--surface)] hover:bg-[var(--sidebar-hover)]"
+            onClick={() => panToIssue(issue.issueNumber)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                panToIssue(issue.issueNumber);
+              }
+            }}
+            title="Focus issue on canvas"
           >
             <div
               className="w-2 h-2 rounded-full shrink-0"
@@ -546,10 +583,11 @@ function IssuesSection() {
               <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor">
                 <path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.749.749 0 0 1 1.275.326.749.749 0 0 1-.215.734L9.06 8l3.22 3.22a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215L8 9.06l-3.22 3.22a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z" />
               </svg>
-            </button>
+</button>
           </div>
         );
-      })}
+      })
+      )}
     </div>
   );
 }
