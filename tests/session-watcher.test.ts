@@ -28,7 +28,9 @@ function withTempHome(fn: (homeDir: string) => void): void {
     path.join(os.tmpdir(), "session-watcher-home-"),
   );
   const previousHome = process.env.HOME;
+  const previousUserProfile = process.env.USERPROFILE;
   process.env.HOME = homeDir;
+  process.env.USERPROFILE = homeDir;
   try {
     fn(homeDir);
   } finally {
@@ -36,6 +38,11 @@ function withTempHome(fn: (homeDir: string) => void): void {
       delete process.env.HOME;
     } else {
       process.env.HOME = previousHome;
+    }
+    if (previousUserProfile === undefined) {
+      delete process.env.USERPROFILE;
+    } else {
+      process.env.USERPROFILE = previousUserProfile;
     }
     fs.rmSync(homeDir, { recursive: true, force: true });
   }

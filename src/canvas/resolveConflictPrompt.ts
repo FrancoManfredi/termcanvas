@@ -1,3 +1,5 @@
+import { buildRepoContextSection } from "../utils/repoContext";
+
 export interface ResolveConflictPromptInput {
   issueNumber: number;
   title: string;
@@ -9,6 +11,9 @@ export interface ResolveConflictPromptInput {
   // prompt short and the facts deterministic (same contract as the review
   // context injection). Absent/empty keeps the gh fallback instruction.
   conflictFiles?: string[];
+  // Contexto libre del repo (`.agents/repo-context.md`): ayuda a preservar
+  // la intención de AMBOS lados al resolver conflictos de merge.
+  repoContext?: string;
 }
 
 /**
@@ -31,6 +36,7 @@ export function buildResolveConflictPrompt(
       ? `La app ya corrió el test-merge contra origin/main y precargó la lista de archivos en conflicto (NO hace falta correr gh pr view ni leer el comentario del Mergeador): ${input.conflictFiles.join(", ")}. `
       : `Leé la lista exacta de archivos en conflicto del comentario del Mergeador en el PR: gh pr view ${input.prNumber} --comments (y gh pr view ${input.prNumber} --json body si hace falta) — buscá el comentario con prefijo [mergeador]. `;
   return [
+    ...buildRepoContextSection(input.repoContext),
     `CONFLICTO DE MERGE — issue #${input.issueNumber} — ${input.title}. `,
     `El PR #${input.prNumber} (rama ${input.branch}) no se pudo mergear contra main automáticamente: el mergeador detectó conflictos. `,
     injectedFiles,

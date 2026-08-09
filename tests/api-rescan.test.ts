@@ -21,6 +21,20 @@ async function withTempRepo(
   }
 }
 
+// Windows only: os.tmpdir() can return a short (8.3) name while git emits the
+// long form for the same directory, so a plain string compare is false.
+function canonicalize(p: string): string {
+  if (process.platform !== "win32") return path.resolve(p);
+  try {
+    const short = execSync(`cmd /c for %I in ("${p}") do @echo %~sI`, {
+      encoding: "utf-8",
+    }).trim();
+    return path.resolve(short);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
 test("listWorktreesAsync detects newly added worktree", async () => {
   await withTempRepo(async (repo) => {
     const scanner = new ProjectScanner();
@@ -36,16 +50,22 @@ test("listWorktreesAsync detects newly added worktree", async () => {
     const after = await scanner.listWorktreesAsync(repo);
     assert.equal(after.length, 2);
     const realWtPath = fs.realpathSync(wtPath);
-    assert.ok(after.some((w) => w.path === realWtPath));
+    assert.ok(
+      after.some((w) => canonicalize(w.path) === canonicalize(realWtPath)),
+    );
   });
 });
 
-test("scanAsync returns null for non-git directory", async () => {
+test("scanAsync exposes non-git directories as projects", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "rescan-non-git-"));
   try {
     const scanner = new ProjectScanner();
     const result = await scanner.scanAsync(dir);
-    assert.equal(result, null);
+    assert.deepEqual(result, {
+      name: path.basename(dir),
+      path: dir,
+      worktrees: [{ path: dir, branch: "main", isPrimary: true }],
+    });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

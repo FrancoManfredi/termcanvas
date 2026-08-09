@@ -13,7 +13,7 @@ import type {
   ReplayTimeline,
 } from "../shared/sessions.ts";
 import type { NormalizedSessionTelemetryEvent } from "../shared/telemetry.ts";
-import { findCodexJsonlFiles, findKimiSessionFiles } from "./usage-collector.ts";
+import { findClaudeJsonlFiles, findCodexJsonlFiles, findKimiSessionFiles } from "./usage-collector.ts";
 
 const SCAN_INTERVAL = 10_000;
 const LIVE_THRESHOLD_MS = 60_000;
@@ -172,6 +172,15 @@ export function extractUserPromptText(raw: Record<string, unknown>): string {
     }
     return "";
   }
+
+  if (
+    raw.type === "event_msg" &&
+    payload.type === "user_message" &&
+    typeof payload.message === "string"
+  ) {
+    const cleaned = stripSyntheticUserBlocks(payload.message);
+    return cleaned ? cleaned.slice(0, REPLAY_TEXT_MAX_CHARS) : "";
+  }
   return "";
 }
 
@@ -276,18 +285,9 @@ export class SessionScanner {
       return;
     }
 
-    execFile(
-      "find",
-      [claudeDir, "-maxdepth", "2", "-name", "*.jsonl", "-mmin", "-1440"],
-      { timeout: FIND_TIMEOUT_MS },
-      (err, stdout) => {
-        if (err) {
-          finalize([]);
-          return;
-        }
-        finalize(stdout.trim().split("\n").filter(Boolean));
-      },
-    );
+    // Walk the projects tree in pure Node: spawning the Unix `find`
+    // binary is not portable (Windows has no such executable).
+    finalize(findClaudeJsonlFiles());
   }
 
   private readTail(filePath: string, fileSize: number): string {

@@ -1,9 +1,12 @@
+import { buildRepoContextSection } from "../utils/repoContext";
+
 export type IssueResolvePromptMode = "new" | "resume";
 
 interface IssueResolvePromptInput {
   issueNumber: number;
   title: string;
   body?: string;
+  repoContext?: string;
 }
 
 function issueBody(body: string | undefined): string {
@@ -22,23 +25,23 @@ function buildResumeHeader(input: IssueResolvePromptInput): string {
 }
 
 function buildSharedSuffix(input: IssueResolvePromptInput): string {
-  return `| PRECONDICIONES (ya definidas, no preguntes): Ejecución auto, gatekeeper entre fases, no pausar salvo problema real. Artefactos: openspec y engram, ambos. PRs: auto-chain. Presupuesto de review: 800 líneas. PRs encadenados: stacked-to-main. | ALCANCE: el issue aprobado es el contrato, no agregues requisitos fuera de su scope, no inventes features, no te saltes no-goals. | BODY ORIGINAL DEL ISSUE: ${issueBody(input.body)} | PIPELINE (todas las fases en orden, sin omitir ninguna, sin pausar entre fases): sdd-new (explore + propose) -> spec -> design -> tasks -> apply -> verify -> archive. | RESTRICCIONES: work-unit commits con conventional commits (type(scope): desc), shellcheck en todo script modificado, sin Co-Authored-By ni atribuciones AI, actualizar docs si cambia el comportamiento. | LOGGING PARA DEBUG MANUAL: Como el usuario va a probar manualmente el resultado antes de que se archive el cambio, agregá logging generoso y descriptivo en el código que toques — no solo para vos, para que un humano pueda ver en la consola exactamente qué está pasando paso a paso al usar la feature/fix en vivo: logueá con un prefijo identificable, ej: [fix-<nombre-del-change>] o [feature-<nombre>], para poder filtrarlos fácil en devtools. Logueá en los puntos de decisión clave (ej: "¿se detectó el target correcto?", "¿el evento se está bloqueando o dejando pasar?"), no solo al principio/final de una función. Si el fix depende de una condición (ej: un selector de DOM, un estado de store), logueá el valor real evaluado en cada intento, no solo "true/false" — mostrá el dato concreto que se comparó. Estos logs pueden quedar en el código final (no los borres antes de archivar) — el usuario los va a usar para reportar bugs con evidencia concreta en vez de descripciones vagas. Si en el futuro se decide sacarlos, será un cambio aparte. | GESTIÓN DEL ISSUE: NO cierres el issue manualmente, el cierre ocurre automático al mergear el PR vía "Closes #${input.issueNumber}". Podés comentar avances con gh issue comment, no es obligatorio. No modifiques relaciones blocked-by/blocking/parent sin comentarlo primero. | ENTREGA FINAL: después de verify creá el PR con la skill branch-pr, branch type/descripcion, body con "Closes #${input.issueNumber}", un solo label type:*, esperar checks automatizados. Sobre el PR recién abierto, aplicá el label review:pendiente con gh issue edit <prNumber> --add-label review:pendiente (creá el label con gh label create "review:pendiente" --color d4a017 --force si no existe): aplicá el MISMO label al issue asociado con gh issue edit ${input.issueNumber} --add-label review:pendiente (el issue refleja el estado del PR y conserva status:approved del pipeline SDD, que no se toca) | AL TERMINAR RESUMÍ: 1) qué se implementó por fase, 2) evidencia de verify, 3) URL del PR.`;
+  return `| PRECONDICIONES (ya definidas, no preguntes): Ejecución auto, gatekeeper entre fases, no pausar salvo problema real. Artefactos: openspec y engram, ambos. PRs: auto-chain. Presupuesto de review: 800 líneas. PRs encadenados: stacked-to-main. | ALCANCE: el issue aprobado es el contrato, no agregues requisitos fuera de su scope, no inventes features, no te saltes no-goals. | BODY ORIGINAL DEL ISSUE: ${issueBody(input.body)} | PIPELINE (todas las fases en orden, sin omitir ninguna, sin pausar entre fases): sdd-new (explore + propose) -> spec -> design -> tasks -> apply -> verify -> archive. | RESTRICCIONES: work-unit commits con conventional commits (type(scope): desc), shellcheck en todo script modificado, sin Co-Authored-By ni atribuciones AI, actualizar docs si cambia el comportamiento. | LOGGING PARA DEBUG MANUAL: Como el usuario va a probar manualmente el resultado antes de que se archive el cambio, agregá logging generoso y descriptivo en el código que toques — no solo para vos, para que un humano pueda ver en la consola exactamente qué está pasando paso a paso al usar la feature/fix en vivo: logueá con un prefijo identificable, ej: [fix-<nombre-del-change>] o [feature-<nombre>], para poder filtrarlos fácil en devtools. Logueá en los puntos de decisión clave (ej: "¿se detectó el target correcto?", "¿el evento se está bloqueando o dejando pasar?"), no solo al principio/final de una función. Si el fix depende de una condición (ej: un selector de DOM, un estado de store), logueá el valor real evaluado en cada intento, no solo "true/false" — mostrá el dato concreto que se comparó. Estos logs pueden quedar en el código final (no los borres antes de archivar) — el usuario los va a usar para reportar bugs con evidencia concreta en vez de descripciones vagas. Si en el futuro se decide sacarlos, será un cambio aparte. | GESTIÓN DEL ISSUE: NO cierres el issue manualmente, el cierre ocurre automático al mergear el PR vía "Closes #${input.issueNumber}". Podés comentar avances con gh issue comment, no es obligatorio. No modifiques relaciones blocked-by/blocking/parent sin comentarlo primero. | ENTREGA FINAL: después de verify creá el PR con la skill branch-pr, branch type/descripcion, body con "Closes #${input.issueNumber}", un solo label type:*, esperar checks automatizados. Sobre el PR recién abierto, aplicá el label review:pendiente con gh issue edit <prNumber> --add-label review:pendiente (creá el label con gh label create "review:pendiente" --color d4a017 --force si no existe) y limpiás los labels residuales del ciclo: gh issue edit <prNumber> --remove-label review:aprobado --remove-label review:comentado --remove-label review:fix-aplicado --remove-label conflicto:main (si un remove-label falla porque el label no está puesto, seguí igual; el issue refleja el estado del PR): aplicá el MISMO label al issue asociado con gh issue edit ${input.issueNumber} --add-label review:pendiente (el issue refleja el estado del PR y conserva status:approved del pipeline SDD, que no se toca) | AL TERMINAR RESUMÍ: 1) qué se implementó por fase, 2) evidencia de verify, 3) URL del PR.`;
 }
-
-// TEMP for manual UI testing: short prompts so resolve/review/fix flows run
-// fast. Set back to false to restore the full originals below.
-const QUICK_TEST_PROMPTS_ENABLED: boolean = true;
 
 export function buildIssueResolvePrompt(
   input: IssueResolvePromptInput,
   mode: IssueResolvePromptMode,
 ): string {
-  if (QUICK_TEST_PROMPTS_ENABLED) {
-    return `Modo test rápido (${mode}): resolvé el issue #${input.issueNumber} — ${input.title} — pipeline SDD completo sin vueltas y creá el PR rápido (al abrirlo, poné el label review:pendiente en el PR con gh issue edit <pr> --add-label review:pendiente y en el issue asociado #${input.issueNumber} con gh issue edit ${input.issueNumber} --add-label review:pendiente --remove-label review:aprobado --remove-label review:comentado --remove-label review:fix-aplicado --remove-label conflicto:main, creando el label primero con gh label create "review:pendiente" --color d4a017 --force si no existe; si un remove-label falla porque el label no está puesto, seguí igual — el issue refleja el estado del PR). Body: ${issueBody(input.body)}.`;
-  }
   const header =
     mode === "resume"
       ? buildResumeHeader(input)
       : buildNewIssueHeader(input);
-  return `${header}${buildSharedSuffix(input)}`;
+  // `head + suffix` mantiene el formato original: buildSharedSuffix arranca
+  // con el separador "|" literal, así que la sección de contexto va en un
+  // array propio que se une ANTES del header sin tocar el suffix.
+  const contextSection = buildRepoContextSection(input.repoContext);
+  const base = `${header}${buildSharedSuffix(input)}`;
+  return contextSection.length > 0
+    ? `${contextSection.join(" | ")} | ${base}`
+    : base;
 }

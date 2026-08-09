@@ -1,3 +1,5 @@
+import { buildRepoContextSection } from "../utils/repoContext";
+
 export interface IssueReviewPromptInput {
   issueNumber: number;
   title: string;
@@ -13,6 +15,9 @@ export interface IssueReviewPromptInput {
   // (review-template-{pr}.json). When the app wrote it, the agent fills it in
   // instead of reinventing the fixed schema (commit_id, event, line/side).
   reviewTemplateFilePath?: string | null;
+  // Contexto libre del repo (`.agents/repo-context.md`): la intención del
+  // dueño del proyecto para juzgar si la solución respeta la dirección.
+  repoContext?: string;
 }
 
 function issueBody(body: string | undefined): string {
@@ -25,10 +30,9 @@ function issueBody(body: string | undefined): string {
  * opencode's --prompt breaks on real newlines on Windows, so every section
  * is joined with the same ` | ` separator used by the resolve prompt.
  */
-// TEMP for manual UI testing: short review prompt. Set back to false to
-// restore the full original list below.
-const QUICK_TEST_REVIEW_PROMPT_ENABLED: boolean = true;
-
+// --- MERGE DONE: the original full prompt below is a superset of the quick
+//     test (same rules, same anchors, same JSON shape), so the quick branch
+//     was removed and this is the single final version.
 /**
  * Canonical closing rule for every review round:
  *
@@ -87,34 +91,15 @@ export function buildIssueReviewPrompt(
   const templateRule = input.reviewTemplateFilePath
     ? `USÁ EL ESQUELETO PRE-GENERADO: la app ya dejó ${input.reviewTemplateFilePath} en el worktree con la estructura correcta (commit_id ya cargado, event: COMMENT, comments con line/side). Completá body y comments del JSON y subilo con gh api repos/{owner}/{repo}/pulls/${input.prNumber}/reviews --method POST --input ${input.reviewTemplateFilePath}. NO changes el event ni la estructura. `
     : "";
-  if (QUICK_TEST_REVIEW_PROMPT_ENABLED) {
-    return [
-      ...injected,
-      templateRule,
-      `REVIEW RÁPIDO (test manual) — issue #${input.issueNumber} — ${input.title} (${issueBody(input.body)}). `,
-      `Revisá la solución con gh pr view ${input.prNumber} y gh pr diff ${input.prNumber}. `,
-      `COMPORTAMIENTO COMO COPILOT: comentás SOLO sobre los archivos que el PR modifica (listalos con gh pr diff ${input.prNumber} --name-only) y anclás cada hallazgo a la fila EXACTA del código con un rango (start_line/end_line). El texto del review en sí NO enumera líneas: lo que va sobre el código son los comentarios inline. `,
-      `FORMATO DE OUTPUT: en vez de un solo comentario de texto libre, para cada observación identificá el archivo y el número de línea EXACTO en el diff nuevo. Para saber los números de línea reales del lado derecho/nuevo corré gh pr diff ${input.prNumber} JUSTO ANTES de armar el JSON: NO reusés un diff cacheado viejo ni lo dejes pasar tiempo sin volver a leerlo (el commit_id y las filas cambian si el PR se actualizó). No inventes ni aproximes números. Armá un JSON con esta estructura y mandalo con gh api repos/{owner}/{repo}/pulls/${input.prNumber}/reviews --input archivo.json (gh completa {owner}/{repo} con tu repo; usá --method POST): { "commit_id": "${input.commitSha ?? "el hash actual (git rev-parse HEAD)"}", "event": "COMMENT", "body": "primera línea: VEREDICTO: APROBADO o VEREDICTO: CAMBIOS_PEDIDOS; después el resumen general", "comments": [ { "path": "ruta/relativa/al/archivo.ext", "line": 42, "side": "RIGHT", "body": "observación específica de esa fila (si es opcional, empezá con 'no bloqueante: ')" } ] }. Si una observación es sobre una convención general o algo que no corresponde a una fila puntual (ej: falta de tests en general), dejala en el "body" general del review, no fuerces un anclaje que no corresponde. Si el review no tiene NINGUNA observación de línea (todo OK), el POST igual se hace, con "comments": [] y el body con el veredicto + resumen. `,
-      `Para el "event" usá SIEMPRE "COMMENT" (no APPROVE ni REQUEST_CHANGES por este endpoint: ya sabemos que GitHub bloquea auto-aprobar el PR propio con el token actual; el veredicto se comunica con la línea VEREDICTO: del body, no con el evento del review). Los comentarios inline quedan anclados igual con event=COMMENT. `,
-      `SUGERENCIAS APLICABLES (opcional pero valioso): si tu observación incluye una corrección chica y concreta (un rename de variable, un typo, una fila mal escrita), incluí el fix propuesto como suggested_fix dentro de un bloque de sugerencia de GitHub en el "body" de ese comentario puntual, así el autor lo aplica con un clic: "body": "Esta variable usa un carácter no-ASCII. \\n\\n\`\`\`suggestion\\n$anio = ...\\n\`\`\`". `,
-      `Guardá el JSON en un archivo temporal DENTRO del worktree antes de subirlo (no lo pases todo inline en un solo comando de shell): ej. .review.json como staging para debuggear si gh api falla por JSON mal formado. Luego: gh api repos/{owner}/{repo}/pulls/${input.prNumber}/reviews --method POST --input .review.json (gh completa {owner}/{repo} desde tu repo). `,
-      `VALIDACIÓN ANTES DE SUBIR: correlacioná que cada line que usás realmente exista en el diff ACTUAL (no en la versión vieja que leíste al principio): corré gh pr diff ${input.prNumber} JUSTO ANTES de generar el JSON — si pasó tiempo o hubo cambios, reflejá las filas nuevas. `,
-      VERDICT_RULE,
-      NO_DUP_BY_OID_RULE.replaceAll("{pr}", String(input.prNumber)),
-      NO_WRAPPER_RULE,
-      `NUNCA crees una rama nueva, no mergees el PR existente. Prefijá tus pasos con [review-${input.issueNumber}].`,
-    ]
-      .filter(Boolean)
-      .join(" | ");
-  }
-  return [
+return [
+    ...buildRepoContextSection(input.repoContext),
     ...injected,
     templateRule,
     `Hacé un review de la solución planteada para el issue #${input.issueNumber} — ${input.title}. `,
     `CONTEXTO: ${issueBody(input.body)}. Estás en un worktree aislado con el código de la solución ya commiteado en la rama (podés verlo con git log). Ejecutá \`gh pr view ${input.prNumber}\` y \`gh pr diff ${input.prNumber}\` para ver la solución completa en contexto (cambios, archivos, tests). Si falta algo del diff local (ej: la rama no está actualizada con el PR), avisá en tu reporte final en vez de inventar contenido.`,
     "QUÉ REVISAR: 1. Scope: la solución resuelve EXACTAMENTE lo que pide el issue y nada más (sin features inventadas ni scope creep). 2. Tests: hay tests para la solución, corren y pasan, y cubren el caso principal del issue (no solo el camino feliz). 3. Calidad del código: sin dead code, sin TODOs pendientes sin ticket, sin duplicación evitable, sigue las convenciones del repo. 4. Commits: conventional commits, sin Co-Authored-By ni atribuciones AI.",
     `ACCIÓN — COMPORTAMIENTO COMO COPILOT: comentá SOLO sobre los archivos que el PR modifica (\`gh pr diff ${input.prNumber} --name-only\`) y anclá cada hallazgo a la línea exacta del código con start_line/end_line y, si proponés un cambio concreto, un suggested_fix dentro de un bloque de sugerencia de GitHub. El texto del review NO enumera líneas: lo que se ve sobre el código son los comentarios. `,
-    `FORMATO DE OUTPUT: para cada observación identificá el archivo y el número de línea EXACTO en el diff nuevo. Corré \`gh pr diff ${input.prNumber}\` JUSTO ANTES de armar el JSON para leer los números de línea reales del lado derecho/nuevo — no reuses un diff leído al principio de la sesión si pasó tiempo o hubo cambios, y no inventes ni aproximes números. Armá un JSON y subilo con \`gh api repos/{owner}/{repo}/pulls/${input.prNumber}/reviews --method POST --input <archivo>.json\` en UNA sola llamada: { "commit_id": "${input.commitSha ?? "el hash actual (git rev-parse HEAD)"}", "event": "COMMENT", "body": "primera línea: VEREDICTO: APROBADO o VEREDICTO: CAMBIOS_PEDIDOS; después el resumen general", "comments": [ { "path": "ruta/relativa/al/archivo.ext", "line": 42, "side": "RIGHT", "body": "observación específica de esa línea (si es opcional, empezá con 'no bloqueante: ')" } ] }. Si una observación es sobre una convención general o algo que no corresponde a una línea puntual (ej: falta de tests en general), dejala en el "body" general, no fuerces un anclaje que no corresponde. Si no hay NINGUNA observación de línea, el POST igual se hace con "comments": [] y el body con el veredicto. `,
+    `FORMATO DE OUTPUT: para cada observación identificá el archivo y el número de línea EXACTO en el diff nuevo. Corré gh pr diff ${input.prNumber} JUSTO ANTES de armar el JSON para leer los números de línea reales del lado derecho/nuevo — no reuses un diff leído al principio de la sesión si pasó tiempo o hubo cambios, y no inventes ni aproximes números. Armá un JSON y subilo con \`gh api repos/{owner}/{repo}/pulls/${input.prNumber}/reviews --method POST --input <archivo>.json\` en UNA sola llamada: { "commit_id": "${input.commitSha ?? "el hash actual (git rev-parse HEAD)"}", "event": "COMMENT", "body": "primera línea: VEREDICTO: APROBADO o VEREDICTO: CAMBIOS_PEDIDOS; después el resumen general", "comments": [ { "path": "ruta/relativa/al/archivo.ext", "line": 42, "side": "RIGHT", "body": "observación específica de esa línea (si es opcional, empezá con 'no bloqueante: ')" } ] }. Si una observación es sobre una convención general o algo que no corresponde a una línea puntual (ej: falta de tests en general), dejala en el "body" general, no fuerces un anclaje que no corresponde. Si no hay NINGUNA observación de línea, el POST igual se hace con "comments": [] y el body con el veredicto. `,
     `EVENT: usá SIEMPRE "COMMENT" (no APPROVE ni REQUEST_CHANGES por este endpoint: GitHub bloquea auto-aprobar el PR propio con el token actual; el veredicto se comunica con la línea VEREDICTO: del body, no con el evento del review). Los comentarios inline quedan anclados igual. `,
     `SUGERENCIAS APLICABLES (opcional pero valioso): si tu observación incluye una corrección chica y concreta (un rename, un typo, una línea mal escrita), incluí el fix en un bloque de sugerencia de GitHub dentro del "body" de ese comentario puntual para que el autor lo aplique con un clic. `,
     `VALIDACIÓN: antes de subir el JSON, correlacioná que cada line exista en el diff ACTUAL (no en una versión vieja cacheada): corré \`gh pr diff ${input.prNumber}\` justo antes de generar los comentarios. Guardá el JSON en un archivo temporal DENTRO del worktree (ej. .review.json) antes de mandarlo — no lo pases inline en el comando de shell — para poder debuggear si \`gh api\` falla por JSON mal formado. `,

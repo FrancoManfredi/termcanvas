@@ -832,6 +832,11 @@ contextBridge.exposeInMainWorld("termcanvas", {
         | { ok: true; milestones: Array<{ number: number; title: string; due_on: string | null }> }
         | { ok: false; error: string }
       >,
+    listOpenIssues: (cwd: string) =>
+      ipcRenderer.invoke("github:list-open-issues", cwd) as Promise<
+        | { ok: true; issues: Array<{ number: number; title: string }> }
+        | { ok: false; error: string }
+      >,
     mutateIssue: (cwd: string, number: number, action: string, params: Record<string, unknown>) =>
       ipcRenderer.invoke("github:mutate-issue", cwd, number, action, params) as Promise<
         | { ok: true }
@@ -842,6 +847,18 @@ contextBridge.exposeInMainWorld("termcanvas", {
         | { ok: true }
         | { ok: false; error: string }
       >,
+    createIssue: (cwd: string, title: string, body: string, labels: string[]) =>
+      ipcRenderer.invoke("github:create-issue", cwd, title, body, labels) as Promise<
+        | { ok: true; number: number; url: string }
+        | { ok: false; error: string }
+      >,
+    addToProject: (cwd: string, issueUrl: string) =>
+      ipcRenderer.invoke("github:add-to-project", cwd, issueUrl) as Promise<
+        | { ok: true; applied: boolean }
+        | { ok: false; error: string }
+      >,
+    lastIssueNumber: (cwd: string) =>
+      ipcRenderer.invoke("github:last-issue-number", cwd) as Promise<number | null>,
     findPrForIssue: (cwd: string, issueNumber: number) =>
       ipcRenderer.invoke("github:find-pr-for-issue", cwd, issueNumber) as Promise<
         | {

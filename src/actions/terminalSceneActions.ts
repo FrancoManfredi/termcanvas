@@ -272,6 +272,24 @@ export function closeTerminalInScene(
   useProjectStore.getState().removeTerminal(projectId, worktreeId, terminalId);
 }
 
+/**
+ * ¿Sigue viva la terminal en la escena? Sirve para detectar que el usuario
+ * cerró el tile mientras una sesión de agente corría en él.
+ */
+export function terminalExistsInScene(
+  projectId: string,
+  worktreeId: string,
+  terminalId: string,
+): boolean {
+  return (
+    useProjectStore
+      .getState()
+      .projects.find((p) => p.id === projectId)
+      ?.worktrees.find((w) => w.id === worktreeId)
+      ?.terminals.some((t) => t.id === terminalId) ?? false
+  );
+}
+
 export function updateTerminalCustomTitleInScene(
   projectId: string,
   worktreeId: string,

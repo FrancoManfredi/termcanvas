@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { resolveRepoContext } from "../src/components/LeftPanel/repoContext.ts";
+import { resolveRepoContext } from "../src/components/RightPanel/repoContext.ts";
 
 test("resolveRepoContext keeps the directory path when the directory is a git repo", () => {
   assert.deepEqual(

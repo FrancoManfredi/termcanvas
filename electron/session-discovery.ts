@@ -504,14 +504,14 @@ function parseWuuSessionStartedAtMs(sessionId: string): number | null {
     return null;
   }
 
-  const startedAt = new Date(
+  const startedAt = Date.UTC(
     Number.parseInt(match[1] ?? "", 10),
     Number.parseInt(match[2] ?? "", 10) - 1,
     Number.parseInt(match[3] ?? "", 10),
     Number.parseInt(match[4] ?? "", 10),
     Number.parseInt(match[5] ?? "", 10),
     Number.parseInt(match[6] ?? "", 10),
-  ).getTime();
+  );
 
   return Number.isFinite(startedAt) ? startedAt : null;
 }

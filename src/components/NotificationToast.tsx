@@ -93,8 +93,11 @@ export function NotificationToast() {
 
   if (notifications.length === 0) return null;
 
+  // z-[300]: por encima de los modales (z-[200]) — un error de sesión se
+  // notifica mientras el modal de planificación está abierto y no puede
+  // quedar tapado por él.
   return (
-    <div className="fixed bottom-4 right-4 z-[100] flex flex-col gap-2 max-w-sm">
+    <div className="fixed bottom-4 right-4 z-[300] flex flex-col gap-2 max-w-sm">
       {notifications.map((n) => (
         <ToastItem key={n.id} n={n} dismiss={dismiss} />
       ))}

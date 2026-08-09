@@ -202,6 +202,7 @@ export interface WorktreeData {
   name: string;
   path: string;
   isPrimary?: boolean;
+  collapsed?: boolean;
   terminals: TerminalData[];
 }
 
@@ -229,6 +230,7 @@ export interface ProjectData {
   id: string;
   name: string;
   path: string;
+  collapsed?: boolean;
   worktrees: WorktreeData[];
   waypoints?: SpatialWaypointMap;
 }
@@ -1096,6 +1098,10 @@ export interface TermCanvasAPI {
       | { ok: true; labels: Array<{ name: string; color: string; description: string }> }
       | { ok: false; error: string }
     >;
+    listOpenIssues: (cwd: string) => Promise<
+      | { ok: true; issues: Array<{ number: number; title: string }> }
+      | { ok: false; error: string }
+    >;
     listMilestones: (cwd: string) => Promise<
       | { ok: true; milestones: Array<{ number: number; title: string; due_on: string | null }> }
       | { ok: false; error: string }
@@ -1108,6 +1114,15 @@ export interface TermCanvasAPI {
       | { ok: true }
       | { ok: false; error: string }
     >;
+    createIssue: (cwd: string, title: string, body: string, labels: string[]) => Promise<
+      | { ok: true; number: number; url: string }
+      | { ok: false; error: string }
+    >;
+    addToProject: (cwd: string, issueUrl: string) => Promise<
+      | { ok: true; applied: boolean }
+      | { ok: false; error: string }
+    >;
+    lastIssueNumber: (cwd: string) => Promise<number | null>;
     findPrForIssue: (
       cwd: string,
       issueNumber: number,

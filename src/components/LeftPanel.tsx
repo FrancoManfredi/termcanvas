@@ -88,7 +88,10 @@ function IconIssues({ size = 14 }: { size?: number }) {
 const LEFT_TAB_CONFIG: {
   id: LeftPanelTab;
   icon: typeof IconSessions;
-  labelKey: "left_panel_sessions" | "left_panel_history" | "left_panel_issues";
+  labelKey:
+    | "left_panel_sessions"
+    | "left_panel_history"
+    | "left_panel_issues";
 }[] = [
   { id: "sessions", icon: IconSessions, labelKey: "left_panel_sessions" },
   { id: "history", icon: IconHistory, labelKey: "left_panel_history" },
@@ -387,7 +390,7 @@ export function LeftPanel() {
                       onClick={() => setActiveTab(id)}
                     >
                       <Icon size={13} />
-                      {width > 260 && <span>{t[labelKey]}</span>}
+                      {width > 310 && <span>{t[labelKey]}</span>}
                     </button>
                   );
                 })}

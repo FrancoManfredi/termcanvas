@@ -235,6 +235,10 @@ if (!gotLock) {
 
 const PORT_FILE = path.join(TERMCANVAS_DIR, "port");
 
+// Labels que ya existen por repo (cwd → nombres): evita listar labels de gh
+// en cada issue de una misma corrida de creación. Ver github:create-issue.
+const labelCache = new Map<string, Set<string>>();
+
 function perfLog(label: string, details: Record<string, unknown>) {
   if (!isDev) return;
   console.log(`[Perf] ${label}`, details);
@@ -698,7 +702,7 @@ function setupIpc() {
     },
   );
 
-  ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
+ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
     ptyManager.write(ptyId, data);
     telemetryService.recordPtyInputByPtyId(ptyId, data);
   });
@@ -3487,6 +3491,25 @@ function setupIpc() {
     }
   });
 
+  // Issues abiertos del repo (título + número) para la deduplicación del
+  // plan: el prompt los ve y marca de plano los items que reescriben un
+  // problema que ya fue pedido en otro issue. Best-effort: sin gh o sin
+  // issues, devuelve ok con lista vacía.
+  ipcMain.handle("github:list-open-issues", async (_event, cwd: string) => {
+    const { execFile } = await import("child_process");
+    const { promisify } = await import("util");
+    const execFileAsync = promisify(execFile);
+    try {
+      const { stdout } = await execFileAsync("gh", ["issue", "list", "--state", "open", "--limit", "50", "--json", "number,title"], { cwd, timeout: 15_000, env: { ...process.env } });
+      const issues = JSON.parse(stdout);
+      return { ok: true as const, issues: issues as Array<{ number: number; title: string }> };
+    } catch {
+      // Sin gh o sin permisos: el plan corre igual sin la sección de
+      // issues existentes (solo se pierde la marca anti-duplicado).
+      return { ok: true as const, issues: [] };
+    }
+  });
+
   ipcMain.handle("github:list-milestones", async (_event, cwd: string) => {
     const { execFile } = await import("child_process");
     const { promisify } = await import("util");
@@ -3552,7 +3575,223 @@ function setupIpc() {
     }
   });
 
-  // Review labels are a real repo-level state: they live on the PR itself, so
+  // Crea un issue real en GitHub y devuelve el número y URL que GitHub
+  // asignó (NO el índice local del plan). El body va por archivo temporal
+  // porque puede tener miles de caracteres y newlines que romperían el
+  // argumento. gh issue create NO tiene --json: imprime la URL del issue
+  // en stdout, de ahí se extrae el número con formato .../issues/N.
+  //
+  // Los labels del plan no siempre existen en el repo: se aseguran ANTES
+  // del create (gh label create --force, que no falla si ya existen) para
+  // que el issue salga siempre etiquetado. Si la redacción del label falla
+  // igualmente (repo sin permisos), el reintento sin labels garantiza que
+  // el issue nunca se pierda. La lista de labels existentes se cachea por
+  // repo para no consultar gh en cada issue de la misma corrida.
+  ipcMain.handle("github:create-issue", async (_event, cwd: string, title: string, body: string, labels: string[]) => {
+    const { execFile } = await import("child_process");
+    const { promisify } = await import("util");
+    const { writeFile, unlink } = await import("fs/promises");
+    const { join } = await import("path");
+    const { tmpdir } = await import("os");
+    const execFileAsync = promisify(execFile);
+    const bodyFile = join(tmpdir(), `termcanvas-issue-${Date.now()}-${Math.random().toString(36).slice(2)}.md`);
+    const ghArgs = (args: string[]) =>
+      execFileAsync("gh", args, { cwd, timeout: 30_000, env: { ...process.env } });
+    const parseCreated = (stdout: string) => {
+      const url = stdout.trim();
+      const match = url.match(/\/issues\/(\d+)\s*$/);
+      if (!match) {
+        return { ok: false as const, error: `gh no devolvió una URL de issue válida: "${url}"` };
+      }
+      return { ok: true as const, number: Number(match[1]), url };
+    };
+    const ensureLabels = async () => {
+      if (labels.length === 0) return;
+      let existing = labelCache.get(cwd);
+      if (!existing) {
+        try {
+          const { stdout } = await ghArgs(["label", "list", "--json", "name", "--jq", ".[].name"]);
+          existing = new Set(stdout.split("\n").map((s) => s.trim()).filter(Boolean));
+          labelCache.set(cwd, existing);
+        } catch {
+          return; // sin lista de labels no se puede asegurar ninguno
+        }
+      }
+      for (const label of labels) {
+        if (existing.has(label)) continue;
+        try {
+          await ghArgs(["label", "create", label, "--color", "0366d6", "--force"]);
+          existing.add(label);
+        } catch {
+          // El reintento sin labels de abajo cubre el caso sin permisos.
+        }
+      }
+    };
+    try {
+      await writeFile(bodyFile, body, "utf8");
+      await ensureLabels();
+      const labelsArgs = labels.flatMap((label) => ["--label", label]);
+      try {
+        const { stdout } = await execFileAsync("gh", ["issue", "create", "--title", title, "--body-file", bodyFile, ...labelsArgs], { cwd, timeout: 30_000, env: { ...process.env } });
+        return parseCreated(stdout);
+      } catch {
+        // Labels inexistentes en el repo: crear igual sin ellos.
+        const { stdout } = await execFileAsync("gh", ["issue", "create", "--title", title, "--body-file", bodyFile], { cwd, timeout: 30_000, env: { ...process.env } });
+        return parseCreated(stdout);
+      }
+    } catch (err) {
+      return { ok: false as const, error: String(err) };
+    } finally {
+      try { await unlink(bodyFile); } catch { /* best-effort */ }
+    }
+  });
+
+  // Último número de issue/PR asignado en el repo: el número que le tocará
+  // al próximo issue a crear es ese + 1. Se usa para previsualizar los
+  // números del plan ANTES de crear (GitHub asigna números secuenciales
+  // globales por repo, issues y PRs comparten la misma secuencia). Devolver
+  // null si no se puede resolver (repo sin remote, sin gh, sin issues).
+  ipcMain.handle("github:last-issue-number", async (_event, cwd: string) => {
+    const { execFile } = await import("child_process");
+    const { promisify } = await import("util");
+    const execFileAsync = promisify(execFile);
+    try {
+      const { stdout: remoteUrl } = await execFileAsync(
+        "git", ["remote", "get-url", "origin"],
+        { cwd, timeout: 10_000, env: { ...process.env } },
+      );
+      const match = remoteUrl.trim().match(
+        /github\.com[:/]([^/]+)\/([^/\s.]+?)(?:\.git)?$/i,
+      );
+      if (!match) return null;
+      const { stdout } = await execFileAsync(
+        "gh",
+        ["api", `repos/${match[1]}/${match[2]}/issues?state=all&per_page=1&sort=created&direction=desc`, "--jq", ".[0].number"],
+        { cwd, timeout: 15_000, env: { ...process.env } },
+      );
+      const number = Number(stdout.trim());
+      return Number.isFinite(number) ? number : null;
+    } catch {
+      return null;
+    }
+  });
+
+  // Reviso si el repo tiene un config de Project v2 y, si lo tiene, integro
+  // el issue recién creado al proyecto y relleno los fields declarados.
+  // Best-effort: si no hay config, si gh no lo encuentra o si un field no
+  // existe, no se interrumpe la corrida (el issue ya quedó creado).
+  //
+  // Config: <cwd>/.agents/planning/project-config.json
+  //   { "project": "Nombre del Project v2",
+  //     "owner": "@me",              // opcional: default = owner del repo
+  //     "fields": { "Status": "Todo", "Iteración": "Sprint 12" } }
+  // El valor de un single-select se pasa por NAME (gh resuelve la opción);
+  // los demás campos se tratan como texto.
+  const projectFieldTypes = new Map<string, Map<string, { singleSelectOptions: Set<string> }>>();
+  async function resolveProjectFieldTypes(
+    ghArgs: (args: string[]) => Promise<{ stdout: string }>,
+    cwd: string,
+    owner: string,
+    projectNumber: number,
+  ): Promise<Map<string, { singleSelectOptions: Set<string> }>> {
+    const key = `${owner}#${projectNumber}`;
+    const cached = projectFieldTypes.get(key);
+    if (cached) return cached;
+    try {
+      const { stdout } = await ghArgs([
+        "project", "field-list", String(projectNumber), "--owner", owner, "--format", "json",
+      ]);
+      const data = JSON.parse(stdout) as {
+        fields: Array<{
+          name: string;
+          type: string;
+          options?: Array<{ name: string }>;
+        }>;
+      };
+      const byName = new Map<string, { singleSelectOptions: Set<string> }>();
+      for (const field of data.fields) {
+        const singleSelectOptions =
+          field.type === "ProjectV2SingleSelectField"
+            ? new Set((field.options ?? []).map((o) => o.name))
+            : new Set<string>();
+        byName.set(field.name, { singleSelectOptions });
+      }
+      projectFieldTypes.set(key, byName);
+      return byName;
+    } catch {
+      return new Map();
+    }
+  }
+
+  ipcMain.handle("github:add-to-project", async (_event, cwd: string, issueUrl: string) => {
+    const { execFile } = await import("child_process");
+    const { promisify } = await import("util");
+    const { readFile } = await import("fs/promises");
+    const { join } = await import("path");
+    const execFileAsync = promisify(execFile);
+    const ghArgs = (args: string[]) =>
+      execFileAsync("gh", args, { cwd, timeout: 30_000, env: { ...process.env } });
+
+    const configPath = join(cwd, ".agents", "planning", "project-config.json");
+    let raw: string;
+    try {
+      raw = await readFile(configPath, "utf8");
+    } catch {
+      return { ok: true as const, applied: false as const };
+    }
+    let config: { project: string; owner?: string; fields?: Record<string, string> };
+    try {
+      config = JSON.parse(raw);
+    } catch (err) {
+      return { ok: false as const, error: `project-config.json inválido: ${String(err)}` };
+    }
+    if (!config.project || typeof config.project !== "string") {
+      return { ok: false as const, error: "project-config.json: falta 'project'" };
+    }
+
+    try {
+      let owner = config.owner;
+      if (!owner) {
+        const { stdout: remoteUrl } = await execFileAsync("git", ["remote", "get-url", "origin"], { cwd, timeout: 10_000, env: { ...process.env } });
+        const match = remoteUrl.trim().match(/github\.com[:/]([^/]+)\//i);
+        if (!match) {
+          return { ok: false as const, error: "No se pudo deducir el owner del remote" };
+        }
+        owner = match[1];
+      }
+
+      const { stdout: projectsOut } = await ghArgs(["project", "list", "--owner", owner, "--format", "json"]);
+      const projects = (JSON.parse(projectsOut) as { projects: Array<{ number: number; title: string }> }).projects;
+      const project = projects.find((p) => p.title === config.project);
+      if (!project) {
+        return { ok: false as const, error: `Project "${config.project}" no encontrado en ${owner}` };
+      }
+
+      await ghArgs(["project", "item-add", String(project.number), "--owner", owner, "--url", issueUrl, "--format", "json"]);
+
+      const fields = config.fields ?? {};
+      const types = await resolveProjectFieldTypes(ghArgs, cwd, owner, project.number);
+      for (const [name, value] of Object.entries(fields)) {
+        const kind = types.get(name);
+        let fieldArgs: string[];
+        if (kind?.singleSelectOptions.has(value)) {
+          fieldArgs = ["--single-select-option-id", value];
+        } else {
+          fieldArgs = ["--text", value];
+        }
+        try {
+          await ghArgs(["project", "item-edit", String(project.number), "--owner", owner, "--url", issueUrl, "--field", name, ...fieldArgs]);
+        } catch (err) {
+          console.warn(`[planner] campo "${name}" no aplicado:`, String(err));
+        }
+      }
+      return { ok: true as const, applied: true as const };
+    } catch (err) {
+      return { ok: false as const, error: String(err) };
+    }
+  });
+
+// Review labels are a real repo-level state: they live on the PR itself, so
   // anyone looking at the repo (or the card after a reload) can tell whether
   // the last review approved or asked for changes. The label is flipped from
   // the binary verdict line the review prompt is contractually required to

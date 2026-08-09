@@ -285,6 +285,9 @@ export function normalizeProjectsFocus(
 
   for (const project of projects) {
     for (const worktree of project.worktrees) {
+      if (project.collapsed || worktree.collapsed) {
+        continue;
+      }
       const focusedTerminal = worktree.terminals.find(
         (terminal) => terminal.focused,
       );

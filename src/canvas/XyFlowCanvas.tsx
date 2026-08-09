@@ -42,6 +42,7 @@ import {
   effectiveReviewLabel,
 } from "./reviewVerdict";
 import { buildIssueResolvePrompt } from "./issueResolvePrompt";
+import { readRepoContext } from "../utils/repoContext";
 import { reuseTerminalForIssue } from "../actions/terminalSceneActions";
 import { useTerminalRuntimeStateStore } from "../stores/terminalRuntimeStateStore";
 import { useIssueStore, type IssueNodeData } from "../stores/issueStore";
@@ -864,7 +865,7 @@ function XyFlowCanvasInner() {
   }, [resolveContextMenuTarget, handleIssueFetchError]);
 
   const handleResolveIssue = useCallback(
-    (issueNumber: number) => {
+    async (issueNumber: number) => {
       if (useIssueResolveStore.getState().resolvingIssueNumber !== null) return;
       const target = resolveContextMenuTarget();
       if (!target) return;
@@ -883,7 +884,20 @@ function XyFlowCanvasInner() {
       const stored = usePreferencesStore.getState().defaultTerminalSize;
       const tileW = stored?.w ?? useTileDimensionsStore.getState().w;
       flowCenter = { x: flowCenter.x - tileW / 2, y: flowCenter.y };
-      const promptInput = { issueNumber: issue.issueNumber, title: issue.title, body: issue.body };
+      // Contexto libre del repo (`.agents/repo-context.md`): best-effort,
+      // nunca bloquea el flujo si el archivo no existe.
+      const project = useProjectStore
+        .getState()
+        .projects.find((p) => p.id === target.projectId);
+      const repoContext = project
+        ? await readRepoContext(project.path)
+        : undefined;
+      const promptInput = {
+        issueNumber: issue.issueNumber,
+        title: issue.title,
+        body: issue.body,
+        repoContext,
+      };
       const initialPrompt = buildIssueResolvePrompt(promptInput, "new");
       let resumePrompt = buildIssueResolvePrompt(promptInput, "resume");
       // If the reviewer requested changes, surface their feedback in the
