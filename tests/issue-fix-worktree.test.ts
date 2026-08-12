@@ -315,7 +315,7 @@ test("buildIssueFixPrompt: the review comments are the contract", () => {
   assert.ok(prompt.includes("gh pr comment 12"), "must document the fix on the PR");
   assert.ok(prompt.includes("EXACTAMENTE el fix pedido"), "must forbid scope creep");
   assert.ok(prompt.includes('"no bloqueante"'), "must distinguish non-blocking observations");
-  assert.ok(prompt.includes('gh issue edit 12 --remove-label "review:comentado" --add-label "review:fix-aplicado"'), "must flip the label to awaiting re-review");
-  assert.ok(prompt.includes("review:fix-aplicado"), "must use the real fix-applied label");
+  assert.ok(!prompt.includes("gh issue edit"), "must not touch cycle labels (the app manages them)");
+  assert.ok(!prompt.includes("gh label create"), "must not create labels (the app manages them)");
   assert.ok(!prompt.includes("gh pr create"), "must never create a new PR");
 });

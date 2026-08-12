@@ -2,7 +2,6 @@ import type { TerminalType } from "../types";
 import type { IssueNodeData } from "../stores/issueStore";
 import type { LinkedPr } from "../stores/issueReviewStore";
 import { buildResolveConflictPrompt } from "./resolveConflictPrompt";
-import { readRepoContext } from "../utils/repoContext";
 
 interface ProjectWorktreeForLookup {
   id: string;
@@ -188,10 +187,6 @@ export async function resolveConflictWorktree(
     }
   }
 
-  // Contexto libre del repo (`.agents/repo-context.md`) para el prompt:
-  // best-effort, nunca bloquea el flujo si el archivo no existe.
-  const repoContext = await readRepoContext(project.path);
-
   const terminal = createTerminal({
     projectId,
     worktreeId: implementerWorktree.id,
@@ -203,7 +198,7 @@ export async function resolveConflictWorktree(
       prNumber: pr.number,
       branch: pr.headRefName,
       conflictFiles,
-      repoContext,
+      repoPath: project.path,
     }),
     autoApprove: true,
     position,

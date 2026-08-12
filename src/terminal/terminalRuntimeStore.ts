@@ -70,6 +70,7 @@ import {
   WORKTREE_ACTIVITY_THROTTLE_MS,
 } from "../../shared/lifecycleThresholds";
 import { onTerminalTurnCompleted } from "./summaryScheduler";
+import { watchIssuePrLabels } from "../canvas/issueLabelWatcher";
 import {
   clampPreviewAnsi,
   resolveTerminalMountMode,
@@ -2099,6 +2100,52 @@ function startTerminalRuntime(runtime: ManagedTerminalRuntime) {
   }
 
   runtime.globalDisposers.push(exitUnsubscribe);
+  // Materialización de labels del ciclo de review para terminales de flujo
+  // de issue (resolve/fix/conflicto): los prompts ya no etiquetan; la app
+  // aplica review:pendiente cuando aparece un PR nuevo y review:fix-aplicado
+  // cuando el head pasa el commit de la review más reciente. Los terminales
+  // de review quedan afuera (su flujo flipea el veredicto al salir).
+  if (
+    runtime.meta.terminal.type === "opencode" &&
+    runtime.meta.terminal.issueNumber !== undefined &&
+    runtime.meta.terminal.reviewPrNumber === undefined
+  ) {
+    const { projectId, worktreePath } = runtime.meta;
+    const project = useProjectStore
+      .getState()
+      .projects.find((p) => p.id === projectId);
+    const watchProjectPath = project?.path ?? worktreePath;
+    const stopLabelWatcher = watchIssuePrLabels(
+      {
+        findPrForIssue: (repoPath, issueNumber) =>
+          window.termcanvas.github.findPrForIssue(repoPath, issueNumber),
+        getPrReviewDecision: (repoPath, prNumber) =>
+          window.termcanvas.github.getPrReviewDecision(repoPath, prNumber),
+        applyCycleLabel: (repoPath, prNumber, issueNumber, label) =>
+          window.termcanvas.github.applyCycleLabel(
+            repoPath,
+            prNumber,
+            issueNumber,
+            label,
+          ),
+        isLive: () => !runtime.disposed,
+        notify: (kind, message) => {
+          if (kind === "error") {
+            appendPreview(
+              runtime,
+              `\r\n\x1b[33m[label watch] ${message}\x1b[0m\r\n`,
+            );
+          }
+        },
+      },
+      {
+        repoPath: watchProjectPath,
+        issueNumber: runtime.meta.terminal.issueNumber,
+      },
+    );
+    runtime.globalDisposers.push(stopLabelWatcher);
+  }
+
 
   const doSpawn = () => {
     if (runtime.disposed) return;

@@ -909,11 +909,40 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         const { execFile } = await import("child_process");
         const { promisify } = await import("util");
         const execFileAsync = promisify(execFile);
-        await execFileAsync(
-          "git",
-          ["worktree", "add", "-b", trimmedBranch, worktreePath],
-          { cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
-        );
+        const branchExists = async (ref: string) => {
+          try {
+            await execFileAsync("git", ["rev-parse", "--verify", ref], {
+              cwd: resolvedRepo,
+            });
+            return true;
+          } catch {
+            return false;
+          }
+        };
+        if (await branchExists(`refs/heads/${trimmedBranch}`)) {
+          // The branch already exists without a worktree (e.g. a removed
+          // worktree or work started on another machine). Attach it instead
+          // of failing with "branch already exists".
+          await execFileAsync(
+            "git",
+            ["worktree", "add", worktreePath, trimmedBranch],
+            { cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
+          );
+        } else if (await branchExists(`refs/remotes/origin/${trimmedBranch}`)) {
+          // Branch only exists on the remote: create the local branch
+          // tracking the remote head.
+          await execFileAsync(
+            "git",
+            ["worktree", "add", "-b", trimmedBranch, worktreePath, `origin/${trimmedBranch}`],
+            { cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
+          );
+        } else {
+          await execFileAsync(
+            "git",
+            ["worktree", "add", "-b", trimmedBranch, worktreePath],
+            { cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
+          );
+        }
         const worktrees = await projectScanner.listWorktreesAsync(resolvedRepo);
         return { ok: true as const, path: worktreePath, worktrees };
       } catch (err) {
@@ -3798,8 +3827,8 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
   // lead with ("VEREDICTO: APROBADO"/"VEREDICTO: CAMBIOS_PEDIDOS"). FUENTE DE
   // VERDAD: the review-cycle labels live on the PR, and the associated issue
   // mirrors the canonical one (syncReviewLabelToIssue) so the status shows
-  // everywhere — the issue additionally keeps status:approved from the SDD
-  // pipeline, untouched. Every label is created on demand with gh label
+  // everywhere; the issue conserves its own labels (outside the review
+  // cycle) untouched. Every label is created on demand with gh label
   // create so a missing label can never silently break a flow again.
   const REVIEW_LABEL_COLORS: Record<string, string> = {
     [REVIEW_LABEL_PENDING]: "d4a017",

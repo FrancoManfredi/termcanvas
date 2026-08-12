@@ -59,11 +59,6 @@ const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 // inválido 8 lecturas (~12s), el archivo quedó mal y fallamos con detalle.
 const MAX_STALE_INVALID_READS = 8;
 
-// Contexto libre del repo en Markdown (lo escribe el usuario desde el
-// modal de contexto): se inyecta en el prompt para que el agente conozca
-// el propósito y las intenciones del repositorio. La lectura compartida
-// vive en utils/repoContext (misma fuente que resolve/fix/review/conflict).
-import { readRepoContext } from "../utils/repoContext";
 
 export function resolveActiveWorktree(): { projectId: string; worktreeId: string; path: string } | null {
   const { projects, focusedProjectId, focusedWorktreeId } = useProjectStore.getState();
@@ -166,17 +161,13 @@ export async function launchPlanningSession(
   options: LaunchPlanningSessionOptions,
 ): Promise<PlanningSessionHandle | null> {
   const outputPath = planningOutputPath(options.repoPath, options.mode);
-  const [repoContext, openIssues] = await Promise.all([
-    readRepoContext(options.repoPath),
-    readOpenIssues(options.repoPath),
-  ]);
+  const openIssues = await readOpenIssues(options.repoPath);
   const prompt = buildPlanningPrompt({
     mode: options.mode,
     repoPath: options.repoPath,
     roadmapText: options.roadmapText,
     attachmentNames: options.attachmentNames,
     outputPath,
-    repoContext,
     openIssues,
   });
 

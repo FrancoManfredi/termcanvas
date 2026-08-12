@@ -1,7 +1,6 @@
 import type { TerminalType } from "../types";
 import type { IssueNodeData } from "../stores/issueStore";
 import { buildIssueReviewPrompt } from "./issueReviewPrompt";
-import { readRepoContext } from "../utils/repoContext";
 
 interface ReviewTarget {
   projectId: string;
@@ -330,10 +329,6 @@ export async function reviewIssueWorktree(
       }
     }
 
-    // Contexto libre del repo (`.agents/repo-context.md`) para el prompt:
-    // best-effort, nunca bloquea el flujo si el archivo no existe.
-    const repoContext = await readRepoContext(project.path);
-
     const terminal = createTerminal({
       projectId: target.projectId,
       worktreeId: reviewWorktree.id,
@@ -348,7 +343,7 @@ export async function reviewIssueWorktree(
         commitSha: pr.headRefOid,
         reviewContext,
         reviewTemplateFilePath,
-        repoContext,
+        repoPath: project.path,
       }),
       autoApprove: false,
       position,

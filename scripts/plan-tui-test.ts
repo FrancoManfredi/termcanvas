@@ -125,7 +125,7 @@ console.log("[plan-tui-test] repo activo:", REPO_PATH);
 console.log("[plan-tui-test] salida esperada:", OUT_PATH);
 console.log("[plan-tui-test] prompt muy largo (single-line), longitud:", prompt.length);
 
-const args = ["-m", "opencode/big-pickle", "--prompt", prompt];
+const args = ["--prompt", prompt];
 console.log("[plan-tui-test] ejecutando: opencode " + args.join(" ").slice(0, 120) + "…");
 
 // --headless: usa "opencode run" (termina solo, no abre TUI) para validar
@@ -133,7 +133,7 @@ console.log("[plan-tui-test] ejecutando: opencode " + args.join(" ").slice(0, 12
 // bloquea: hacemos polling del archivo de salida hasta que exista.
 const headless = process.argv.includes("--headless");
 const spawnArgs = headless
-  ? ["run", prompt, "-m", "opencode/big-pickle", "--auto"]
+  ? ["run", prompt, "--auto"]
   : args;
 
 const child = spawn(openCodeBinary, spawnArgs, {

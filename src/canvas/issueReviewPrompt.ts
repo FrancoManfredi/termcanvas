@@ -15,9 +15,9 @@ export interface IssueReviewPromptInput {
   // (review-template-{pr}.json). When the app wrote it, the agent fills it in
   // instead of reinventing the fixed schema (commit_id, event, line/side).
   reviewTemplateFilePath?: string | null;
-  // Contexto libre del repo (`.agents/repo-context.md`): la intención del
-  // dueño del proyecto para juzgar si la solución respeta la dirección.
-  repoContext?: string;
+  // Ruta del repo donde vive `.agents/repo-context.md`: el prompt le dice
+  // al agente que lo lea por ruta; no se inyecta el contenido.
+  repoPath?: string;
 }
 
 function issueBody(body: string | undefined): string {
@@ -92,12 +92,12 @@ export function buildIssueReviewPrompt(
     ? `USÁ EL ESQUELETO PRE-GENERADO: la app ya dejó ${input.reviewTemplateFilePath} en el worktree con la estructura correcta (commit_id ya cargado, event: COMMENT, comments con line/side). Completá body y comments del JSON y subilo con gh api repos/{owner}/{repo}/pulls/${input.prNumber}/reviews --method POST --input ${input.reviewTemplateFilePath}. NO changes el event ni la estructura. `
     : "";
 return [
-    ...buildRepoContextSection(input.repoContext),
+    ...buildRepoContextSection(input.repoPath),
     ...injected,
     templateRule,
     `Hacé un review de la solución planteada para el issue #${input.issueNumber} — ${input.title}. `,
     `CONTEXTO: ${issueBody(input.body)}. Estás en un worktree aislado con el código de la solución ya commiteado en la rama (podés verlo con git log). Ejecutá \`gh pr view ${input.prNumber}\` y \`gh pr diff ${input.prNumber}\` para ver la solución completa en contexto (cambios, archivos, tests). Si falta algo del diff local (ej: la rama no está actualizada con el PR), avisá en tu reporte final en vez de inventar contenido.`,
-    "QUÉ REVISAR: 1. Scope: la solución resuelve EXACTAMENTE lo que pide el issue y nada más (sin features inventadas ni scope creep). 2. Tests: hay tests para la solución, corren y pasan, y cubren el caso principal del issue (no solo el camino feliz). 3. Calidad del código: sin dead code, sin TODOs pendientes sin ticket, sin duplicación evitable, sigue las convenciones del repo. 4. Commits: conventional commits, sin Co-Authored-By ni atribuciones AI.",
+    "QUÉ REVISAR (disciplina de la skill code-review, en dos ejes SEPARADOS): EJE STANDARDS — la solución sigue las convenciones del repo y la calidad de código básica (code smells estilo Fowler: sin dead code, sin TODOs sin ticket, sin duplicación evitable); hay tests para la solución, corren y pasan, y cubren el caso principal del issue (no solo el camino feliz); commits conventional, sin Co-Authored-By ni atribuciones AI. EJE SPEC — fidelidad EXACTA al issue original: resuelve exactamente lo que pide y nada más, sin features inventadas ni scope creep. Evaluá ambos ejes por separado en tu análisis; el veredicto y el formato de salida no cambian. ",
     `ACCIÓN — COMPORTAMIENTO COMO COPILOT: comentá SOLO sobre los archivos que el PR modifica (\`gh pr diff ${input.prNumber} --name-only\`) y anclá cada hallazgo a la línea exacta del código con start_line/end_line y, si proponés un cambio concreto, un suggested_fix dentro de un bloque de sugerencia de GitHub. El texto del review NO enumera líneas: lo que se ve sobre el código son los comentarios. `,
     `FORMATO DE OUTPUT: para cada observación identificá el archivo y el número de línea EXACTO en el diff nuevo. Corré gh pr diff ${input.prNumber} JUSTO ANTES de armar el JSON para leer los números de línea reales del lado derecho/nuevo — no reuses un diff leído al principio de la sesión si pasó tiempo o hubo cambios, y no inventes ni aproximes números. Armá un JSON y subilo con \`gh api repos/{owner}/{repo}/pulls/${input.prNumber}/reviews --method POST --input <archivo>.json\` en UNA sola llamada: { "commit_id": "${input.commitSha ?? "el hash actual (git rev-parse HEAD)"}", "event": "COMMENT", "body": "primera línea: VEREDICTO: APROBADO o VEREDICTO: CAMBIOS_PEDIDOS; después el resumen general", "comments": [ { "path": "ruta/relativa/al/archivo.ext", "line": 42, "side": "RIGHT", "body": "observación específica de esa línea (si es opcional, empezá con 'no bloqueante: ')" } ] }. Si una observación es sobre una convención general o algo que no corresponde a una línea puntual (ej: falta de tests en general), dejala en el "body" general, no fuerces un anclaje que no corresponde. Si no hay NINGUNA observación de línea, el POST igual se hace con "comments": [] y el body con el veredicto. `,
     `EVENT: usá SIEMPRE "COMMENT" (no APPROVE ni REQUEST_CHANGES por este endpoint: GitHub bloquea auto-aprobar el PR propio con el token actual; el veredicto se comunica con la línea VEREDICTO: del body, no con el evento del review). Los comentarios inline quedan anclados igual. `,

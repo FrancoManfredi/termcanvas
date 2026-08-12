@@ -7,7 +7,6 @@ export interface PlanningPromptInput {
   roadmapText?: string;
   attachmentNames?: string[];
   outputPath: string;
-  repoContext?: string;
   // Issues abiertos del repo (número | título): el plan marca con
   // existingIssueNumber a los que repiten un problema ya pedido. Opcional:
   // si no se pudo leer, el plan simplemente no trae esa marca.
@@ -34,12 +33,12 @@ export function buildPlanningPrompt(input: PlanningPromptInput): string {
   const { mode, repoPath, outputPath } = input;
   const attachments = input.attachmentNames ?? [];
 
-  // Contexto del repositorio: contenido libre del usuario (propósito,
-  // visión de empresa, decisiones, intenciones) que pesa sobre TODOS los
-  // hallazgos y propuestas. No es obligatorio: sin contexto la sección
-  // no se emite y el prompt queda igual que antes. Va por oneLine() como
-  // todo el prompt: un contexto multilínea rompería --prompt en Windows.
-  const contextSection = buildRepoContextSection(input.repoContext);
+  // Contexto del repositorio: referencia al archivo libre del usuario
+  // (propósito, visión de empresa, decisiones, intenciones) que pesa
+  // sobre TODOS los hallazgos y propuestas. No es obligatorio: sin ruta
+  // la sección no se emite y el prompt queda igual que antes. El agente
+  // lee el archivo desde su worktree; no se inyecta el contenido.
+  const contextSection = buildRepoContextSection(input.repoPath);
 
   const schema = oneLine(`
     {
@@ -91,6 +90,8 @@ export function buildPlanningPrompt(input: PlanningPromptInput): string {
           "PLANIFICACIÓN DESDE ROADMAP:",
           `Leé el roadmap provisto abajo y convertilo en un plan de issues listo para crear.`,
           `ROADMAP PEGo: ${input.roadmapText || "(vacío)"}`,
+          "DISCIPLINA DE TICKETS (skill to-tickets): convertí el roadmap en tickets tipo tracer-bullet — slices verticales que atraviesan TODAS las capas (frontend, backend, datos, tests), no slices horizontales por capa — cada uno con un entregable verificable propio. ",
+          "RELACIONES DE BLOQUEO EXPLÍCITAS: declará SIEMPRE blockedBy/blocking entre issues que dependen entre sí. Estos issues se resuelven DESPUÉS EN PARALELO en worktrees distintos: las relaciones de bloqueo son lo único que evita que dos agentes trabajen el mismo archivo a la vez — no las omitas ni las dejes implícitas.",
         ]
       : [
           "AUDITORÍA DE REPOSITORIO:",

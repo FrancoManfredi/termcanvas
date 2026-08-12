@@ -167,7 +167,7 @@ export const TERMINAL_CONFIG: Record<TerminalType, TerminalAdapterConfig> = {
     launch: {
       shell: "opencode",
       resumeArgs: (id) => ["-s", id],
-      newArgs: () => ["-m", "opencode/big-pickle"],
+      newArgs: () => [],
       promptArgs: (prompt) => ["--prompt", prompt],
       autoApproveArgs: () => ["--auto"],
       promptOnResume: true,

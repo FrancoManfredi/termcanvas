@@ -200,15 +200,15 @@ test("buildResolveConflictPrompt: single line with the merge contract", () => {
   assert.ok(prompt.includes("git push origin issue-7-broken-button"), "must push the existing branch");
   assert.ok(prompt.includes("[fix-conflicto-7]"));
   assert.ok(
-    prompt.includes('gh issue edit 12 --remove-label "conflicto:main"') &&
-      prompt.includes('--add-label "review:fix-aplicado"'),
-    "must flip the label to awaiting re-review",
+    !prompt.includes("gh issue edit"),
+    "must not flip cycle labels via gh (the app manages them)",
   );
   assert.ok(prompt.includes("conflicto:main"), "must reference the real conflict label");
-  assert.ok(prompt.includes("review:fix-aplicado"), "must use the real fix-applied label");
+  assert.ok(prompt.includes("los gestiona la app automáticamente"), "must leave the cycle labels to the app");
   assert.ok(!prompt.includes("gh pr create"), "must never create a new PR");
   assert.ok(prompt.includes("NUNCA crees una rama o PR nuevo"), "must forbid new branches/PRs");
-  assert.ok(prompt.includes("preservando la intención de AMBOS lados"), "must preserve both sides of each conflict");
+  assert.ok(prompt.includes("intención original de cada lado"), "must resolve by the original intent of each side");
+  assert.ok(prompt.includes("nunca uses git merge --abort"), "must never abort the merge");
 });
 
 test("buildResolveConflictPrompt: injected file list replaces the gh lookups", () => {

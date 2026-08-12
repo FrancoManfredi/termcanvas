@@ -10,10 +10,9 @@
 // y el issue asociado lo REFLEJA — cada vez que el PR cambia de label, el
 // issue se sincroniza con el MISMO label canónico (un PR es un issue para la
 // API de GitHub, así que `gh issue edit <prNumber>` apunta al PR; el issue
-// real se resuelve desde el body del PR, "Closes #N" / "fixes #N"). El issue
-// además conserva status:approved, que pertenece al pipeline SDD (anterior y
-// separado) y no se toca. El implementador deja review:pendiente al abrir el
-// PR; el reviewer flipa entre review:aprobado / review:comentado; el fix y la
+// real se resuelve desde el body del PR, "Closes #N" / "fixes #N"). La app aplica
+// review:pendiente sola al detectar el PR nuevo; el reviewer flipa entre
+// review:aprobado / review:comentado; el fix y la
 // resolución de conflictos dejan review:fix-aplicado; el mergeador marca
 // conflicto:main y QUITA review:aprobado (un PR conflictivo nunca puede
 // mergearse). Todos se crean en el repo si no existen (gh label create).
