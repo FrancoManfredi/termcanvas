@@ -3,7 +3,6 @@ import { buildRepoContextSection } from "../utils/repoContext";
 export interface IssueReviewPromptInput {
   issueNumber: number;
   title: string;
-  body?: string;
   prNumber: number;
   branch: string;
   commitSha?: string;
@@ -20,8 +19,11 @@ export interface IssueReviewPromptInput {
   repoPath?: string;
 }
 
-function issueBody(body: string | undefined): string {
-  return (body ?? "").replace(/\n/g, " ");
+// Strict body-rule: the issue body is NEVER inlined in the prompt (it can be
+// huge and repeats once per open PR of the issue). Instead the agent MUST
+// read the full original body with gh before evaluating the SPEC axis.
+function issueBodyRule(issueNumber: number): string {
+  return `LECTURA OBLIGATORIA DEL ISSUE: ANTES de analizar nada, ejecutá SIEMPRE \`gh issue view ${issueNumber} --json title,body --jq -r '"# " + .title + "\\n\\n" + .body'\` y leé el body COMPLETO del issue — está PROHIBIDO armar la review sin haberlo leído de punta a punta. El título de arriba es solo una guía: el SPec se juzga contra el texto original, incluyendo pasos de reproducción, criterios de aceptación y cualquier sección intermedia. No resumas, no infieras, no saltees secciones.`;
 }
 
 /**
@@ -96,7 +98,8 @@ return [
     ...injected,
     templateRule,
     `Hacé un review de la solución planteada para el issue #${input.issueNumber} — ${input.title}. `,
-    `CONTEXTO: ${issueBody(input.body)}. Estás en un worktree aislado con el código de la solución ya commiteado en la rama (podés verlo con git log). Ejecutá \`gh pr view ${input.prNumber}\` y \`gh pr diff ${input.prNumber}\` para ver la solución completa en contexto (cambios, archivos, tests). Si falta algo del diff local (ej: la rama no está actualizada con el PR), avisá en tu reporte final en vez de inventar contenido.`,
+    `CONTEXTO: estás en un worktree aislado con el código de la solución ya commiteado en la rama (podés verlo con git log). Ejecutá \`gh pr view ${input.prNumber}\` y \`gh pr diff ${input.prNumber}\` para ver la solución completa en contexto (cambios, archivos, tests). Si falta algo del diff local (ej: la rama no está actualizada con el PR), avisá en tu reporte final en vez de inventar contenido.`,
+    issueBodyRule(input.issueNumber),
     "QUÉ REVISAR (disciplina de la skill code-review, en dos ejes SEPARADOS): EJE STANDARDS — la solución sigue las convenciones del repo y la calidad de código básica (code smells estilo Fowler: sin dead code, sin TODOs sin ticket, sin duplicación evitable); hay tests para la solución, corren y pasan, y cubren el caso principal del issue (no solo el camino feliz); commits conventional, sin Co-Authored-By ni atribuciones AI. EJE SPEC — fidelidad EXACTA al issue original: resuelve exactamente lo que pide y nada más, sin features inventadas ni scope creep. Evaluá ambos ejes por separado en tu análisis; el veredicto y el formato de salida no cambian. ",
     `ACCIÓN — COMPORTAMIENTO COMO COPILOT: comentá SOLO sobre los archivos que el PR modifica (\`gh pr diff ${input.prNumber} --name-only\`) y anclá cada hallazgo a la línea exacta del código con start_line/end_line y, si proponés un cambio concreto, un suggested_fix dentro de un bloque de sugerencia de GitHub. El texto del review NO enumera líneas: lo que se ve sobre el código son los comentarios. `,
     `FORMATO DE OUTPUT: para cada observación identificá el archivo y el número de línea EXACTO en el diff nuevo. Corré gh pr diff ${input.prNumber} JUSTO ANTES de armar el JSON para leer los números de línea reales del lado derecho/nuevo — no reuses un diff leído al principio de la sesión si pasó tiempo o hubo cambios, y no inventes ni aproximes números. Armá un JSON y subilo con \`gh api repos/{owner}/{repo}/pulls/${input.prNumber}/reviews --method POST --input <archivo>.json\` en UNA sola llamada: { "commit_id": "${input.commitSha ?? "el hash actual (git rev-parse HEAD)"}", "event": "COMMENT", "body": "primera línea: VEREDICTO: APROBADO o VEREDICTO: CAMBIOS_PEDIDOS; después el resumen general", "comments": [ { "path": "ruta/relativa/al/archivo.ext", "line": 42, "side": "RIGHT", "body": "observación específica de esa línea (si es opcional, empezá con 'no bloqueante: ')" } ] }. Si una observación es sobre una convención general o algo que no corresponde a una línea puntual (ej: falta de tests en general), dejala en el "body" general, no fuerces un anclaje que no corresponde. Si no hay NINGUNA observación de línea, el POST igual se hace con "comments": [] y el body con el veredicto. `,

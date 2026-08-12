@@ -1917,6 +1917,15 @@ function startTerminalRuntime(runtime: ManagedTerminalRuntime) {
                   useIssueReviewStore
                     .getState()
                     .setReviewVerdict(reviewIssueNumber, result.reviewDecision);
+                  // Multi-PR: persist the verdict on THIS PR (not just the
+                  // issue's primary), so each reviewed PR keeps its own state.
+                  useIssueReviewStore
+                    .getState()
+                    .setPrVerdict(
+                      reviewIssueNumber,
+                      reviewPrNumber,
+                      result.reviewDecision,
+                    );
                   // Flip the real PR label to match the verdict line the review
                   // body is required to carry, so the card shows review/merge
                   // state even after a reload.

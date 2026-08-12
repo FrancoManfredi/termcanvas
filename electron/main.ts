@@ -1067,6 +1067,38 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         const { execFile } = await import("child_process");
         const { promisify } = await import("util");
         const execFileAsync = promisify(execFile);
+        // Self-heal ORPHANED review directories. A killed session can leave
+        // <repo>/.worktrees/<base>-review on disk while git no longer
+        // registers it as a worktree at all (admin metadata lost, so
+        // `git worktree list` — and the scanner that feeds the store — never
+        // sees it). The renderer's leftover prune only knows registered
+        // worktrees, so without this step `git worktree add` fails with
+        // "already exists" on the orphaned directory forever. Registered
+        // worktrees (a live review) are never touched here — the renderer's
+        // in-use guard handles those.
+        const { stdout: registeredOut } = await execFileAsync(
+          "git", ["worktree", "list", "--porcelain"],
+          { cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
+        );
+        const registered = new Set(
+          registeredOut
+            .split(/\r?\n/)
+            .filter((line) => line.startsWith("worktree "))
+            .map((line) => path.resolve(line.slice("worktree ".length))),
+        );
+        if (!fs.existsSync(worktreePath)) {
+          // Nothing in the way — normal path.
+        } else if (!registered.has(path.resolve(worktreePath))) {
+          fs.rmSync(worktreePath, { recursive: true, force: true });
+        }
+      } catch {
+        // Worktree listing failed; let the create below surface the error.
+      }
+
+      try {
+        const { execFile } = await import("child_process");
+        const { promisify } = await import("util");
+        const execFileAsync = promisify(execFile);
         // The PR branch stays bound to the implementer's worktree and the
         // reviewer must never create its own branch or PR, so the review
         // copy is a detached checkout of the PR branch's commit.
@@ -3066,6 +3098,123 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         }
         const openPr = pulls.find((p) => p.state === "OPEN") ?? pulls[0];
         return { ok: true as const, pr: openPr };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { ok: false as const, error: message };
+      }
+    },
+  );
+
+  // Detect EVERY open PR linked to an issue ("Development" panel data, the
+  // `closedByPullRequestsReferences` field). The review flow runs on each open
+  // PR of the issue, not just the first one, so this returns the full OPEN
+  // list instead of picking a single candidate. GraphQL errors are surfaced
+  // as `ok: false`; an issue without open PRs returns an empty list.
+  ipcMain.handle(
+    "github:find-open-prs-for-issue",
+    async (
+      _event,
+      cwd: string,
+      issueNumber: number,
+    ): Promise<
+      | {
+          ok: true;
+          prs: {
+            number: number;
+            title: string;
+            url: string;
+            state: string;
+            headRefName: string;
+            headRefOid: string;
+          }[];
+        }
+      | { ok: false; error: string }
+    > => {
+      const { execFile } = await import("child_process");
+      const { promisify } = await import("util");
+      const execFileAsync = promisify(execFile);
+      const execEnv: NodeJS.ProcessEnv = { ...process.env };
+      if (!execEnv.GH_TOKEN && process.env.GITHUB_TOKEN) {
+        execEnv.GH_TOKEN = process.env.GITHUB_TOKEN;
+      }
+      if (!execEnv.GITHUB_TOKEN && process.env.GH_TOKEN) {
+        execEnv.GITHUB_TOKEN = process.env.GH_TOKEN;
+      }
+      try {
+        let owner: string;
+        let repo: string;
+        try {
+          const { stdout: remoteUrl } = await execFileAsync(
+            "git", ["remote", "get-url", "origin"],
+            { cwd, timeout: 10_000, env: execEnv },
+          );
+          const match = remoteUrl.trim().match(
+            /github\.com[:/]([^/]+)\/([^/\s.]+?)(?:\.git)?$/i,
+          );
+          if (!match) {
+            return {
+              ok: false as const,
+              error: `Could not parse GitHub owner/repo from remote: ${remoteUrl.trim()}`,
+            };
+          }
+          owner = match[1];
+          repo = match[2];
+        } catch {
+          return {
+            ok: false as const,
+            error: "No git remote 'origin' found. Add a GitHub remote first.",
+          };
+        }
+
+        const query = `
+          query($owner: String!, $repo: String!, $number: Int!) {
+            repository(owner: $owner, name: $repo) {
+              issue(number: $number) {
+                closedByPullRequestsReferences(first: 10) {
+                  nodes {
+                    number
+                    title
+                    url
+                    state
+                    headRefName
+                    headRefOid
+                  }
+                }
+              }
+            }
+          }`;
+
+        const { stdout } = await execFileAsync(
+          "gh", [
+            "api", "graphql",
+            "-F", `owner=${owner}`,
+            "-F", `repo=${repo}`,
+            "-F", `number=${issueNumber}`,
+            "-f", `query=${query}`,
+          ],
+          { cwd, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, env: execEnv },
+        );
+
+        const data = JSON.parse(stdout);
+        const graphqlErrors: Array<{ message: string }> = data?.errors ?? [];
+        if (graphqlErrors.length > 0) {
+          return {
+            ok: false as const,
+            error: `GitHub GraphQL: ${graphqlErrors[0].message}`,
+          };
+        }
+        const pulls: Array<{
+          number: number;
+          title: string;
+          url: string;
+          state: string;
+          headRefName: string;
+          headRefOid: string;
+        }> =
+          data?.data?.repository?.issue?.closedByPullRequestsReferences
+            ?.nodes ?? [];
+        const openPrs = pulls.filter((p) => p.state === "OPEN");
+        return { ok: true as const, prs: openPrs };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return { ok: false as const, error: message };

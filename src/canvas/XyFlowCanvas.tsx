@@ -394,6 +394,12 @@ function XyFlowCanvasInner() {
   const issueVerdicts = useIssueReviewStore((s) => s.verdictByIssue);
   const issueLabels = useIssueReviewStore((s) => s.labelsByIssue);
   const issueConflicts = useIssueReviewStore((s) => s.conflictByIssue);
+  // Multi-PR maps: the full open-PR list and per-PR verdict/label/conflict
+  // state so the context menu can act on each PR of the issue separately.
+  const issueOpenPrs = useIssueReviewStore((s) => s.openPrsByIssue);
+  const issueVerdictsByPr = useIssueReviewStore((s) => s.verdictByPr);
+  const issueLabelsByPr = useIssueReviewStore((s) => s.labelsByPr);
+  const issueConflictsByPr = useIssueReviewStore((s) => s.conflictByPr);
   const reviewingIssueNumber = useIssueReviewStore(
     (s) => s.reviewingIssueNumber,
   );
@@ -455,11 +461,13 @@ function XyFlowCanvasInner() {
     return { projectId, worktreeId, worktree };
   }, []);
 
-  // Look up the linked PR for an issue so the REVISAR SOLUCIÓN action can be
+  // Look up the linked PRs for an issue so the REVISAR SOLUCIÓN action can be
   // disabled whenever there is no solution to review yet. Results are cached
   // per issue for the session; a projectPath is used when the caller knows
   // the issue's own repo (card footer button), otherwise falls back to the
-  // focused worktree (context menu).
+  // focused worktree (context menu). Multi-PR: every open PR is recorded in
+  // openPrsByIssue and each one gets its own verdict/labels/conflict state so
+  // the context menu can act on the RIGHT PR.
   const checkLinkedPr = useCallback(
     (issueNumber: number, projectPath?: string, force?: boolean) => {
       const reviewStore = useIssueReviewStore.getState();
@@ -475,137 +483,152 @@ function XyFlowCanvasInner() {
       if (!path) return;
       reviewStore.setPrStatus(issueNumber, "loading");
       void window.termcanvas.github
-        .findPrForIssue(path, issueNumber)
+        .findOpenPrsForIssue(path, issueNumber)
         .then((result) => {
+          const prs = result.ok ? result.prs : [];
+          // The card's primary PR stays the first open one (legacy contract
+          // for the footer button and per-issue badges); the full list lives
+          // in openPrsByIssue for per-PR actions.
           useIssueReviewStore
             .getState()
-            .setPrStatus(issueNumber, result.ok ? result.pr : null);
-          // The card badge must survive reloads, not just the in-memory
-          // setReviewVerdict that runs when the review terminal exits. Re-read
-          // GitHub's authoritative review decision whenever we find the PR.
-          if (result.ok && result.pr) {
+            .setPrStatus(issueNumber, prs[0] ?? null);
+          useIssueReviewStore.getState().setOpenPrs(issueNumber, prs);
+          if (!result.ok || prs.length === 0) return;
+          for (const pr of prs) {
             // Narrowed copy: TS does not propagate param narrowing into
             // nested closures, and applyReviewLabel needs the PR number.
-            const prNumber = result.pr.number;
-            const prState = result.pr.state;
+            const prNumber = pr.number;
+            const prState = pr.state;
             void window.termcanvas.github
               .getPrReviewDecision(path, prNumber)
               .then((decisionResult) => {
-                if (decisionResult.ok) {
-                  useIssueReviewStore
-                    .getState()
-                    .setReviewVerdict(issueNumber, decisionResult.reviewDecision);
-                  // The "conflicto:main" label is real repo state (set by the
-                  // mergeador) — re-read it on every lookup so the
-                  // RESOLVER CONFLICTO button survives reloads.
+                if (!decisionResult.ok) return;
+                // Per-PR state — each reviewed PR keeps its own verdict and
+                // labels so the menu can fix/merge the exact PR that asked.
+                const store = useIssueReviewStore.getState();
+                store.setPrVerdict(issueNumber, prNumber, decisionResult.reviewDecision);
+                store.setPrLabels(issueNumber, prNumber, decisionResult.labels);
+                store.setPrConflict(
+                  issueNumber,
+                  prNumber,
+                  decisionResult.labels.includes("conflicto:main"),
+                );
+                // Mirror the primary PR onto the legacy per-issue maps so the
+                // card badge and existing gates keep working unchanged.
+                if (prNumber === prs[0]?.number) {
+                  store.setReviewVerdict(issueNumber, decisionResult.reviewDecision);
+                  store.setIssueLabels(issueNumber, decisionResult.labels);
+                  store.setConflictStatus(
+                    issueNumber,
+                    decisionResult.labels.includes("conflicto:main"),
+                  );
+                }
+                // The "conflicto:main" label is real repo state (set by the
+                // mergeador) — re-read it on every lookup so the
+                // RESOLVER CONFLICTO button survives reloads.
+                if (prNumber === prs[0]?.number) {
                   useIssueReviewStore
                     .getState()
                     .setConflictStatus(
                       issueNumber,
                       decisionResult.labels.includes("conflicto:main"),
                     );
-                  // Persist the raw cycle labels: the card badge and the
-                  // fix/merge gates derive from them (source of truth), with
-                  // the in-memory verdict only covering live transitions.
-                  useIssueReviewStore
-                    .getState()
-                    .setIssueLabels(issueNumber, decisionResult.labels);
-                  // Materialize the verdict label from this deterministic
-                  // read path too: the terminal-exit flip can be skipped when
-                  // the app closes mid-review, and the bulk merge gates on
-                  // the label. Idempotent — ensure+add/remove, safe to repeat.
-                  if (decisionResult.reviewDecision) {
-                    void window.termcanvas.github
-                      .applyReviewLabel(
-                        path,
-                        prNumber,
-                        decisionResult.reviewDecision,
-                      )
-                      .catch((error) => {
-                        console.error(
-                          "[review] failed to apply review label:",
-                          error,
-                        );
-                      });
-                  }
-                  // Materialize the labels the review prompts never post —
-                  // the prompts only run while their terminal is open, so a
-                  // mid-flight close would otherwise strand the PR:
-                  // 1) "review:fix-aplicado": the head moved past the commit
-                  //    the newest review evaluated, so the fix (or conflict
-                  //    resolution) landed and awaits re-review. Only promoted
-                  //    over lesser states (pendiente/comentado); aprobado and
-                  //    conflicto keep their precedence.
-                  // 2) "review:pendiente": a brand-new PR (no cycle label yet)
-                  //    starts its cycle pending, as the resolve prompt would.
-                  // applyCycleLabel is idempotent (add target, clear the rest
-                  // of the cycle), so re-running on every lookup is safe.
-                  const canonicalLabel = canonicalReviewLabel(
-                    decisionResult.labels,
-                  );
-                  const fixAppliedTargets: Array<string | null> = [
-                    null,
-                    REVIEW_LABEL_PENDING,
-                    REVIEW_LABEL_CHANGES,
-                  ];
-                  if (
-                    decisionResult.reviewDecision === "FIX_APPLIED" &&
-                    fixAppliedTargets.includes(canonicalLabel)
-                  ) {
-                    void window.termcanvas.github
-                      .applyCycleLabel(
-                        path,
-                        prNumber,
-                        issueNumber,
-                        REVIEW_LABEL_FIX_APPLIED,
-                      )
-                      .catch((error) => {
-                        console.error(
-                          "[review] failed to apply fix-applied label:",
-                          error,
-                        );
-                      });
-                  }
-                  const pendingDecision =
-                    decisionResult.reviewDecision === null ||
-                    decisionResult.reviewDecision === "REVIEW_REQUIRED";
-                  if (
-                    canonicalLabel === null &&
-                    pendingDecision &&
-                    prState === "OPEN"
-                  ) {
-                    void window.termcanvas.github
-                      .applyCycleLabel(
-                        path,
-                        prNumber,
-                        issueNumber,
-                        REVIEW_LABEL_PENDING,
-                      )
-                      .catch((error) => {
-                        console.error(
-                          "[review] failed to apply pending label:",
-                          error,
-                        );
-                      });
-                  }
-                  // Mirror the PR's canonical review-cycle label onto the
-                  // associated issue (best-effort, idempotent): the issue must
-                  // reflect the PR state in EVERY state — approved, changes,
-                  // conflict, fix applied, pending. The canonical derivation
-                  // self-corrects stale label combinations on each refresh.
+                }
+                // Materialize the verdict label from this deterministic
+                // read path too: the terminal-exit flip can be skipped when
+                // the app closes mid-review, and the bulk merge gates on
+                // the label. Idempotent — ensure+add/remove, safe to repeat.
+                if (decisionResult.reviewDecision) {
                   void window.termcanvas.github
-                    .syncIssueReviewLabel(
+                    .applyReviewLabel(
                       path,
-                      issueNumber,
-                      decisionResult.labels,
+                      prNumber,
+                      decisionResult.reviewDecision,
                     )
                     .catch((error) => {
                       console.error(
-                        "[review] failed to sync issue label:",
+                        "[review] failed to apply review label:",
                         error,
                       );
                     });
                 }
+                // Materialize the labels the review prompts never post —
+                // the prompts only run while their terminal is open, so a
+                // mid-flight close would otherwise strand the PR:
+                // 1) "review:fix-aplicado": the head moved past the commit
+                //    the newest review evaluated, so the fix (or conflict
+                //    resolution) landed and awaits re-review. Only promoted
+                //    over lesser states (pendiente/comentado); aprobado and
+                //    conflicto keep their precedence.
+                // 2) "review:pendiente": a brand-new PR (no cycle label yet)
+                //    starts its cycle pending, as the resolve prompt would.
+                // applyCycleLabel is idempotent (add target, clear the rest
+                // of the cycle), so re-running on every lookup is safe.
+                const canonicalLabel = canonicalReviewLabel(
+                  decisionResult.labels,
+                );
+                const fixAppliedTargets: Array<string | null> = [
+                  null,
+                  REVIEW_LABEL_PENDING,
+                  REVIEW_LABEL_CHANGES,
+                ];
+                if (
+                  decisionResult.reviewDecision === "FIX_APPLIED" &&
+                  fixAppliedTargets.includes(canonicalLabel)
+                ) {
+                  void window.termcanvas.github
+                    .applyCycleLabel(
+                      path,
+                      prNumber,
+                      issueNumber,
+                      REVIEW_LABEL_FIX_APPLIED,
+                    )
+                    .catch((error) => {
+                      console.error(
+                        "[review] failed to apply fix-applied label:",
+                        error,
+                      );
+                    });
+                }
+                const pendingDecision =
+                  decisionResult.reviewDecision === null ||
+                  decisionResult.reviewDecision === "REVIEW_REQUIRED";
+                if (
+                  canonicalLabel === null &&
+                  pendingDecision &&
+                  prState === "OPEN"
+                ) {
+                  void window.termcanvas.github
+                    .applyCycleLabel(
+                      path,
+                      prNumber,
+                      issueNumber,
+                      REVIEW_LABEL_PENDING,
+                    )
+                    .catch((error) => {
+                      console.error(
+                        "[review] failed to apply pending label:",
+                        error,
+                      );
+                    });
+                }
+                // Mirror the PR's canonical review-cycle label onto the
+                // associated issue (best-effort, idempotent): the issue must
+                // reflect the PR state in EVERY state — approved, changes,
+                // conflict, fix applied, pending. The canonical derivation
+                // self-corrects stale label combinations on each refresh.
+                void window.termcanvas.github
+                  .syncIssueReviewLabel(
+                    path,
+                    issueNumber,
+                    decisionResult.labels,
+                  )
+                  .catch((error) => {
+                    console.error(
+                      "[review] failed to sync issue label:",
+                      error,
+                    );
+                  });
               })
               .catch(() => {});
           }
@@ -1007,7 +1030,7 @@ function XyFlowCanvasInner() {
   }, [handleResolveIssue]);
 
   const handleReviewIssue = useCallback(
-    (issueNumber: number) => {
+    (issueNumber: number, prNumber?: number) => {
       if (useIssueResolveStore.getState().resolvingIssueNumber !== null) return;
       if (useIssueReviewStore.getState().reviewingIssueNumber !== null) return;
       if (useIssueReviewStore.getState().fixingIssueNumber !== null) return;
@@ -1067,8 +1090,8 @@ function XyFlowCanvasInner() {
           ),
         isReviewWorktreeInUse: (worktreeId) =>
           hasLiveReviewOnWorktree(worktreeId),
-        findPrForIssue: (cwd, number) =>
-          window.termcanvas.github.findPrForIssue(cwd, number),
+        findOpenPrsForIssue: (cwd, number) =>
+          window.termcanvas.github.findOpenPrsForIssue(cwd, number),
         getReviewContext: (cwd, number, targetDir) =>
           window.termcanvas.github.getReviewContext(cwd, number, targetDir),
         createTerminal: createTerminalInScene,
@@ -1077,11 +1100,16 @@ function XyFlowCanvasInner() {
         setResolveArrows,
         issueNodeId,
         position: flowCenter,
+        onlyPrNumber: prNumber,
       })
         .then((result) => {
-          if (!result.ok || !result.terminal) return;
-          const terminalId = result.terminal.id;
-          // Focus the tile so the terminal runtime actually spawns the CLI.
+          if (!result.ok || !result.terminals || result.terminals.length === 0) {
+            return;
+          }
+          // Focus the first tile so the terminal runtime actually spawns the
+          // CLI; the remaining review terminals of the other open PRs spawn
+          // with the built-in stagger and run unattended with --auto.
+          const terminalId = result.terminals[0].id;
           useProjectStore.getState().setFocusedTerminal(terminalId);
           centerOnReviewTerminal(terminalId);
         })
@@ -1098,7 +1126,7 @@ function XyFlowCanvasInner() {
   // the existing PR. Once the terminal is created the verdict flips to
   // FIX_APPLIED so the menu item disappears until the next review.
   const handleFixIssue = useCallback(
-    (issueNumber: number) => {
+    (issueNumber: number, prNumber?: number) => {
       if (useIssueResolveStore.getState().resolvingIssueNumber !== null) return;
       if (useIssueReviewStore.getState().reviewingIssueNumber !== null) return;
       if (useIssueReviewStore.getState().fixingIssueNumber !== null) return;
@@ -1107,14 +1135,32 @@ function XyFlowCanvasInner() {
       const issueStore = useIssueStore.getState();
       const issue = issueStore.getIssue(issueNumber);
       if (!issue) return;
-      const pr = useIssueReviewStore.getState().prsByIssue[issueNumber];
+      const reviewStore = useIssueReviewStore.getState();
+      // The exact PR that asked for changes: prNumber (multi-PR menu) or the
+      // issue's primary PR (footer button / single-PR issues).
+      const pr =
+        prNumber !== undefined
+          ? (reviewStore.openPrsByIssue[issueNumber] ?? []).find(
+              (p) => p.number === prNumber,
+            )
+          : reviewStore.prsByIssue[issueNumber];
       if (!pr || typeof pr === "string") return;
       // Gate on the persisted cycle label (source of truth) with the
-      // in-memory verdict as fallback, mirroring the context menu.
-      const effective = effectiveReviewLabel(
-        useIssueReviewStore.getState().labelsByIssue[issueNumber] ?? [],
-        useIssueReviewStore.getState().verdictByIssue[issueNumber],
-      );
+      // in-memory verdict as fallback, mirroring the context menu. The
+      // per-PR verdict/labels win over the primary when a specific PR was
+      // targeted.
+      const prLabels =
+        prNumber !== undefined
+          ? reviewStore.labelsByPr[issueNumber]?.[prNumber] ??
+            reviewStore.labelsByIssue[issueNumber] ??
+            []
+          : reviewStore.labelsByIssue[issueNumber] ?? [];
+      const prVerdict =
+        prNumber !== undefined
+          ? reviewStore.verdictByPr[issueNumber]?.[prNumber] ??
+            reviewStore.verdictByIssue[issueNumber]
+          : reviewStore.verdictByIssue[issueNumber];
+      const effective = effectiveReviewLabel(prLabels, prVerdict);
       if (effective !== REVIEW_LABEL_CHANGES) return;
       // Measure the actual issue card DOM rect and convert to flow coords —
       // same placement contract as RESOLVER ISSUE / REVISAR SOLUCIÓN.
@@ -1170,10 +1216,16 @@ function XyFlowCanvasInner() {
           useProjectStore.getState().setFocusedTerminal(terminalId);
           centerOnFixTerminal(terminalId);
           // The fix is underway — flip the badge so the button disappears
-          // until the reviewer takes another look.
+          // until the reviewer takes another look. Mirror per-PR when the
+          // fix targeted a specific PR.
           useIssueReviewStore
             .getState()
             .setReviewVerdict(issue.issueNumber, "FIX_APPLIED");
+          if (prNumber !== undefined) {
+            useIssueReviewStore
+              .getState()
+              .setPrVerdict(issue.issueNumber, prNumber, "FIX_APPLIED");
+          }
         })
         .finally(() => {
           useIssueReviewStore.getState().setFixingIssueNumber(null);
@@ -1189,7 +1241,7 @@ function XyFlowCanvasInner() {
   // updates the existing PR. The conflict flag stays until the agent removes
   // the label.
   const handleResolveConflict = useCallback(
-    (issueNumber: number) => {
+    (issueNumber: number, prNumber?: number) => {
       if (
         useIssueReviewStore.getState().resolvingConflictIssueNumber !== null
       ) {
@@ -1203,9 +1255,19 @@ function XyFlowCanvasInner() {
       const issueStore = useIssueStore.getState();
       const issue = issueStore.getIssue(issueNumber);
       if (!issue) return;
-      const pr = useIssueReviewStore.getState().prsByIssue[issueNumber];
+      const reviewStore = useIssueReviewStore.getState();
+      const pr =
+        prNumber !== undefined
+          ? (reviewStore.openPrsByIssue[issueNumber] ?? []).find(
+              (p) => p.number === prNumber,
+            )
+          : reviewStore.prsByIssue[issueNumber];
       if (!pr || typeof pr === "string") return;
-      if (!useIssueReviewStore.getState().conflictByIssue[issueNumber]) return;
+      const conflicted =
+        prNumber !== undefined
+          ? reviewStore.conflictByPr[issueNumber]?.[prNumber] ?? false
+          : reviewStore.conflictByIssue[issueNumber] === true;
+      if (!conflicted) return;
       // Measure the actual issue card DOM rect and convert to flow coords —
       // same placement contract as RESOLVER ISSUE / REVISAR SOLUCIÓN.
       const issueNodeId = `issue-${issue.issueNumber}`;
@@ -1273,21 +1335,35 @@ function XyFlowCanvasInner() {
   // context menu gates it); a merge needs no terminal — the action runs
   // directly against GitHub and the verdict badge is cleared on success.
   const handleMergeIssue = useCallback(
-    (issueNumber: number) => {
+    (issueNumber: number, prNumber?: number) => {
       if (useIssueReviewStore.getState().mergingIssueNumber !== null) return;
       const target = resolveContextMenuTarget();
       if (!target) return;
       const issueStore = useIssueStore.getState();
       const issue = issueStore.getIssue(issueNumber);
       if (!issue) return;
-      const pr = useIssueReviewStore.getState().prsByIssue[issueNumber];
+      const reviewStore = useIssueReviewStore.getState();
+      const pr =
+        prNumber !== undefined
+          ? (reviewStore.openPrsByIssue[issueNumber] ?? []).find(
+              (p) => p.number === prNumber,
+            )
+          : reviewStore.prsByIssue[issueNumber];
       if (!pr || typeof pr === "string") return;
       // Gate on the persisted cycle label (source of truth) with the
       // in-memory verdict as fallback, mirroring the context menu.
-      const effective = effectiveReviewLabel(
-        useIssueReviewStore.getState().labelsByIssue[issueNumber] ?? [],
-        useIssueReviewStore.getState().verdictByIssue[issueNumber],
-      );
+      const prLabels =
+        prNumber !== undefined
+          ? reviewStore.labelsByPr[issueNumber]?.[prNumber] ??
+            reviewStore.labelsByIssue[issueNumber] ??
+            []
+          : reviewStore.labelsByIssue[issueNumber] ?? [];
+      const prVerdict =
+        prNumber !== undefined
+          ? reviewStore.verdictByPr[issueNumber]?.[prNumber] ??
+            reviewStore.verdictByIssue[issueNumber]
+          : reviewStore.verdictByIssue[issueNumber];
+      const effective = effectiveReviewLabel(prLabels, prVerdict);
       if (effective !== REVIEW_LABEL_APPROVED) return;
       useIssueActivityStore
         .getState()
@@ -1303,6 +1379,11 @@ function XyFlowCanvasInner() {
             useIssueReviewStore
               .getState()
               .setReviewVerdict(issue.issueNumber, null);
+            if (prNumber !== undefined) {
+              useIssueReviewStore
+                .getState()
+                .setPrVerdict(issue.issueNumber, prNumber, null);
+            }
             // Force a re-read of the PR so the card leaves the approved
             // state immediately (the PR is now merged; the session cache
             // would otherwise keep it APPROVED forever).
@@ -1346,9 +1427,17 @@ function XyFlowCanvasInner() {
     const notify = useNotificationStore.getState().notify;
     reviewStore.setMergingApprovedPrs(true);
     const issueForPr = (prNumber: number): number | undefined => {
-      const prs = useIssueReviewStore.getState().prsByIssue;
-      for (const [issueNumber, status] of Object.entries(prs)) {
+      const state = useIssueReviewStore.getState();
+      for (const [issueNumber, status] of Object.entries(state.prsByIssue)) {
         if (status && typeof status === "object" && status.number === prNumber) {
+          return Number(issueNumber);
+        }
+      }
+      // Multi-PR: a merged PR may not be the issue's primary — scan the full
+      // open-PR lists too so its verdict/conflict update lands on the right
+      // issue card.
+      for (const [issueNumber, prs] of Object.entries(state.openPrsByIssue)) {
+        if (prs.some((p) => p.number === prNumber)) {
           return Number(issueNumber);
         }
       }
@@ -1368,6 +1457,9 @@ function XyFlowCanvasInner() {
             useIssueReviewStore
               .getState()
               .setReviewVerdict(issueNumber, null);
+            useIssueReviewStore
+              .getState()
+              .setPrVerdict(issueNumber, prNumber, null);
           }
         }
         for (const conflict of conflicted) {
@@ -1376,6 +1468,9 @@ function XyFlowCanvasInner() {
             useIssueReviewStore
               .getState()
               .setConflictStatus(issueNumber, true);
+            useIssueReviewStore
+              .getState()
+              .setPrConflict(issueNumber, conflict.number, true);
           }
         }
         console.log(
@@ -2055,17 +2150,31 @@ function XyFlowCanvasInner() {
       )}
 
       {issueContextMenu && (() => {
-        const menuPrState = issuePrs[issueContextMenu.issueNumber];
-        const menuVerdict = issueVerdicts[issueContextMenu.issueNumber];
+        const issueNumber = issueContextMenu.issueNumber;
+        const menuPrState = issuePrs[issueNumber];
+        const menuVerdict = issueVerdicts[issueNumber];
+        const openPrs = issueOpenPrs[issueNumber] ?? [];
         // The menu gates derive from the PR's persisted cycle label (source
         // of truth) with the in-memory verdict as fallback: an approved PR
         // whose label flip was missed would otherwise show MERGEAR PR with
         // no approval, and a changes-requested review would hide IMPLEMENTAR
         // FIX forever.
         const menuEffective = effectiveReviewLabel(
-          issueLabels[issueContextMenu.issueNumber] ?? [],
+          issueLabels[issueNumber] ?? [],
           menuVerdict,
         );
+        // Per-PR effective cycle state for multi-PR issues, so each open PR
+        // gets its own fix/merge/conflict/review actions instead of the menu
+        // acting only on the primary PR.
+        const prEffective = (prNumber: number) =>
+          effectiveReviewLabel(
+            issueLabelsByPr[issueNumber]?.[prNumber] ??
+              issueLabels[issueNumber] ??
+              [],
+            issueVerdictsByPr[issueNumber]?.[prNumber] ??
+              issueVerdicts[issueNumber] ??
+              null,
+          );
         return (
         <ContextMenu
           x={issueContextMenu.clientX}
@@ -2073,7 +2182,7 @@ function XyFlowCanvasInner() {
           items={[
             {
               label: isResolving ? "Resolviendo issue..." : "RESOLVER ISSUE",
-              onClick: () => handleResolveIssue(issueContextMenu.issueNumber),
+              onClick: () => handleResolveIssue(issueNumber),
             },
             (() => {
               if (menuPrState === "loading") {
@@ -2093,66 +2202,129 @@ function XyFlowCanvasInner() {
               return {
                 label: isReviewing
                   ? "Revisando solución..."
-                  : `REVISAR SOLUCIÓN (PR #${menuPrState.number})`,
+                  : openPrs.length > 1
+                    ? `REVISAR SOLUCIÓN (${openPrs.length} PRs)`
+                    : `REVISAR SOLUCIÓN (PR #${menuPrState.number})`,
                 disabled: isReviewing ? (true as const) : undefined,
-                onClick: () => handleReviewIssue(issueContextMenu.issueNumber),
+                onClick: () => handleReviewIssue(issueNumber),
               };
             })(),
-            // IMPLEMENTAR FIX only exists when the last review asked for
-            // changes: inline comments without a verdict (COMMENTED) or an
-            // explicit request-changes. Approved or never-reviewed PRs have
-            // no fix button.
-            ...(menuEffective === REVIEW_LABEL_CHANGES
-              ? [
-                  {
-                    label: fixingIssueNumber !== null
+            // Per-PR actions. Each open PR of the issue gets its own line:
+            // re-review just that PR, apply its fix, resolve its conflict or
+            // merge it — without touching the other open PRs.
+            ...openPrs.flatMap((pr) => {
+              const effective = prEffective(pr.number);
+              const conflicted =
+                issueConflictsByPr[issueNumber]?.[pr.number] ?? false;
+              const items: Array<{
+                label: string;
+                disabled?: boolean;
+                onClick: () => void;
+              }> = [];
+              if (openPrs.length > 1) {
+                items.push({
+                  label: isReviewing
+                    ? "Revisando..."
+                    : `REVISAR SOLO PR #${pr.number}`,
+                  disabled: isReviewing ? (true as const) : undefined,
+                  onClick: () => handleReviewIssue(issueNumber, pr.number),
+                });
+              }
+              if (effective === REVIEW_LABEL_CHANGES) {
+                items.push({
+                  label:
+                    fixingIssueNumber !== null
                       ? "Aplicando fix..."
-                      : "IMPLEMENTAR FIX",
-                    disabled: fixingIssueNumber !== null
-                      ? (true as const)
-                      : undefined,
-                    onClick: () => handleFixIssue(issueContextMenu.issueNumber),
-                  } as const,
-                ]
-              : []),
-            // RESOLVER CONFLICTO only exists when the mergeador flagged the
-            // PR with the "conflicto:main" label: the bulk merge found
-            // conflicts against main and left a [mergeador] comment listing
-            // the files. The flag clears when the agent removes the label.
-            ...(issueConflicts[issueContextMenu.issueNumber] === true &&
-            menuPrState !== null &&
-            menuPrState !== "loading"
-              ? [
-                  {
-                    label: resolvingConflictIssueNumber !== null
+                      : `IMPLEMENTAR FIX (PR #${pr.number})`,
+                  disabled:
+                    fixingIssueNumber !== null ? (true as const) : undefined,
+                  onClick: () => handleFixIssue(issueNumber, pr.number),
+                });
+              }
+              if (conflicted && pr.state === "OPEN") {
+                items.push({
+                  label:
+                    resolvingConflictIssueNumber !== null
                       ? "Resolviendo conflicto..."
-                      : "RESOLVER CONFLICTO",
-                    disabled: resolvingConflictIssueNumber !== null
+                      : `RESOLVER CONFLICTO (PR #${pr.number})`,
+                  disabled:
+                    resolvingConflictIssueNumber !== null
                       ? (true as const)
                       : undefined,
-                    onClick: () =>
-                      handleResolveConflict(issueContextMenu.issueNumber),
-                  } as const,
-                ]
-              : []),
-            // MERGEAR PR only exists when the PR carries the approved cycle
-            // label (the persisted source of truth, with the in-memory
-            // verdict as fallback) and is still open. Never shown for
-            // fixable verdicts (COMMENTED/CHANGES_REQUESTED).
-            ...(menuEffective === REVIEW_LABEL_APPROVED &&
-            menuPrState !== null &&
-            menuPrState !== "loading"
-              ? [
-                  {
-                    label: mergingIssueNumber !== null
+                  onClick: () =>
+                    handleResolveConflict(issueNumber, pr.number),
+                });
+              }
+              if (
+                effective === REVIEW_LABEL_APPROVED &&
+                pr.state === "OPEN"
+              ) {
+                items.push({
+                  label:
+                    mergingIssueNumber !== null
                       ? "Mergeando PR..."
-                      : `MERGEAR PR (#${menuPrState.number})`,
-                    disabled: mergingIssueNumber !== null
-                      ? (true as const)
-                      : undefined,
-                    onClick: () =>
-                      handleMergeIssue(issueContextMenu.issueNumber),
-                  } as const,
+                      : `MERGEAR PR #${pr.number}`,
+                  disabled:
+                    mergingIssueNumber !== null ? (true as const) : undefined,
+                  onClick: () => handleMergeIssue(issueNumber, pr.number),
+                });
+              }
+              return items;
+            }),
+            // Legacy single-PR actions for issues whose open-PR lookup has
+            // not landed yet (menu opened before checkLinkedPr resolves): the
+            // primary PR's fix/merge/conflict as before.
+            ...(openPrs.length === 0
+              ? [
+                  ...(menuEffective === REVIEW_LABEL_CHANGES
+                    ? [
+                        {
+                          label:
+                            fixingIssueNumber !== null
+                              ? "Aplicando fix..."
+                              : "IMPLEMENTAR FIX",
+                          disabled:
+                            fixingIssueNumber !== null
+                              ? (true as const)
+                              : undefined,
+                          onClick: () => handleFixIssue(issueNumber),
+                        } as const,
+                      ]
+                    : []),
+                  ...(issueConflicts[issueNumber] === true &&
+                  menuPrState !== null &&
+                  menuPrState !== "loading"
+                    ? [
+                        {
+                          label:
+                            resolvingConflictIssueNumber !== null
+                              ? "Resolviendo conflicto..."
+                              : "RESOLVER CONFLICTO",
+                          disabled:
+                            resolvingConflictIssueNumber !== null
+                              ? (true as const)
+                              : undefined,
+                          onClick: () => handleResolveConflict(issueNumber),
+                        } as const,
+                      ]
+                    : []),
+                  ...(menuEffective === REVIEW_LABEL_APPROVED &&
+                  menuPrState !== null &&
+                  menuPrState !== "loading"
+                    ? [
+                        {
+                          label:
+                            mergingIssueNumber !== null
+                              ? "Mergeando PR..."
+                              : `MERGEAR PR (#${menuPrState.number})`,
+                          disabled:
+                            mergingIssueNumber !== null
+                              ? (true as const)
+                              : undefined,
+                          onClick: () => handleMergeIssue(issueNumber),
+                        } as const,
+                      ]
+                    : []),
                 ]
               : []),
           ]}

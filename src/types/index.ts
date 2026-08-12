@@ -1140,6 +1140,23 @@ export interface TermCanvasAPI {
         }
       | { ok: false; error: string }
     >;
+    findOpenPrsForIssue: (
+      cwd: string,
+      issueNumber: number,
+    ) => Promise<
+      | {
+          ok: true;
+          prs: {
+            number: number;
+            title: string;
+            url: string;
+            state: string;
+            headRefName: string;
+            headRefOid: string;
+          }[];
+        }
+      | { ok: false; error: string }
+    >;
     getPrReviewDecision: (
       cwd: string,
       prNumber: number,

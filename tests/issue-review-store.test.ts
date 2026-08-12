@@ -19,7 +19,13 @@ const openPr = {
 function resetStore() {
   useIssueReviewStore.setState({
     prsByIssue: {},
+    openPrsByIssue: {},
     verdictByIssue: {},
+    verdictByPr: {},
+    labelsByPr: {},
+    conflictByPr: {},
+    conflictByIssue: {},
+    labelsByIssue: {},
     reviewingIssueNumber: null,
     fixingIssueNumber: null,
     mergingIssueNumber: null,
@@ -340,4 +346,59 @@ test("dismissMergeProgress: closes the panel without affecting other state", () 
   });
   useIssueReviewStore.getState().dismissMergeProgress();
   assert.equal(useIssueReviewStore.getState().mergeProgress, null);
+});
+
+test("setOpenPrs: stores the full open-PR list per issue without cross-issue leaks", () => {
+  resetStore();
+  const pr2 = { ...openPr, number: 100, headRefName: "issue-42-alt" };
+  useIssueReviewStore.getState().setOpenPrs(42, [openPr, pr2]);
+  assert.deepEqual(
+    useIssueReviewStore.getState().openPrsByIssue[42],
+    [openPr, pr2],
+  );
+  assert.equal(
+    useIssueReviewStore.getState().openPrsByIssue[7],
+    undefined,
+    "other issues must not inherit the PR list",
+  );
+  useIssueReviewStore.getState().setOpenPrs(42, [openPr]);
+  assert.equal(
+    useIssueReviewStore.getState().openPrsByIssue[42].length,
+    1,
+    "a refresh replaces the list",
+  );
+});
+
+test("setPrVerdict: stores the verdict per (issue, PR) without conflating PRs", () => {
+  resetStore();
+  const store = useIssueReviewStore.getState();
+  store.setPrVerdict(42, 99, "CHANGES_REQUESTED");
+  store.setPrVerdict(42, 100, "APPROVED");
+  assert.equal(useIssueReviewStore.getState().verdictByPr[42][99], "CHANGES_REQUESTED");
+  assert.equal(useIssueReviewStore.getState().verdictByPr[42][100], "APPROVED");
+  assert.equal(
+    useIssueReviewStore.getState().verdictByPr[7],
+    undefined,
+    "other issues must not inherit per-PR verdicts",
+  );
+  store.setPrVerdict(42, 99, null);
+  assert.equal(useIssueReviewStore.getState().verdictByPr[42][99], null);
+});
+
+test("setPrLabels / setPrConflict: per-PR cycle labels and conflict flags", () => {
+  resetStore();
+  const store = useIssueReviewStore.getState();
+  store.setPrLabels(42, 99, ["review:comentado"]);
+  store.setPrLabels(42, 100, ["review:aprobado"]);
+  assert.deepEqual(useIssueReviewStore.getState().labelsByPr[42][99], ["review:comentado"]);
+  assert.deepEqual(useIssueReviewStore.getState().labelsByPr[42][100], ["review:aprobado"]);
+  store.setPrConflict(42, 99, true);
+  store.setPrConflict(42, 100, false);
+  assert.equal(useIssueReviewStore.getState().conflictByPr[42][99], true);
+  assert.equal(useIssueReviewStore.getState().conflictByPr[42][100], false);
+  assert.equal(
+    useIssueReviewStore.getState().labelsByPr[7],
+    undefined,
+    "labels must not leak across issues",
+  );
 });

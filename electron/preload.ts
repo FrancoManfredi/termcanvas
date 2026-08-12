@@ -874,6 +874,21 @@ contextBridge.exposeInMainWorld("termcanvas", {
           }
         | { ok: false; error: string }
       >,
+    findOpenPrsForIssue: (cwd: string, issueNumber: number) =>
+      ipcRenderer.invoke("github:find-open-prs-for-issue", cwd, issueNumber) as Promise<
+        | {
+            ok: true;
+            prs: {
+              number: number;
+              title: string;
+              url: string;
+              state: string;
+              headRefName: string;
+              headRefOid: string;
+            }[];
+          }
+        | { ok: false; error: string }
+      >,
     getPrReviewDecision: (cwd: string, prNumber: number) =>
       ipcRenderer.invoke("github:get-pr-review-decision", cwd, prNumber) as Promise<
         | {

@@ -41,7 +41,6 @@ const builders: Array<{ name: string; build: () => string }> = [
       buildIssueReviewPrompt({
         issueNumber: 1,
         title: "Issue title",
-        body: "Body",
         prNumber: 12,
         branch: "issue-1",
         repoPath: REPO_PATH,
@@ -102,7 +101,6 @@ test("without a repo path the prompts are unchanged (no empty section)", () => {
     review: buildIssueReviewPrompt({
       issueNumber: 1,
       title: "Issue title",
-      body: "Body",
       prNumber: 12,
       branch: "issue-1",
     }),

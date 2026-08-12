@@ -141,7 +141,19 @@ export function applyMergeProgressEvent(
 
 interface IssueReviewStore {
   prsByIssue: Record<number, PrStatus>;
+  // Every open PR linked to the issue (finding-all IPC). The legacy
+  // prsByIssue holds the FIRST open PR — the card's primary — while this
+  // list powers per-PR actions (fix/merge/conflict on the RIGHT PR) and the
+  // per-PR verdict/label maps below.
+  openPrsByIssue: Record<number, LinkedPr[]>;
   verdictByIssue: Record<number, ReviewVerdict | null>;
+  // Per-PR verdict for multi-PR issues: verdictByIssue only ever holds the
+  // primary PR's verdict (last review to exit wins), which conflates two PRs
+  // that were reviewed differently. These maps keep the verdict (and the raw
+  // cycle labels) per PR so the context menu can act on each one correctly.
+  verdictByPr: Record<number, Record<number, ReviewVerdict | null>>;
+  labelsByPr: Record<number, Record<number, string[]>>;
+  conflictByPr: Record<number, Record<number, boolean>>;
   conflictByIssue: Record<number, boolean>;
   // Raw cycle labels of the linked PR, re-read on every lookup. The labels
   // are the persisted source of truth for the review-cycle state (the card
@@ -153,28 +165,40 @@ interface IssueReviewStore {
   mergingIssueNumber: number | null;
   mergingApprovedPrs: boolean;
   resolvingConflictIssueNumber: number | null;
-  reviewHandler: ((issueNumber: number) => void) | null;
-  fixHandler: ((issueNumber: number) => void) | null;
-  mergeHandler: ((issueNumber: number) => void) | null;
+  reviewHandler: ((issueNumber: number, prNumber?: number) => void) | null;
+  fixHandler: ((issueNumber: number, prNumber?: number) => void) | null;
+  mergeHandler: ((issueNumber: number, prNumber?: number) => void) | null;
   prLookupHandler:
     | ((issueNumber: number, projectPath?: string, force?: boolean) => void)
     | null;
   registerReviewHandler: (
-    handler: ((issueNumber: number) => void) | null,
+    handler: ((issueNumber: number, prNumber?: number) => void) | null,
   ) => void;
   registerFixHandler: (
-    handler: ((issueNumber: number) => void) | null,
+    handler: ((issueNumber: number, prNumber?: number) => void) | null,
   ) => void;
   registerMergeHandler: (
-    handler: ((issueNumber: number) => void) | null,
+    handler: ((issueNumber: number, prNumber?: number) => void) | null,
   ) => void;
   registerPrLookupHandler: (
     handler: ((issueNumber: number, projectPath?: string, force?: boolean) => void) | null,
   ) => void;
   setPrStatus: (issueNumber: number, status: PrStatus) => void;
+  setOpenPrs: (issueNumber: number, prs: LinkedPr[]) => void;
   setReviewVerdict: (
     issueNumber: number,
     verdict: ReviewVerdict | null,
+  ) => void;
+  setPrVerdict: (
+    issueNumber: number,
+    prNumber: number,
+    verdict: ReviewVerdict | null,
+  ) => void;
+  setPrLabels: (issueNumber: number, prNumber: number, labels: string[]) => void;
+  setPrConflict: (
+    issueNumber: number,
+    prNumber: number,
+    conflicted: boolean,
   ) => void;
   setConflictStatus: (issueNumber: number, conflicted: boolean) => void;
   setIssueLabels: (issueNumber: number, labels: string[]) => void;
@@ -195,7 +219,11 @@ interface IssueReviewStore {
 
 export const useIssueReviewStore = create<IssueReviewStore>((set, get) => ({
   prsByIssue: {},
+  openPrsByIssue: {},
   verdictByIssue: {},
+  verdictByPr: {},
+  labelsByPr: {},
+  conflictByPr: {},
   conflictByIssue: {},
   labelsByIssue: {},
   reviewingIssueNumber: null,
@@ -215,9 +243,43 @@ export const useIssueReviewStore = create<IssueReviewStore>((set, get) => ({
     set((s) => ({
       prsByIssue: { ...s.prsByIssue, [issueNumber]: status },
     })),
+  setOpenPrs: (issueNumber, prs) =>
+    set((s) => ({
+      openPrsByIssue: { ...s.openPrsByIssue, [issueNumber]: prs },
+    })),
   setReviewVerdict: (issueNumber, verdict) =>
     set((s) => ({
       verdictByIssue: { ...s.verdictByIssue, [issueNumber]: verdict },
+    })),
+  setPrVerdict: (issueNumber, prNumber, verdict) =>
+    set((s) => ({
+      verdictByPr: {
+        ...s.verdictByPr,
+        [issueNumber]: {
+          ...s.verdictByPr[issueNumber],
+          [prNumber]: verdict,
+        },
+      },
+    })),
+  setPrLabels: (issueNumber, prNumber, labels) =>
+    set((s) => ({
+      labelsByPr: {
+        ...s.labelsByPr,
+        [issueNumber]: {
+          ...s.labelsByPr[issueNumber],
+          [prNumber]: labels,
+        },
+      },
+    })),
+  setPrConflict: (issueNumber, prNumber, conflicted) =>
+    set((s) => ({
+      conflictByPr: {
+        ...s.conflictByPr,
+        [issueNumber]: {
+          ...s.conflictByPr[issueNumber],
+          [prNumber]: conflicted,
+        },
+      },
     })),
   setConflictStatus: (issueNumber, conflicted) =>
     set((s) => ({

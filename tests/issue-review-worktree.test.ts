@@ -58,7 +58,7 @@ const openPr = {
   headRefOid: "abc123",
 };
 
-test("reviewIssueWorktree: happy path creates a detached review worktree + terminal without autoApprove", async () => {
+test("reviewIssueWorktree: happy path creates a detached review worktree + terminal with autoApprove (--auto)", async () => {
   const createReviewWorktreeCalls: string[] = [];
   const createBaseNameCalls: string[] = [];
   const terminalCalls: Array<{
@@ -99,7 +99,7 @@ test("reviewIssueWorktree: happy path creates a detached review worktree + termi
         ],
       };
     },
-    findPrForIssue: async (_cwd, _number) => ({ ok: true, pr: openPr }),
+    findOpenPrsForIssue: async () => ({ ok: true, prs: [openPr] }),
     createTerminal: (opts) => {
       terminalCalls.push({
         worktreeId: opts.worktreeId,
@@ -126,10 +126,10 @@ test("reviewIssueWorktree: happy path creates a detached review worktree + termi
   assert.equal(createBaseNameCalls.length, 1);
   assert.equal(createBaseNameCalls[0], "issue-42-fix-login-bug", "review worktree must inherit the PR head branch name, not the focused worktree");
   assert.equal(createReviewWorktreeCalls[0], "issue-42-fix-login-bug", "should create review worktree at PR head branch");
-  assert.equal(result.pr?.number, 99);
+  assert.equal(result.prs?.[0]?.number, 99);
   assert.equal(terminalCalls.length, 1);
   assert.equal(terminalCalls[0].worktreeId, "w-review");
-  assert.equal(terminalCalls[0].autoApprove, false, "review terminal must NOT use --auto");
+  assert.equal(terminalCalls[0].autoApprove, true, "review terminal must run with --auto");
   assert.equal(terminalCalls[0].reviewIssueNumber, 42, "review terminal must carry reviewIssueNumber for cleanup");
   assert.equal(terminalCalls[0].reviewPrNumber, 99, "review terminal must carry PR number to persist the verdict");
   assert.equal(terminalCalls[0].issueNumber, 42);
@@ -173,7 +173,7 @@ test("reviewIssueWorktree: no linked PR warns and aborts before creating anythin
       createReviewWorktreeCalls.push("should not be called");
       return { ok: true, path: "/repo/x", worktrees: [] };
     },
-    findPrForIssue: async () => ({ ok: true, pr: null }),
+    findOpenPrsForIssue: async () => ({ ok: true, prs: [] }),
     createTerminal: (opts) => {
       terminalCalls.push(opts);
       return { id: "x" };
@@ -184,12 +184,12 @@ test("reviewIssueWorktree: no linked PR warns and aborts before creating anythin
   });
 
   assert.equal(result.ok, false);
-  assert.equal(result.pr, null);
+  assert.equal(result.prs?.length, 0);
   assert.equal(createReviewWorktreeCalls.length, 0, "should NOT create a worktree without a PR");
   assert.equal(terminalCalls.length, 0, "should NOT create a terminal without a PR");
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0].type, "warn");
-  assert.ok(notifications[0].message.includes("no linked PR"));
+  assert.ok(notifications[0].message.includes("no open linked PR"));
 });
 
 test("reviewIssueWorktree: PR lookup failure toasts and aborts", async () => {
@@ -202,7 +202,7 @@ test("reviewIssueWorktree: PR lookup failure toasts and aborts", async () => {
     getProject: () => makeProject(),
     syncWorktrees: () => {},
     createReviewWorktree: async () => ({ ok: true, path: "/repo/x", worktrees: [] }),
-    findPrForIssue: async () => ({ ok: false, error: "gh not authenticated" }),
+    findOpenPrsForIssue: async () => ({ ok: false, error: "gh not authenticated" }),
     createTerminal: (opts) => {
       terminalCalls.push(opts);
       return { id: "x" };
@@ -232,7 +232,7 @@ test("reviewIssueWorktree: create failure toasts and aborts", async () => {
       ok: false,
       error: "fatal: could not create worktree",
     }),
-    findPrForIssue: async () => ({ ok: true, pr: openPr }),
+    findOpenPrsForIssue: async () => ({ ok: true, prs: [openPr] }),
     createTerminal: (opts) => {
       terminalCalls.push(opts);
       return { id: "x" };
@@ -273,7 +273,7 @@ test("reviewIssueWorktree: matches review worktree despite Windows path separato
         { path: "C:/repo/.worktrees/repo-review", branch: "(detached)", isPrimary: false },
       ],
     }),
-    findPrForIssue: async () => ({ ok: true, pr: openPr }),
+    findOpenPrsForIssue: async () => ({ ok: true, prs: [openPr] }),
     createTerminal: (opts) => {
       terminalCalls.push({ worktreeId: opts.worktreeId });
       return { id: "term-win-review" };
@@ -297,7 +297,7 @@ test("reviewIssueWorktree: missing issue returns error", async () => {
     getProject: () => makeProject(),
     syncWorktrees: () => {},
     createReviewWorktree: async () => ({ ok: true, path: "/repo", worktrees: [] }),
-    findPrForIssue: async () => ({ ok: true, pr: openPr }),
+    findOpenPrsForIssue: async () => ({ ok: true, prs: [openPr] }),
     createTerminal: () => ({ id: "x" }),
     notify: () => {},
     issueNodeId: "issue-42",
@@ -334,7 +334,7 @@ test("reviewIssueWorktree: injects prefetched PR context into the prompt when th
         { path: "/repo/.worktrees/repo-review", branch: "(detached)", isPrimary: false },
       ],
     }),
-    findPrForIssue: async () => ({ ok: true, pr: openPr }),
+    findOpenPrsForIssue: async () => ({ ok: true, prs: [openPr] }),
     getReviewContext: async (_cwd, prNumber, targetDir) => {
       snapshotTargetDirs.push(targetDir);
       assert.equal(prNumber, 99);
@@ -419,7 +419,7 @@ test("reviewIssueWorktree: snapshot failure warns but does not block the review"
         { path: "/repo/.worktrees/repo-review", branch: "(detached)", isPrimary: false },
       ],
     }),
-    findPrForIssue: async () => ({ ok: true, pr: openPr }),
+    findOpenPrsForIssue: async () => ({ ok: true, prs: [openPr] }),
     getReviewContext: async () => ({ ok: false, error: "gh not authenticated" }),
     createTerminal: (opts) => {
       terminalCalls.push({ initialPrompt: opts.initialPrompt });
@@ -455,7 +455,7 @@ test("reviewIssueWorktree: skips the review when the last review already covered
       createReviewWorktreeCalls.push("should not be called");
       return { ok: true, path: "/repo/x", worktrees: [] };
     },
-    findPrForIssue: async () => ({ ok: true, pr: openPr }),
+    findOpenPrsForIssue: async () => ({ ok: true, prs: [openPr] }),
     getReviewContext: async () => ({
       ok: true,
       context: "",
@@ -511,7 +511,7 @@ test("reviewIssueWorktree: gate probe failure or missing commit id must not bloc
         { path: "/repo/.worktrees/repo-review", branch: "(detached)", isPrimary: false },
       ],
     }),
-    findPrForIssue: async () => ({ ok: true, pr: openPr }),
+    findOpenPrsForIssue: async () => ({ ok: true, prs: [openPr] }),
     // Probe answers, but a review without a commit id makes the OID comparison
     // impossible: the gate must yield and the review must proceed. The real
     // snapshot still yields its normal context.
@@ -542,11 +542,10 @@ test("reviewIssueWorktree: gate probe failure or missing commit id must not bloc
   assert.equal(notifications.length, 0);
 });
 
-test("buildIssueReviewPrompt: single line with issue body flattened", () => {
+test("buildIssueReviewPrompt: single line with strict mandatory issue-body read", () => {
   const prompt = buildIssueReviewPrompt({
     issueNumber: 7,
     title: "Broken button",
-    body: "First line\nSecond line",
     prNumber: 12,
     branch: "issue-7-broken-button",
     commitSha: "deadbeef",
@@ -556,7 +555,18 @@ test("buildIssueReviewPrompt: single line with issue body flattened", () => {
   assert.ok(prompt.includes("issue #7 — Broken button"));
   assert.ok(prompt.includes("gh pr view 12"));
   assert.ok(prompt.includes("gh pr diff 12"));
-  assert.ok(prompt.includes("First line Second line"), "body newlines flattened to spaces");
+  assert.ok(
+    prompt.includes("LECTURA OBLIGATORIA DEL ISSUE"),
+    "prompt must demand a strict mandatory read of the full issue body",
+  );
+  assert.ok(
+    prompt.includes("gh issue view 7 --json title,body"),
+    "prompt must name the exact gh command to read the full body",
+  );
+  assert.ok(
+    prompt.includes("PROHIBIDO armar la review sin haberlo leído"),
+    "reading the body must be enforced, not optional",
+  );
   assert.ok(prompt.includes("[review-7]"));
   assert.ok(
     prompt.includes("VEREDICTO: APROBADO o VEREDICTO: CAMBIOS_PEDIDOS"),
@@ -577,11 +587,29 @@ test("buildIssueReviewPrompt: single line with issue body flattened", () => {
   );
 });
 
+test("buildIssueReviewPrompt: never inlines the issue body text", () => {
+  const prompt = buildIssueReviewPrompt({
+    issueNumber: 7,
+    title: "Broken button",
+    prNumber: 12,
+    branch: "issue-7-broken-button",
+    commitSha: "deadbeef",
+  });
+
+  assert.ok(
+    !prompt.includes("First line Second line"),
+    "the flattened issue body must NOT be injected into the prompt",
+  );
+  assert.ok(
+    !prompt.includes("Users cannot log in"),
+    "no stray issue-body fragments in the prompt",
+  );
+});
+
 test("buildIssueReviewPrompt: instructs inline comments via REST API with commit sha", () => {
   const prompt = buildIssueReviewPrompt({
     issueNumber: 7,
     title: "Broken button",
-    body: "Body",
     prNumber: 12,
     branch: "issue-7-broken-button",
     commitSha: "deadbeef",
@@ -603,7 +631,6 @@ test("buildIssueReviewPrompt: Copilot-style anchored comments on PR-less files o
   const prompt = buildIssueReviewPrompt({
     issueNumber: 7,
     title: "Broken button",
-    body: "Body",
     prNumber: 12,
     branch: "issue-7-broken-button",
   });
@@ -629,7 +656,6 @@ test("buildIssueReviewPrompt: injects prefetched context without breaking the on
   const prompt = buildIssueReviewPrompt({
     issueNumber: 7,
     title: "Broken button",
-    body: "Body",
     prNumber: 12,
     branch: "issue-7-broken-button",
     commitSha: "deadbeef",
@@ -653,7 +679,6 @@ test("buildIssueReviewPrompt: prefetched review context keeps the one-line contr
   const prompt = buildIssueReviewPrompt({
     issueNumber: 7,
     title: "Broken button",
-    body: "Body",
     prNumber: 12,
     branch: "issue-7-broken-button",
     commitSha: "deadbeef",
@@ -673,7 +698,6 @@ test("buildIssueReviewPrompt: uses the pre-generated JSON skeleton when the app 
   const prompt = buildIssueReviewPrompt({
     issueNumber: 7,
     title: "Broken button",
-    body: "Body",
     prNumber: 12,
     branch: "issue-7-broken-button",
     commitSha: "deadbeef",
@@ -708,7 +732,6 @@ test("buildIssueReviewPrompt: no skeleton rule without the pre-generated templat
   const prompt = buildIssueReviewPrompt({
     issueNumber: 7,
     title: "Broken button",
-    body: "Body",
     prNumber: 12,
     branch: "issue-7-broken-button",
     commitSha: "deadbeef",
@@ -725,7 +748,6 @@ test("buildIssueReviewPrompt: two real rounds both post anchored reviews via /re
   const round1 = buildIssueReviewPrompt({
     issueNumber: 7,
     title: "Broken button",
-    body: "Body",
     prNumber: 12,
     branch: "issue-7-broken-button",
     commitSha: "aaaa111",
@@ -734,7 +756,6 @@ test("buildIssueReviewPrompt: two real rounds both post anchored reviews via /re
   const round2 = buildIssueReviewPrompt({
     issueNumber: 7,
     title: "Broken button",
-    body: "Body",
     prNumber: 12,
     branch: "issue-7-broken-button",
     commitSha: "bbbb222",
@@ -818,7 +839,7 @@ test("reviewIssueWorktree: prunes an abandoned review worktree left from a dead 
       };
     },
     isReviewWorktreeInUse: () => false,
-    findPrForIssue: async () => ({ ok: true, pr: prWithSameBranch }),
+    findOpenPrsForIssue: async () => ({ ok: true, prs: [prWithSameBranch] }),
     createTerminal: (opts) => {
       terminalCalls.push({ worktreeId: opts.worktreeId });
       return { id: "term-fresh" };
@@ -874,7 +895,7 @@ test("reviewIssueWorktree: keeps a review worktree the user is actively reviewin
       return { ok: true, worktrees: [] };
     },
     isReviewWorktreeInUse: () => true,
-    findPrForIssue: async () => ({ ok: true, pr: prWithBranch }),
+    findOpenPrsForIssue: async () => ({ ok: true, prs: [prWithBranch] }),
     createTerminal: (opts) => {
       terminalCalls.push({ worktreeId: opts.worktreeId });
       return { id: "term-live" };
@@ -887,4 +908,328 @@ test("reviewIssueWorktree: keeps a review worktree the user is actively reviewin
   assert.equal(result.ok, true);
   assert.equal(removeCalls.length, 0, "a worktree under an active review must NEVER be pruned");
   assert.equal(terminalCalls.length, 1);
+});
+
+test("reviewIssueWorktree: reviews EVERY open PR with one worktree + terminal per PR", async () => {
+  const pr1 = openPr;
+  const pr2 = {
+    ...openPr,
+    number: 100,
+    title: "Fix login bug (alternative)",
+    headRefName: "issue-42-alternative",
+    headRefOid: "def456",
+  };
+  const createCalls: string[] = [];
+  const terminalCalls: Array<{
+    worktreeId: string;
+    title: string;
+    reviewPrNumber?: number;
+    position: { x: number; y: number };
+  }> = [];
+  const arrows: Array<{ issueId: string; terminalId: string }> = [];
+
+  const project = makeProject();
+  const getProject = () => project;
+  let createCount = 0;
+  const mkPath = (baseName: string) => `/repo/.worktrees/${baseName}-review`;
+
+  const result = await reviewIssueWorktree({
+    issue: makeIssue(),
+    target: makeTarget(),
+    getProject,
+    syncWorktrees: (_path, worktrees) => {
+      project.worktrees = worktrees.map((w, i) => ({
+        id: i === 0 ? "w1" : `w-review-${createCount}`,
+        name: w.path,
+        path: w.path,
+      }));
+    },
+    createReviewWorktree: async (_repoPath, baseName, branch) => {
+      createCount += 1;
+      createCalls.push(branch);
+      const path = mkPath(baseName);
+      return {
+        ok: true,
+        path,
+        worktrees: [
+          { path: "/repo", branch: "main", isPrimary: true },
+          { path, branch: "(detached)", isPrimary: false },
+        ],
+      };
+    },
+    findOpenPrsForIssue: async () => ({ ok: true, prs: [pr1, pr2] }),
+    createTerminal: (opts) => {
+      terminalCalls.push({
+        worktreeId: opts.worktreeId,
+        title: opts.title,
+        reviewPrNumber: opts.reviewPrNumber,
+        position: opts.position,
+      });
+      return { id: `term-${opts.reviewPrNumber}` };
+    },
+    notify: (_type, _message) => {},
+    setResolveArrows: (fn) => {
+      const next = typeof fn === "function" ? fn(arrows) : fn;
+      arrows.length = 0;
+      arrows.push(...(next as typeof arrows));
+    },
+    issueNodeId: "issue-42",
+    position: { x: 100, y: 200 },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(createCalls.length, 2, "one review worktree per open PR");
+  assert.deepEqual(createCalls, ["issue-42-fix-login-bug", "issue-42-alternative"]);
+  assert.equal(terminalCalls.length, 2, "one review terminal per open PR");
+  assert.equal(terminalCalls[0].reviewPrNumber, 99);
+  assert.equal(terminalCalls[1].reviewPrNumber, 100);
+  assert.ok(terminalCalls[0].title.includes("PR #99"));
+  assert.ok(terminalCalls[1].title.includes("PR #100"));
+  assert.deepEqual(result.terminals?.map((t) => t.id), ["term-99", "term-100"]);
+  assert.deepEqual(terminalCalls[0].position, { x: 100, y: 200 });
+  assert.deepEqual(terminalCalls[1].position, { x: 124, y: 224 });
+  assert.equal(arrows.length, 2, "one arrow per review terminal");
+});
+
+test("reviewIssueWorktree: same head branch across PRs is disambiguated with a -pr<N> suffix", async () => {
+  const pr1 = openPr;
+  const pr2 = { ...openPr, number: 100 };
+  const createBaseNames: string[] = [];
+  const terminalCalls: Array<{ reviewPrNumber?: number }> = [];
+
+  const project = makeProject();
+  const getProject = () => project;
+  let createCount = 0;
+
+  const result = await reviewIssueWorktree({
+    issue: makeIssue(),
+    target: makeTarget(),
+    getProject,
+    syncWorktrees: (_path, worktrees) => {
+      project.worktrees = worktrees.map((w, i) => ({
+        id: i === 0 ? "w1" : `w-review-${createCount}`,
+        name: w.path,
+        path: w.path,
+      }));
+    },
+    createReviewWorktree: async (_repoPath, baseName, _branch) => {
+      createCount += 1;
+      createBaseNames.push(baseName);
+      const path = `/repo/.worktrees/${baseName}-review`;
+      return {
+        ok: true,
+        path,
+        worktrees: [
+          { path: "/repo", branch: "main", isPrimary: true },
+          { path, branch: "(detached)", isPrimary: false },
+        ],
+      };
+    },
+    findOpenPrsForIssue: async () => ({ ok: true, prs: [pr1, pr2] }),
+    createTerminal: (opts) => {
+      terminalCalls.push({ reviewPrNumber: opts.reviewPrNumber });
+      return { id: `term-${opts.reviewPrNumber}` };
+    },
+    notify: (_type, _message) => {},
+    issueNodeId: "issue-42",
+    position: { x: 100, y: 200 },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(terminalCalls.length, 2, "both PRs sharing a branch still get reviewed");
+  assert.deepEqual(createBaseNames, [
+    "issue-42-fix-login-bug",
+    "issue-42-fix-login-bug-pr100",
+  ]);
+});
+
+test("reviewIssueWorktree: all PRs skipped by the anti-duplicate gate → skipped result, nothing created", async () => {
+  const createCalls: unknown[] = [];
+  const terminalCalls: unknown[] = [];
+
+  const result = await reviewIssueWorktree({
+    issue: makeIssue(),
+    target: makeTarget(),
+    getProject: () => makeProject(),
+    syncWorktrees: () => {},
+    createReviewWorktree: async () => {
+      createCalls.push("should not be called");
+      return { ok: true, path: "/repo/x", worktrees: [] };
+    },
+    findOpenPrsForIssue: async () => ({
+      ok: true,
+      prs: [openPr, { ...openPr, number: 100 }],
+    }),
+    getReviewContext: async () => ({
+      ok: true,
+      context: "",
+      diffFilePath: null,
+      templateFilePath: null,
+      headRefOid: "abc123",
+      lastReviewCommitId: "abc123",
+    }),
+    createTerminal: (opts) => {
+      terminalCalls.push(opts);
+      return { id: "x" };
+    },
+    notify: () => {},
+    issueNodeId: "issue-42",
+    position: { x: 0, y: 0 },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.skipped, true, "every open PR already reviewed → skipped");
+  assert.equal(createCalls.length, 0);
+  assert.equal(terminalCalls.length, 0);
+  assert.equal(result.prs?.length, 2);
+});
+
+test("reviewIssueWorktree: one PR fails to create, the other still gets reviewed", async () => {
+  const pr2 = { ...openPr, number: 100, headRefName: "issue-42-alternative", headRefOid: "def456" };
+  const terminalCalls: Array<{ reviewPrNumber?: number }> = [];
+  const notifications: Array<{ type: string; message: string }> = [];
+
+  const project = makeProject();
+  const getProject = () => project;
+
+  const result = await reviewIssueWorktree({
+    issue: makeIssue(),
+    target: makeTarget(),
+    getProject,
+    syncWorktrees: () => {},
+    createReviewWorktree: async (_repoPath, baseName) => {
+      if (baseName === "issue-42-fix-login-bug") {
+        return { ok: false, error: "fatal: could not create worktree" };
+      }
+      const path = "/repo/.worktrees/issue-42-alternative-review";
+      project.worktrees = [
+        { id: "w1", name: "main", path: "/repo" },
+        { id: "w-review-2", name: "issue-42-alternative (review)", path },
+      ];
+      return {
+        ok: true,
+        path,
+        worktrees: [
+          { path: "/repo", branch: "main", isPrimary: true },
+          { path, branch: "(detached)", isPrimary: false },
+        ],
+      };
+    },
+    findOpenPrsForIssue: async () => ({
+      ok: true,
+      prs: [openPr, pr2],
+    }),
+    createTerminal: (opts) => {
+      terminalCalls.push({ reviewPrNumber: opts.reviewPrNumber });
+      return { id: `term-${opts.reviewPrNumber}` };
+    },
+    notify: (type, message) => notifications.push({ type, message }),
+    issueNodeId: "issue-42",
+    position: { x: 0, y: 0 },
+  });
+
+  assert.equal(result.ok, true, "one successful review keeps the run successful");
+  assert.equal(terminalCalls.length, 1);
+  assert.equal(terminalCalls[0].reviewPrNumber, 100);
+  assert.ok(
+    notifications.some(
+      (n) => n.type === "error" && n.message.includes("could not create worktree"),
+    ),
+    "the failed PR must be surfaced to the user",
+  );
+});
+
+test("reviewIssueWorktree: onlyPrNumber reviews just that PR, not the other open ones", async () => {
+  const pr2 = { ...openPr, number: 100, headRefName: "issue-42-alt", headRefOid: "def456" };
+  const createCalls: string[] = [];
+  const terminalCalls: Array<{ reviewPrNumber?: number }> = [];
+  const notifications: Array<{ type: string; message: string }> = [];
+
+  const project = makeProject();
+  const getProject = () => project;
+  let createCount = 0;
+
+  const result = await reviewIssueWorktree({
+    issue: makeIssue(),
+    target: makeTarget(),
+    getProject,
+    syncWorktrees: (_path, worktrees) => {
+      project.worktrees = worktrees.map((w, i) => ({
+        id: i === 0 ? "w1" : `w-review-${createCount}`,
+        name: w.path,
+        path: w.path,
+      }));
+    },
+    createReviewWorktree: async (_repoPath, baseName, _branch) => {
+      createCount += 1;
+      createCalls.push(baseName);
+      const path = `/repo/.worktrees/${baseName}-review`;
+      return {
+        ok: true,
+        path,
+        worktrees: [
+          { path: "/repo", branch: "main", isPrimary: true },
+          { path, branch: "(detached)", isPrimary: false },
+        ],
+      };
+    },
+    findOpenPrsForIssue: async () => ({
+      ok: true,
+      prs: [openPr, pr2],
+    }),
+    createTerminal: (opts) => {
+      terminalCalls.push({ reviewPrNumber: opts.reviewPrNumber });
+      return { id: `term-${opts.reviewPrNumber}` };
+    },
+    notify: (type, message) => notifications.push({ type, message }),
+    issueNodeId: "issue-42",
+    position: { x: 0, y: 0 },
+    onlyPrNumber: 100,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(terminalCalls.length, 1, "only the targeted PR is reviewed");
+  assert.equal(terminalCalls[0].reviewPrNumber, 100);
+  assert.equal(createCalls.length, 1);
+  assert.ok(
+    !createCalls.includes("issue-42-fix-login-bug"),
+    "the other open PR must not get a review worktree",
+  );
+  assert.equal(notifications.length, 0);
+});
+
+test("reviewIssueWorktree: onlyPrNumber warns when the PR is not an open PR of the issue", async () => {
+  const createCalls: unknown[] = [];
+  const terminalCalls: unknown[] = [];
+  const notifications: Array<{ type: string; message: string }> = [];
+
+  const result = await reviewIssueWorktree({
+    issue: makeIssue(),
+    target: makeTarget(),
+    getProject: () => makeProject(),
+    syncWorktrees: () => {},
+    createReviewWorktree: async () => {
+      createCalls.push("should not be called");
+      return { ok: true, path: "/repo/x", worktrees: [] };
+    },
+    findOpenPrsForIssue: async () => ({
+      ok: true,
+      prs: [openPr],
+    }),
+    createTerminal: (opts) => {
+      terminalCalls.push(opts);
+      return { id: "x" };
+    },
+    notify: (type, message) => notifications.push({ type, message }),
+    issueNodeId: "issue-42",
+    position: { x: 0, y: 0 },
+    onlyPrNumber: 500,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(terminalCalls.length, 0);
+  assert.equal(createCalls.length, 0);
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].type, "warn");
+  assert.ok(notifications[0].message.includes("no es un PR abierto"));
 });
