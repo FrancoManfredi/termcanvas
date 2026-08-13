@@ -6,6 +6,7 @@ import {
   buildGitWorktreeAddArgs,
   validateWorktreePath,
 } from "../hydra/src/spawn.ts";
+import { resolveMainRepoRoot } from "../hydra/src/worktree-path.ts";
 import type { ProjectStore } from "./project-store.ts";
 import { ensureProjectTracked } from "./project-sync.ts";
 
@@ -51,9 +52,12 @@ function getCurrentBranch(repoPath: string): string {
   }
 }
 
-function defaultWorktreePath(repoPath: string, branch: string): string {
+function defaultWorktreePath(mainRoot: string, branch: string): string {
+  // Always create under the MAIN repo's .worktrees. repoPath may be a
+  // linked worktree; nesting a worktree inside it blows Windows' MAX_PATH
+  // (260 chars) on long file names.
   return path.join(
-    repoPath,
+    mainRoot,
     ".worktrees",
     branch.replace(/[\\/]/g, "-"),
   );
@@ -71,9 +75,10 @@ export function createWorktreeControl(input: {
     },
     create({ repoPath, branch, worktreePath, baseBranch }) {
       const repo = path.resolve(repoPath);
+      const mainRoot = resolveMainRepoRoot(repo);
       const resolvedWorktree = validateWorktreePath(
-        repo,
-        worktreePath ? path.resolve(worktreePath) : defaultWorktreePath(repo, branch),
+        mainRoot,
+        worktreePath ? path.resolve(worktreePath) : defaultWorktreePath(mainRoot, branch),
       );
       const base = baseBranch?.trim() || getCurrentBranch(repo);
       execFileSync("git", buildGitWorktreeAddArgs(branch, resolvedWorktree, base), {

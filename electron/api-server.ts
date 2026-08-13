@@ -11,6 +11,7 @@ import {
   buildGitWorktreeAddArgs,
   validateWorktreePath,
 } from "../hydra/src/spawn";
+import { resolveMainRepoRoot } from "../hydra/src/worktree-path";
 import { PinStore, PinStoreError } from "./pin-store";
 import { resolveCanvasProjectRoot } from "./pin-project-resolver";
 import { renderPinToPng } from "./pin-render";
@@ -316,11 +317,15 @@ export class ApiServer {
     }
 
     const repo = path.resolve(repoInput);
+    // Anchor to the MAIN repo root: repoInput may be a linked worktree, and
+    // nesting a new worktree inside it blows Windows' MAX_PATH (260 chars)
+    // on long file names.
+    const mainRoot = resolveMainRepoRoot(repo);
     const resolvedWorktree = validateWorktreePath(
-      repo,
+      mainRoot,
       requestedPath
         ? path.resolve(requestedPath)
-        : path.join(repo, ".worktrees", branch.replace(/[\\/]/g, "-")),
+        : path.join(mainRoot, ".worktrees", branch.replace(/[\\/]/g, "-")),
     );
     const base = baseBranch?.trim() || this.getCurrentBranch(repo);
 

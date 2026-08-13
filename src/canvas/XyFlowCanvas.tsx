@@ -1519,12 +1519,14 @@ function XyFlowCanvasInner() {
     reviewStore.registerReviewHandler(handleReviewIssue);
     reviewStore.registerFixHandler(handleFixIssue);
     reviewStore.registerMergeHandler(handleMergeIssue);
+    reviewStore.registerResolveConflictHandler(handleResolveConflict);
     reviewStore.registerPrLookupHandler(checkLinkedPr);
     return () => {
       const current = useIssueReviewStore.getState();
       current.registerReviewHandler(null);
       current.registerFixHandler(null);
       current.registerMergeHandler(null);
+      current.registerResolveConflictHandler(null);
       current.registerPrLookupHandler(null);
     };
   }, [handleReviewIssue, handleFixIssue, handleMergeIssue, checkLinkedPr]);

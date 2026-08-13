@@ -66,11 +66,28 @@ export function IssueNode({ data }: NodeProps<IssueFlowNode>) {
   const resolvingIssueNumber = useIssueResolveStore(
     (s) => s.resolvingIssueNumber,
   );
-  const issueNumber = num(data.number);
+  const issueNumber = num(data?.number);
   const prStatus = useIssueReviewStore((s) => s.prsByIssue[issueNumber]);
+  // The primary PR's number for busy-state matching: prStatus is typed
+  // LinkedPr | "loading" | null, but the map entry can also be UNDEFINED
+  // before the first lookup lands — `!= null` covers both null and undefined.
+  const primaryPrNumber =
+    prStatus != null && prStatus !== "loading" ? prStatus.number : null;
   const reviewVerdict = useIssueReviewStore(
     (s) => s.verdictByIssue[issueNumber] ?? null,
   );
+  // Per-PR state for multi-PR issues: the full open-PR list and each PR's own
+  // verdict/labels/conflict flag drive the per-PR action buttons below (the
+  // legacy per-issue maps only ever hold the primary PR). Select the MAPS
+  // (stable references) and derive the per-issue arrays here — a selector
+  // like `map[n] ?? []` would return a fresh array on every evaluation,
+  // which useSyncExternalStore treats as a snapshot change and re-renders
+  // forever.
+  const openPrsByIssue = useIssueReviewStore((s) => s.openPrsByIssue);
+  const openPrs = openPrsByIssue?.[issueNumber] ?? [];
+  const verdictsByPr = useIssueReviewStore((s) => s.verdictByPr);
+  const labelsByPr = useIssueReviewStore((s) => s.labelsByPr);
+  const conflictsByPr = useIssueReviewStore((s) => s.conflictByPr);
   // Select the labels map itself (stable reference) and derive the issue's
   // array from it: a selector like `labelsByIssue[n] ?? []` would return a
   // fresh array on every evaluation, which useSyncExternalStore treats as a
@@ -83,36 +100,40 @@ export function IssueNode({ data }: NodeProps<IssueFlowNode>) {
   const reviewingIssueNumber = useIssueReviewStore(
     (s) => s.reviewingIssueNumber,
   );
+  const fixingIssueNumber = useIssueReviewStore((s) => s.fixingIssueNumber);
   const mergingIssueNumber = useIssueReviewStore(
     (s) => s.mergingIssueNumber,
+  );
+  const resolvingConflictIssueNumber = useIssueReviewStore(
+    (s) => s.resolvingConflictIssueNumber,
   );
   // Local activity log: select the map itself (stable reference) and derive
   // the per-issue array — same pattern as labelsByIssue above, to avoid a
   // fresh array snapshot on every evaluation. Keyed by the issue's own repo
   // path so activity from another PC (same repo) shows up on load.
-  const worktreePath = str((data as Record<string, unknown>).__worktreePath);
+  const worktreePath = str((data as Record<string, unknown> | undefined)?.__worktreePath);
   const activityByRepo = useIssueActivityStore((s) => s.activityByRepo);
   const activity = (worktreePath ? activityByRepo[worktreePath]?.[issueNumber] : undefined) ?? [];
-  const title = str(data.title, `Issue ${issueNumber}`);
-  const url = str(data.url);
-  const state = str(data.state, "OPEN");
-  const stateReason = str(data.stateReason);
-  const body = str(data.body);
-  const createdAt = str(data.createdAt);
-  const updatedAt = str(data.updatedAt);
-  const closedAt = str(data.closedAt);
-  const authorLogin = str((data.author as Record<string, unknown> | undefined)?.login);
-  const authorAvatar = str((data.author as Record<string, unknown> | undefined)?.avatarUrl);
-  const labels = nodes<LabelData>(data.labels);
-  const assignees = nodes<AssigneeData>(data.assignees);
-  const milestone = data.milestone as MilestoneData | null;
-  const projectItems = nodes<ProjectItemData>(data.projectItems);
-  const subIssues = nodes<Record<string, unknown>>(data.subIssues);
-  const parent = data.parent as Record<string, unknown> | null;
-  const blockedByList = nodes<Record<string, unknown>>(data.blockedBy);
-  const blockingList = nodes<Record<string, unknown>>(data.blocking);
-  const timelineItems = nodes<Record<string, unknown>>(data.timelineItems);
-  const comments = nodes<Record<string, unknown>>(data.comments);
+  const title = str(data?.title, `Issue ${issueNumber}`);
+  const url = str(data?.url);
+  const state = str(data?.state, "OPEN");
+  const stateReason = str(data?.stateReason);
+  const body = str(data?.body);
+  const createdAt = str(data?.createdAt);
+  const updatedAt = str(data?.updatedAt);
+  const closedAt = str(data?.closedAt);
+  const authorLogin = str((data?.author as Record<string, unknown> | undefined)?.login);
+  const authorAvatar = str((data?.author as Record<string, unknown> | undefined)?.avatarUrl);
+  const labels = nodes<LabelData>(data?.labels);
+  const assignees = nodes<AssigneeData>(data?.assignees);
+  const milestone = data?.milestone as MilestoneData | null;
+  const projectItems = nodes<ProjectItemData>(data?.projectItems);
+  const subIssues = nodes<Record<string, unknown>>(data?.subIssues);
+  const parent = data?.parent as Record<string, unknown> | null;
+  const blockedByList = nodes<Record<string, unknown>>(data?.blockedBy);
+  const blockingList = nodes<Record<string, unknown>>(data?.blocking);
+  const timelineItems = nodes<Record<string, unknown>>(data?.timelineItems);
+  const comments = nodes<Record<string, unknown>>(data?.comments);
 
   const handleClose = useCallback((e: React.MouseEvent) => { e.stopPropagation(); useIssueStore.getState().removeIssue(issueNumber); }, [issueNumber]);
   const handleMinimize = useCallback((e: React.MouseEvent) => { e.stopPropagation(); setMinimized((m) => !m); }, []);
@@ -140,7 +161,7 @@ export function IssueNode({ data }: NodeProps<IssueFlowNode>) {
   // data backing GitHub's "Development" panel); fall back to
   // CrossReferencedEvent sources from the timeline when the field is empty.
   const closedByPrs = nodes<Record<string, unknown>>(
-    data.closedByPullRequestsReferences,
+    data?.closedByPullRequestsReferences,
   );
   const linkedPRs: Array<Record<string, unknown>> = [];
   for (const pr of closedByPrs) {
@@ -213,7 +234,7 @@ export function IssueNode({ data }: NodeProps<IssueFlowNode>) {
               <text x="28" y="21" fill="white" style={{ fontFamily: "sans-serif", fontSize: "14px", fontWeight: 600 }}>Closed</text>
             </svg>
           )}
-          {authorLogin === str((data.author as Record<string, unknown> | undefined)?.login) && (
+          {authorLogin === str((data?.author as Record<string, unknown> | undefined)?.login) && (
             <span className="px-2 py-0.5 border border-[rgba(110,118,129,0.4)] rounded-full text-[10px] font-medium text-[#c9d1d9] bg-[rgba(110,118,129,0.15)]">Owner</span>
           )}
           <button type="button" className="text-[#8b949e] hover:text-white p-1 rounded hover:bg-[#30363d]" onClick={handleMinimize}>
@@ -400,6 +421,137 @@ export function IssueNode({ data }: NodeProps<IssueFlowNode>) {
               </div>
             </div>
 
+            {/* Per-PR action buttons: every open PR of the issue gets its own
+                REVIEW/FIX/MERGE/CONFLICT row so multi-PR issues can be acted
+                on from the card without opening the context menu. */}
+            {openPrs.length > 0 && (
+              <div className="px-4 py-2 border-t border-[#30363d] bg-[#0d1117] flex flex-col gap-1.5">
+                <span className="text-[11px] font-semibold text-[#8b949e]">
+                  PRs abiertos
+                </span>
+                {openPrs.map((pr) => {
+                  const prLabels =
+                    labelsByPr?.[issueNumber]?.[pr.number] ??
+                    labelsByIssue[issueNumber] ??
+                    [];
+                  const prVerdict =
+                    verdictsByPr?.[issueNumber]?.[pr.number] ?? reviewVerdict;
+                  const prEffective = effectiveReviewLabel(
+                    prLabels,
+                    prVerdict,
+                  );
+                  const prConflicted =
+                    conflictsByPr?.[issueNumber]?.[pr.number] ?? false;
+                  const prDisabled =
+                    reviewingIssueNumber !== null ||
+                    fixingIssueNumber !== null ||
+                    mergingIssueNumber !== null ||
+                    resolvingConflictIssueNumber !== null ||
+                    pr.state !== "OPEN";
+                  const prBusy =
+                    (reviewingIssueNumber === issueNumber ||
+                      fixingIssueNumber === issueNumber ||
+                      mergingIssueNumber === issueNumber ||
+                      resolvingConflictIssueNumber === issueNumber) &&
+                    pr.number === primaryPrNumber;
+                  return (
+                    <div
+                      key={`pr-actions-${pr.number}`}
+                      className="flex items-center gap-2"
+                    >
+                      <a
+                        href={pr.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-[#58a6ff] hover:underline no-underline text-xs font-medium shrink-0"
+                        onClick={(e) => openUrl(e, pr.url)}
+                      >
+                        PR #{pr.number}
+                      </a>
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <button
+                          type="button"
+                          disabled={prDisabled || prBusy}
+                          title={
+                            pr.state !== "OPEN"
+                              ? `PR #${pr.number} no está abierto`
+                              : `Revisar PR #${pr.number}`
+                          }
+                          className="flex items-center gap-1 bg-[#21262d] hover:bg-[#30363d] border border-[rgba(240,246,252,0.1)] rounded-md px-2 py-1 text-[11px] font-medium text-[#c9d1d9] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            useIssueReviewStore
+                              .getState()
+                              .reviewHandler?.(issueNumber, pr.number);
+                          }}
+                        >
+                          {reviewingIssueNumber === issueNumber &&
+                          pr.number === primaryPrNumber
+                            ? "Revisando..."
+                            : `Revisar PR #${pr.number}`}
+                        </button>
+                        {prEffective === REVIEW_LABEL_CHANGES && (
+                          <button
+                            type="button"
+                            disabled={prDisabled || prBusy}
+                            title={`Aplicar fix al PR #${pr.number}`}
+                            className="flex items-center gap-1 bg-[#1f6feb] hover:bg-[#388bfd] border border-[rgba(56,139,253,0.4)] rounded-md px-2 py-1 text-[11px] font-medium text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              useIssueReviewStore
+                                .getState()
+                                .fixHandler?.(issueNumber, pr.number);
+                            }}
+                          >
+                            Fix PR #{pr.number}
+                          </button>
+                        )}
+                        {prConflicted && pr.state === "OPEN" && (
+                          <button
+                            type="button"
+                            disabled={prDisabled || prBusy}
+                            title={`Resolver conflicto del PR #${pr.number}`}
+                            className="flex items-center gap-1 bg-[#f85149] hover:bg-[#da3633] border border-[rgba(248,81,73,0.4)] rounded-md px-2 py-1 text-[11px] font-medium text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              useIssueReviewStore
+                                .getState()
+                                .resolveConflictHandler?.(
+                                  issueNumber,
+                                  pr.number,
+                                );
+                            }}
+                          >
+                            Resolver conflicto
+                          </button>
+                        )}
+                        {prEffective === REVIEW_LABEL_APPROVED &&
+                          pr.state === "OPEN" && (
+                            <button
+                              type="button"
+                              disabled={prDisabled || prBusy}
+                              title={`Mergear PR #${pr.number}`}
+                              className="flex items-center gap-1 bg-[#238636] hover:bg-[#2ea043] border border-[rgba(46,160,67,0.4)] rounded-md px-2 py-1 text-[11px] font-medium text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                useIssueReviewStore
+                                  .getState()
+                                  .mergeHandler?.(issueNumber, pr.number);
+                              }}
+                            >
+                              {mergingIssueNumber === issueNumber &&
+                              pr.number === primaryPrNumber
+                                ? "Mergeando..."
+                                : `Merge PR #${pr.number}`}
+                            </button>
+                          )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
             {/* Footer */}
             <div className="px-4 py-2 border-t border-[#30363d] bg-[#0d1117] flex items-center gap-2">
               <a href={url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1.5 bg-[#21262d] hover:bg-[#30363d] border border-[rgba(240,246,252,0.1)] rounded-md px-3 py-1.5 text-xs font-medium text-[#c9d1d9] transition-colors no-underline"
@@ -439,7 +591,7 @@ export function IssueNode({ data }: NodeProps<IssueFlowNode>) {
                 <svg aria-hidden="true" className="fill-current opacity-70" height="12" width="12" viewBox="0 0 16 16"><path d="M8 2c1.981 0 3.671.992 4.933 2.078 1.27 1.091 2.187 2.345 2.637 3.023a1.62 1.62 0 0 1 0 1.798c-.45.678-1.367 1.932-2.637 3.023C11.67 13.008 9.981 14 8 14c-1.981 0-3.671-.992-4.933-2.078C1.797 10.83.88 9.576.43 8.898a1.62 1.62 0 0 1 0-1.798c.45-.677 1.367-1.931 2.637-3.022C4.33 2.992 6.019 2 8 2ZM1.679 7.932a.12.12 0 0 0 0 .136c.411.622 1.241 1.75 2.366 2.717C5.176 11.758 6.527 12.5 8 12.5c1.473 0 2.825-.742 3.955-1.715 1.124-.967 1.954-2.096 2.366-2.717a.12.12 0 0 0 0-.136c-.412-.621-1.242-1.75-2.366-2.717C10.824 4.242 9.473 3.5 8 3.5c-1.473 0-2.825.742-3.955 1.715-1.124.967-1.954 2.096-2.366 2.717ZM8 10a2 2 0 1 1 0-4 2 2 0 0 1 0 4Z" /></svg>
               </button>
               {effective === REVIEW_LABEL_APPROVED &&
-                prStatus !== null &&
+                prStatus != null &&
                 prStatus !== "loading" &&
                 prStatus.state === "OPEN" && (
                 <button

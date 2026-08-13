@@ -168,6 +168,9 @@ interface IssueReviewStore {
   reviewHandler: ((issueNumber: number, prNumber?: number) => void) | null;
   fixHandler: ((issueNumber: number, prNumber?: number) => void) | null;
   mergeHandler: ((issueNumber: number, prNumber?: number) => void) | null;
+  resolveConflictHandler:
+    | ((issueNumber: number, prNumber?: number) => void)
+    | null;
   prLookupHandler:
     | ((issueNumber: number, projectPath?: string, force?: boolean) => void)
     | null;
@@ -178,6 +181,9 @@ interface IssueReviewStore {
     handler: ((issueNumber: number, prNumber?: number) => void) | null,
   ) => void;
   registerMergeHandler: (
+    handler: ((issueNumber: number, prNumber?: number) => void) | null,
+  ) => void;
+  registerResolveConflictHandler: (
     handler: ((issueNumber: number, prNumber?: number) => void) | null,
   ) => void;
   registerPrLookupHandler: (
@@ -234,10 +240,13 @@ export const useIssueReviewStore = create<IssueReviewStore>((set, get) => ({
   reviewHandler: null,
   fixHandler: null,
   mergeHandler: null,
+  resolveConflictHandler: null,
   prLookupHandler: null,
   registerReviewHandler: (reviewHandler) => set({ reviewHandler }),
   registerFixHandler: (fixHandler) => set({ fixHandler }),
   registerMergeHandler: (mergeHandler) => set({ mergeHandler }),
+  registerResolveConflictHandler: (resolveConflictHandler) =>
+    set({ resolveConflictHandler }),
   registerPrLookupHandler: (prLookupHandler) => set({ prLookupHandler }),
   setPrStatus: (issueNumber, status) =>
     set((s) => ({

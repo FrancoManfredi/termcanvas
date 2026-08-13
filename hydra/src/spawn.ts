@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import path from "node:path";
 import crypto from "node:crypto";
 import { getRuntime } from "./runtime/index.ts";
+import { resolveMainRepoRoot } from "./worktree-path.ts";
 import { AGENT_STORE_SCHEMA_VERSION, saveAgent } from "./store.ts";
 import { writeRunTask } from "./run-task.ts";
 import { dispatchCreateOnly } from "./dispatcher.ts";
@@ -187,7 +188,9 @@ export async function spawn(args: string[]): Promise<void> {
     ownWorktree = false;
   } else {
     branch = `hydra/${agentId}`;
-    worktreePath = path.join(repo, ".worktrees", agentId);
+    // Anchor to the main repo root: --repo may point at a linked worktree,
+    // and nesting worktrees inside it breaks on long paths (Windows).
+    worktreePath = path.join(resolveMainRepoRoot(repo), ".worktrees", agentId);
     execFileSync("git", buildGitWorktreeAddArgs(branch, worktreePath, baseBranch), {
       cwd: repo,
       encoding: "utf-8",

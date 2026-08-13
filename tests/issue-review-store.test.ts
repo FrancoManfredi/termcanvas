@@ -188,6 +188,20 @@ test("mergeHandler: registered handler is invoked with the issue number", () => 
   assert.deepEqual(calls, [42]);
 });
 
+test("resolveConflictHandler: registered handler is invoked with issue and PR numbers", () => {
+  resetStore();
+  const calls: Array<[number, number?]> = [];
+  useIssueReviewStore
+    .getState()
+    .registerResolveConflictHandler((n, pr) => calls.push([n, pr]));
+  useIssueReviewStore.getState().resolveConflictHandler?.(42, 99);
+  useIssueReviewStore.getState().resolveConflictHandler?.(43);
+  assert.deepEqual(calls, [
+    [42, 99],
+    [43, undefined],
+  ]);
+});
+
 test("isFixableVerdict: only COMMENTED and CHANGES_REQUESTED open the fix flow", () => {
   assert.equal(isFixableVerdict("COMMENTED"), true);
   assert.equal(isFixableVerdict("CHANGES_REQUESTED"), true);

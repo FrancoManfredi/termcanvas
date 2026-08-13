@@ -63,6 +63,7 @@ import {
   collectHeatmapData,
 } from "./usage-collector";
 import { buildGitWorktreeRemoveArgs } from "../hydra/src/cleanup";
+import { resolveMainRepoRoot } from "../hydra/src/worktree-path";
 import {
   installDownloadedUpdate,
   setupAutoUpdater,
@@ -899,8 +900,13 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
 
       const resolvedRepo = path.resolve(repoPath);
       const sanitizedDirName = trimmedBranch.replace(/[\\/]/g, "-");
+      // Always create under the MAIN repo's .worktrees. repoPath may be a
+      // linked worktree (e.g. resolving an issue while another issue's
+      // worktree is focused); nesting worktrees inside it blows Windows'
+      // MAX_PATH (260 chars) on long file names.
+      const repoRoot = resolveMainRepoRoot(resolvedRepo);
       const worktreePath = path.join(
-        resolvedRepo,
+        repoRoot,
         ".worktrees",
         sanitizedDirName,
       );
@@ -975,8 +981,11 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
 
       const resolvedRepo = path.resolve(repoPath);
       const sanitizedDirName = trimmedBranch.replace(/[\\/]/g, "-");
+      // Always create under the MAIN repo's .worktrees (see
+      // project:create-worktree for the MAX_PATH rationale).
+      const repoRoot = resolveMainRepoRoot(resolvedRepo);
       const worktreePath = path.join(
-        resolvedRepo,
+        repoRoot,
         ".worktrees",
         sanitizedDirName,
       );
@@ -1057,8 +1066,11 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
       // suffix so both worktrees of one issue share a base name and cleanup
       // can target the reviewer by suffix alone.
       const sanitizedDirName = trimmedBase.replace(/[\\/]/g, "-");
+      // Always create under the MAIN repo's .worktrees (see
+      // project:create-worktree for the MAX_PATH rationale).
+      const repoRoot = resolveMainRepoRoot(resolvedRepo);
       const worktreePath = path.join(
-        resolvedRepo,
+        repoRoot,
         ".worktrees",
         `${sanitizedDirName}-review`,
       );
@@ -1113,7 +1125,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         // worktree listing.
         try {
           const adminDir = path.join(
-            resolvedRepo,
+            repoRoot,
             ".git",
             "worktrees",
             path.basename(worktreePath),
@@ -4234,6 +4246,9 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         // gh pr merge has no --comment flag; --squash -b sets the body of the
         // squash commit. The PR body is kept (it carries "Closes #N", which is
         // what auto-closes the issue) and the suffix documents who merged.
+        // The body is passed via --body-file, NEVER via -b: a body containing
+        // markdown checkboxes ("- [x]") would be parsed by gh as flags and the
+        // merge would fail with "unknown shorthand flag".
         const { stdout: prBody } = await execFileAsync(
           "gh",
           ["pr", "view", String(prNumber), "--json", "body", "--jq", ".body"],
@@ -4242,13 +4257,26 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         const mergeBody = [prBody.trim(), "Merged via TermCanvas"]
           .filter(Boolean)
           .join("\n\n");
-        const { stdout } = await execFileAsync(
-          "gh",
-          ["pr", "merge", String(prNumber), "--squash", "-b", mergeBody],
-          { cwd, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, env: execEnv },
+        const bodyFile = path.join(
+          os.tmpdir(),
+          `termcanvas-merge-body-${prNumber}-${Date.now()}.md`,
         );
-        const prUrl = stdout.trim() || `https://github.com/owner/repo/pull/${prNumber}`;
-        return { ok: true as const, prUrl };
+        fs.writeFileSync(bodyFile, mergeBody, "utf8");
+        try {
+          const { stdout } = await execFileAsync(
+            "gh",
+            ["pr", "merge", String(prNumber), "--squash", "--body-file", bodyFile],
+            { cwd, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, env: execEnv },
+          );
+          const prUrl = stdout.trim() || `https://github.com/owner/repo/pull/${prNumber}`;
+          return { ok: true as const, prUrl };
+        } finally {
+          try {
+            fs.unlinkSync(bodyFile);
+          } catch {
+            // Temp file cleanup is best-effort.
+          }
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         return { ok: false as const, error: message };
@@ -4440,11 +4468,46 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
             if (mergeClean) {
               log("merging with --squash");
               emitMergeProgress({ type: "step", prNumber: pr.number, phase: "merge" });
-              await execFileAsync(
-                "gh",
-                ["pr", "merge", String(pr.number), "--squash"],
-                { cwd, ...ghOpts },
-              );
+              // Preserve the PR body in the squash commit: it carries
+              // "Closes #N" (the issue auto-close contract) and documenting
+              // who merged. Passed via --body-file, never -b (a body with
+              // markdown checkboxes would be parsed as gh flags).
+              let bodyFile: string | null = null;
+              try {
+                const { stdout: prBody } = await execFileAsync(
+                  "gh",
+                  ["pr", "view", String(pr.number), "--json", "body", "--jq", ".body"],
+                  { cwd, ...ghOpts },
+                );
+                const mergeBody = [prBody.trim(), "Merged via TermCanvas"]
+                  .filter(Boolean)
+                  .join("\n\n");
+                bodyFile = path.join(
+                  os.tmpdir(),
+                  `termcanvas-merge-body-${pr.number}-${Date.now()}.md`,
+                );
+                fs.writeFileSync(bodyFile, mergeBody, "utf8");
+              } catch {
+                // Best-effort: fall back to a bare squash merge without a
+                // custom body if the body read fails.
+              }
+              try {
+                await execFileAsync(
+                  "gh",
+                  bodyFile
+                    ? ["pr", "merge", String(pr.number), "--squash", "--body-file", bodyFile]
+                    : ["pr", "merge", String(pr.number), "--squash"],
+                  { cwd, ...ghOpts },
+                );
+              } finally {
+                if (bodyFile) {
+                  try {
+                    fs.unlinkSync(bodyFile);
+                  } catch {
+                    // Temp file cleanup is best-effort.
+                  }
+                }
+              }
               merged.push(pr.number);
               emitMergeProgress({ type: "pr-merged", prNumber: pr.number });
               log("merged");
