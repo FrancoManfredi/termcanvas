@@ -6,10 +6,28 @@ import type {
 import type { SessionHistoryChangedEvent } from "../shared/sessions";
 import type { TelemetryProvider } from "../shared/telemetry";
 import type { MergeProgressEvent } from "../src/types";
+import type {
+  TurnResult,
+  UserAnswerInput,
+  InterviewLedger,
+  InterviewQuestion,
+  InterviewSummary,
+  BriefDocument,
+  BriefInterviewPosition,
+} from "../headless-runtime/interview/index.ts";
 
 type SessionTelemetryProvider = Exclude<TelemetryProvider, "unknown">;
 
+// El preload corre SANDBOXED: solo puede requerir módulos de electron, no
+// node:path ni ningún otro módulo de Node (require("node:path") tira
+// "module not found" y mata TODO el API). La ruta de scripts se pide al
+// proceso principal por IPC síncrono, que sí corre con Node completo.
+const SCRIPTS_DIR = ipcRenderer.sendSync("paths:get-scripts-dir") as string;
+
 contextBridge.exposeInMainWorld("termcanvas", {
+  paths: {
+    scriptsDir: SCRIPTS_DIR,
+  },
   terminal: {
     create: (options: {
       cwd: string;
@@ -671,6 +689,87 @@ contextBridge.exposeInMainWorld("termcanvas", {
       return () => ipcRenderer.removeListener("memory:changed", listener);
     },
   },
+  interview: {
+    create: (projectPath: string) =>
+      ipcRenderer.invoke("interview:create", projectPath) as Promise<{
+        ledgerPath: string;
+        firstQuestion: TurnResult;
+      }>,
+    submit: (ledgerPath: string, answer: UserAnswerInput) =>
+      ipcRenderer.invoke("interview:submit", ledgerPath, answer) as Promise<TurnResult>,
+    resume: (ledgerPath: string) =>
+      ipcRenderer.invoke("interview:resume", ledgerPath) as Promise<TurnResult>,
+    finish: (ledgerPath: string) =>
+      ipcRenderer.invoke("interview:finish", ledgerPath) as Promise<{
+        synthesis: unknown;
+        synthesisPath: string;
+      }>,
+    state: (ledgerPath: string) =>
+      ipcRenderer.invoke("interview:state", ledgerPath) as Promise<{
+        ledger: InterviewLedger;
+        lastQuestion: InterviewQuestion | null;
+        progress: { answered: number; closed: number; total: number; pct: number };
+      }>,
+    list: (projectPath: string) =>
+      ipcRenderer.invoke("interview:list", projectPath) as Promise<InterviewSummary[]>,
+    delete: (ledgerPath: string) =>
+      ipcRenderer.invoke("interview:delete", ledgerPath) as Promise<{ ok: boolean }>,
+    briefStatus: (projectPath: string) =>
+      ipcRenderer.invoke("interview:briefStatus", projectPath) as Promise<{
+        briefs: { brief: BriefDocument; path: string; timestamp: number }[];
+        activePath: string | null;
+        inProgress: {
+          ledgerPath: string;
+          timestamp: number;
+          answers_count: number;
+          total_questions: number;
+        }[];
+      }>,
+    setActiveBrief: (projectPath: string, briefPath: string) =>
+      ipcRenderer.invoke("interview:setActiveBrief", projectPath, briefPath) as Promise<{
+        ok: boolean;
+      }>,
+    activeBriefText: (projectPath: string) =>
+      ipcRenderer.invoke("interview:activeBriefText", projectPath) as Promise<string>,
+    requirementsStatus: (projectPath: string) =>
+      ipcRenderer.invoke("interview:requirementsStatus", projectPath) as Promise<{
+        synthesis: { path: string; timestamp: number; resumen: string }[];
+        activePath: string | null;
+      }>,
+    setActiveRequirements: (projectPath: string, synthesisPath: string) =>
+      ipcRenderer.invoke(
+        "interview:setActiveRequirements",
+        projectPath,
+        synthesisPath,
+      ) as Promise<{ ok: boolean }>,
+    activeRequirementsText: (projectPath: string) =>
+      ipcRenderer.invoke("interview:activeRequirementsText", projectPath) as Promise<string>,
+    briefCreate: (projectPath: string) =>
+      ipcRenderer.invoke("interview:briefCreate", projectPath) as Promise<{
+        ledgerPath: string;
+        position: BriefInterviewPosition | null;
+      }>,
+    briefState: (ledgerPath: string) =>
+      ipcRenderer.invoke("interview:briefState", ledgerPath) as Promise<{
+        position: BriefInterviewPosition | null;
+      }>,
+    briefSubmit: (
+      ledgerPath: string,
+      input: { bloque: string; pregunta: string; respuesta: string },
+    ) =>
+      ipcRenderer.invoke("interview:briefSubmit", ledgerPath, input) as Promise<{
+        position: BriefInterviewPosition | null;
+      }>,
+    briefSynthesize: (ledgerPath: string) =>
+      ipcRenderer.invoke("interview:briefSynthesize", ledgerPath) as Promise<{
+        brief: BriefDocument;
+        briefPath: string;
+      }>,
+    briefDelete: (projectPath: string, briefPath: string) =>
+      ipcRenderer.invoke("interview:briefDelete", projectPath, briefPath) as Promise<{
+        ok: boolean;
+      }>,
+  },
   cli: {
     isRegistered: () =>
       ipcRenderer.invoke("cli:is-registered") as Promise<boolean>,
@@ -999,6 +1098,18 @@ contextBridge.exposeInMainWorld("termcanvas", {
       ipcRenderer.on("merge:progress", listener);
       return () => ipcRenderer.removeListener("merge:progress", listener);
     },
+    runIssueGate: (cwd: string, prNumber: number) =>
+      ipcRenderer.invoke("github:run-issue-gate", cwd, prNumber) as Promise<
+        | {
+            ok: true;
+            verdict: "PASS" | "FAIL";
+            failedChecks: string[];
+            checks: Array<{ name: string; status: string; note: string | null }>;
+            reportPath: string;
+            headRefOid: string;
+          }
+        | { ok: false; error: string }
+      >,
   },
   agent: {
     start: (

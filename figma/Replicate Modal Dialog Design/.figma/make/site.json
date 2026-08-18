@@ -1,0 +1,10 @@
+{
+  "description": "Create and customize modal dialogs with a modern design while saving color palettes for future projects, enhancing user interface consistency.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

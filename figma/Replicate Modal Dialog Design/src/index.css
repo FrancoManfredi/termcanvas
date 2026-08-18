@@ -1,0 +1,256 @@
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@100..900&family=Geist+Mono:wght@100..900&display=swap');
+@import 'tailwindcss';
+
+:root,
+[data-theme="dark"] {
+  --bg: #141312;
+  --sidebar: #100f0e;
+  --surface: #1a1918;
+  --surface-hover: #222120;
+  --border: #282725;
+  --border-hover: #383633;
+  --text-primary: #ededec;
+  --text-secondary: #9c9a96;
+  --text-muted: #706e6a;
+  --text-faint: #44423e;
+  --accent: #d8d5cd;
+  --accent-soft: rgba(216, 213, 205, 0.08);
+  --accent-foreground: #141312;
+  --red: #f06a6a;
+  --red-soft: rgba(240, 106, 106, 0.12);
+  --amber: #e5a952;
+  --amber-soft: rgba(229, 169, 82, 0.12);
+  --scrim: rgba(0, 0, 0, 0.72);
+  --radius: 10px;
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  --bg: #f5f4f0;
+  --sidebar: #ecebe6;
+  --surface: #ffffff;
+  --surface-hover: #f0eee8;
+  --border: #e2e0d8;
+  --border-hover: #ceccc2;
+  --text-primary: #181716;
+  --text-secondary: #605d58;
+  --text-muted: #807c75;
+  --text-faint: #b8b4aa;
+  --accent: #2c2926;
+  --accent-soft: rgba(44, 41, 38, 0.08);
+  --accent-foreground: #ffffff;
+  --red: #dc2626;
+  --red-soft: rgba(220, 38, 38, 0.08);
+  --amber: #d97706;
+  --amber-soft: rgba(217, 119, 6, 0.08);
+  --scrim: rgba(24, 23, 22, 0.45);
+  --radius: 10px;
+  color-scheme: light;
+}
+
+body {
+  font-family: "Geist", -apple-system, BlinkMacSystemFont, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  background-color: var(--bg);
+  color: var(--text-primary);
+  min-height: 100vh;
+}
+
+code, pre, .font-mono {
+  font-family: "Geist Mono", monospace;
+}
+
+/* Minimalist animation */
+.tc-enter {
+  animation: tc-minimal-in 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes tc-minimal-in {
+  from { opacity: 0; transform: scale(0.985) translateY(4px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+/* Modal Overlay */
+.modal-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background-color: var(--scrim);
+  backdrop-filter: blur(8px);
+}
+
+.modal-shell {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 38rem; /* Clean, tight, focused modal width */
+  overflow: hidden;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background-color: var(--surface);
+  box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.5);
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+}
+
+/* Fitts's Law Optimized Buttons - Generous touch targets */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-radius: 7px;
+  font-size: 13px;
+  font-weight: 500;
+  min-height: 40px; /* Fitts's Law: Comfortable touch & click target */
+  padding: 0 16px;
+  transition: all 120ms ease;
+  user-select: none;
+  outline: none;
+  border: 1px solid transparent;
+}
+
+.btn:focus-visible {
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+}
+
+.btn-primary {
+  background-color: var(--accent);
+  color: var(--accent-foreground);
+  font-weight: 600;
+}
+.btn-primary:hover:not(:disabled) {
+  opacity: 0.92;
+  transform: translateY(-0.5px);
+}
+.btn-primary:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.btn-ghost {
+  border-color: var(--border);
+  background-color: transparent;
+  color: var(--text-secondary);
+}
+.btn-ghost:hover:not(:disabled) {
+  background-color: var(--surface-hover);
+  color: var(--text-primary);
+  border-color: var(--border-hover);
+}
+.btn-ghost:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.btn-danger-ghost {
+  background-color: transparent;
+  color: var(--red);
+  font-size: 12px;
+  min-height: 32px;
+  padding: 0 10px;
+}
+.btn-danger-ghost:hover {
+  background-color: var(--red-soft);
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px; /* Fitts's Law: 36px minimum icon hit area */
+  border-radius: 7px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 120ms ease;
+  outline: none;
+}
+.icon-btn:hover {
+  background-color: var(--surface-hover);
+  color: var(--text-primary);
+}
+.icon-btn:focus-visible {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+/* Minimal Input */
+.textarea-minimal {
+  width: 100%;
+  resize: none;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background-color: var(--bg);
+  padding: 12px 14px;
+  font-family: inherit;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.textarea-minimal:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.textarea-minimal::placeholder {
+  color: var(--text-muted);
+}
+
+/* Fitts's Law Large Row Items */
+.row-item-minimal {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background-color: var(--bg);
+  padding: 14px; /* Generous padding for fast clicking */
+  text-align: left;
+  cursor: pointer;
+  transition: all 120ms ease;
+  outline: none;
+}
+.row-item-minimal:hover {
+  background-color: var(--surface-hover);
+  border-color: var(--border-hover);
+}
+.row-item-minimal.active {
+  border-color: var(--accent);
+  background-color: var(--accent-soft);
+}
+
+/* Progress bar */
+.progress-line-track {
+  height: 3px;
+  width: 100%;
+  background-color: var(--border);
+  overflow: hidden;
+  border-radius: 99px;
+}
+.progress-line-fill {
+  height: 100%;
+  background-color: var(--accent);
+  transition: width 200ms ease;
+  border-radius: 99px;
+}

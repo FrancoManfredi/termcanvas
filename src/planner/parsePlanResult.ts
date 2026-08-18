@@ -3,6 +3,7 @@ import type {
   IssueSeverity,
   IssueTemplateFields,
   PlanningResult,
+  RequisitoVerdict,
   RoadmapPlan,
   RoadmapProposal,
 } from "../types/issuePlanning.ts";
@@ -124,6 +125,7 @@ function applyExistingIssueDedup(
 const SEVERITIES = new Set(["critical", "high", "medium", "low"]);
 const PRIORITIES = new Set(["P0", "P1", "P2", "P3"]);
 const SIZES = new Set(["XS", "S", "M", "L", "XL"]);
+const VERDICT_STATES = new Set(["CUMPLE", "NO_CUMPLE", "PARCIAL", "NO_VERIFICABLE"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -258,6 +260,7 @@ function parseFinding(raw: unknown): AuditPlan["findings"][number] | null {
     line: typeof raw.line === "number" ? raw.line : 0,
     description: readString(raw, "description"),
     labels: readStringList(raw, "labels"),
+    rule: readString(raw, "rule") || undefined,
     duplicateOf: readOptionalIndex(raw, "duplicateOf"),
     existingIssueNumber: readOptionalIndex(raw, "existingIssueNumber"),
     template: parseTemplate(raw.template),
@@ -278,6 +281,27 @@ function parseAudit(raw: Record<string, unknown>, warnings: string[]): AuditPlan
   return { mode: "audit", repo: readString(raw, "repo"), findings };
 }
 
+// Veredictos de cumplimiento de requerimientos: tolerante a items inválidos
+// (id vacío, estado fuera de norma) — un item mal formado se descarta sin
+// romper el plan. Ausente → undefined (planes viejos sin la sección).
+function parseRequisitos(raw: unknown): RequisitoVerdict[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const verdicts: RequisitoVerdict[] = [];
+  for (const item of raw) {
+    if (!isRecord(item)) continue;
+    const id = readString(item, "id");
+    if (!id.trim()) continue;
+    const estado = readString(item, "estado");
+    if (!VERDICT_STATES.has(estado)) continue;
+    verdicts.push({
+      id,
+      estado: estado as RequisitoVerdict["estado"],
+      justificacion: readString(item, "justificacion"),
+    });
+  }
+  return verdicts.length > 0 ? verdicts : undefined;
+}
+
 export function parsePlanningPlan(
   content: string,
   openIssues?: OpenIssueRef[],
@@ -293,6 +317,8 @@ export function parsePlanningPlan(
   const warnings: string[] = [];
   const result =
     raw.mode === "roadmap" ? parseRoadmap(raw, warnings) : parseAudit(raw, warnings);
+  // Veredicto de cumplimiento de requerimientos (ambos modos).
+  result.requisitos = parseRequisitos(raw.requisitos);
   // template a nivel de plan ("aplica a CADA item"): se propaga a los items
   // que no traen el suyo. Un item con template propio siempre gana.
   applySharedTemplate(result, raw.template);

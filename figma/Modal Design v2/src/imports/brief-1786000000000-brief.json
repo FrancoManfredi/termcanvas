@@ -1,0 +1,27 @@
+{
+  "resumen_proyecto": "Plataforma web de quizzes educativos para escuelas primarias: el docente arma cuestionarios por materia y los alumnos los resuelven desde la sala de informática, con resultados visibles al instante.",
+  "flujo_principal_ideal": "El docente entra, crea un quiz eligiendo materia y grado, agrega preguntas de opción múltiple, lo publica y comparte el código; los alumnos entran con el código, lo resuelven y ven su puntaje; el docente ve el resumen de resultados por alumno.",
+  "mision": "Que cualquier escuela, aunque no tenga presupuesto, pueda evaluar a sus alumnos de forma moderna y sin papel.",
+  "problema": "Las escuelas públicas siguen evaluando en papel: los docentes pierden horas corrigiendo y los resultados llegan tarde. Las plataformas existentes son caras o en inglés.",
+  "usuarios_objetivo": "Docentes de primaria (crean y corrigen quizzes) y alumnos de 8 a 12 años (resuelven desde una PC compartida).",
+  "contexto_origen": "Nació cuando un docente amigo contó que corrige 120 evaluaciones a mano cada mes. Se probó informalmente con Google Forms y funcionó, pero faltaba el seguimiento por alumno.",
+  "vision": "En 10 años, que la evaluación formativa sea digital en todas las escuelas públicas del país.",
+  "valores_no_negociables": "No vender datos de alumnos ni mostrar publicidad a menores; la plataforma debe funcionar en PC viejas y con conexión inestable.",
+  "stakeholders": "Docentes como clientes piloto, dirección de la escuela como decisor, y el equipo técnico de la institución (un técnico part-time) como soporte.",
+  "alcance_minimo": "Crear quizzes de opción múltiple, código de acceso para alumnos, resolver con puntaje inmediato y tabla de resultados por quiz.",
+  "fuera_de_alcance": "App móvil, gamificación, banco de preguntas colaborativo, integración con sistemas de gestión escolar.",
+  "restricciones_y_supuestos": "Bootstrapped, presupuesto nulo, stack Node.js/TypeScript/PostgreSQL, despliegue en un servidor barato; datos de menores deben tratarse con ley de protección de datos.",
+  "propuesta_de_valor": "Evaluar sin papel, sin horas de corrección y sin plata.",
+  "incertidumbres_criticas": [
+    { "tema": "Concurrencia esperada en una sala de informática", "por_que_importa": "Define el dimensionamiento del servidor", "impacto_en_diseno": "Escalabilidad del backend" },
+    { "tema": "Cuenta de alumnos vs. acceso por código", "por_que_importa": "No se definió si los alumnos necesitan cuenta", "impacto_en_diseno": "Modelo de autenticación" }
+  ],
+  "alertas_consistencia": [
+    { "descripcion": "Puntaje inmediato por alumno vs. tabla de resultados: no se definió si el docente ve respuestas individuales o solo puntajes.", "gravedad": "media" }
+  ],
+  "respuestas_detalladas": [
+    { "bloque": "contexto_inicial", "pregunta": "¿Qué estás construyendo?", "respuesta": "Plataforma web de quizzes educativos para escuelas primarias." },
+    { "bloque": "cierre", "pregunta": "Resumí en una frase", "respuesta": "Evaluar sin papel, sin horas de corrección y sin plata." }
+  ],
+  "brief_contexto": "Plataforma web de quizzes educativos para escuelas primarias: docentes crean cuestionarios de opción múltiple y los alumnos los resuelven con un código, con resultados inmediatos. Sin presupuesto (bootstrapped), stack Node/TS/PostgreSQL, datos de menores protegidos por ley."
+}

@@ -1,0 +1,179 @@
+{
+  "proyecto_metadata": {
+    "nombre_proyecto": "Plataforma de Trazabilidad Hortícola por QR",
+    "id_sesion": "ses_ffc79a4a6ffe99FJ9LjUtB4wGG",
+    "fecha_relevamiento": "2026-08-15",
+    "brief_contexto": "Plataforma de trazabilidad para cooperativas hortícolas: cada lote de fruta/verdura se registra con un QR al cosecharse y queda visible para el mayorista y el comprador hasta la venta. El problema central NO es producir, es DEMOSTRAR el origen, la fecha de cosecha y el estado del lote (hoy en planillas de papel, WhatsApp y anotaciones a mano). Meta: que ningún productor tire su cosecha por no poder demostrar el origen. MVP (lanzado): alta de lote con QR desde el celular, impresión de etiqueta/caja, escaneo por mayorista con historial completo, y alerta de vencimiento. Stack declarado: Node.js + TypeScript + PostgreSQL + PWA; datos en Uruguay (Ley 18.331); piloto de 6 meses con una cooperativa real en el Mercado Central."
+  },
+  "requerimientos_funcionales": [
+    {
+      "id": "RF-001",
+      "descripcion": "El sistema debe permitir a la cooperativa dar de alta un lote nuevo asociando un QR, con los campos producto, fecha de cosecha y productor responsable, desde la PWA en el celular.",
+      "justificacion": "Es el flujo principal ideal y el alcance mínimo de lanzamiento declarado por el creador (una cooperativa real de punta a punta).",
+      "prioridad": "Must have",
+      "criterio_de_ajuste": "Una cooperativa completa el alta de un lote con datos completos desde el celular, sin ayuda externa ni planilla de papel.",
+      "origen": "brief:alcance_minimo"
+    },
+    {
+      "id": "RF-002",
+      "descripcion": "El sistema debe generar e imprimir una etiqueta o marcado QR asociado al lote para pegar en la caja.",
+      "justificacion": "El QR impreso es el alcance mínimo; sin etiqueta física el mayorista no puede escanear en la playa de descarga.",
+      "prioridad": "Must have",
+      "criterio_de_ajuste": "La cooperativa obtiene una etiqueta QR impresa válida y escaneable para el lote dado de alta.",
+      "origen": "brief:alcance_minimo"
+    },
+    {
+      "id": "RF-003",
+      "descripcion": "El sistema debe permitir a un mayorista o controlador consultar el historial completo del lote (chacra de origen, fecha de cosecha, controles pasados, estado) escaneando el QR de una caja.",
+      "justificacion": "La consulta abierta por QR es el núcleo del valor: verificar el origen en segundos sin llamadas telefónicas.",
+      "prioridad": "Must have",
+      "criterio_de_ajuste": "Al escanear un QR válido se muestra el historial completo del lote sin necesidad de contacto telefónico ni planilla.",
+      "origen": "brief:alcance_minimo, a5, a11"
+    },
+    {
+      "id": "RF-004",
+      "descripcion": "El sistema debe emitir una alerta a la cooperativa cuando un lote registrado esté por vencer, antes de que el mayorista deba rechazarlo.",
+      "justificacion": "Parte explícita del alcance mínimo de lanzamiento; previene descartes por falta de aviso anticipado.",
+      "prioridad": "Must have",
+      "criterio_de_ajuste": "Ante un lote próximo a vencer, la cooperativa recibe una alerta automática antes del posible rechazo en el mercado.",
+      "origen": "brief:alcance_minimo"
+    },
+    {
+      "id": "RF-005",
+      "descripcion": "La PWA debe permitir registrar lotes sin conectividad estable por períodos de hasta 2 horas, sincronizando los datos con el servidor al recuperar la conexión.",
+      "justificacion": "La chacra tiene internet inestable; el margen de horas resuelto en la entrevista fue 'hasta 2 horas' (a3).",
+      "prioridad": "Must have",
+      "criterio_de_ajuste": "Se registran lotes offline y, al recuperar conexión dentro de las 2h, se sincronizan sin pérdida ni duplicados.",
+      "origen": "a3"
+    },
+    {
+      "id": "RF-006",
+      "descripcion": "El sistema debe habilitar trazabilidad completa y verificable de modo que, en el piloto de 6 meses con una cooperativa real, se registren 0 rechazos de camión por falta de trazabilidad.",
+      "justificacion": "Criterio de éxito de negocio elegido en la resolución de contradicciones (a15, versión 'nueva' en c2); reemplaza a a10 y a14 descartadas.",
+      "prioridad": "Must have",
+      "criterio_de_ajuste": "Durante 6 meses de piloto no ocurre ningún rechazo de lote atribuible a falta de trazabilidad o verificación de origen.",
+      "origen": "a15"
+    }
+  ],
+  "atributos_de_calidad_y_asrs": [
+    {
+      "id": "QA-001",
+      "atributo": "Rendimiento",
+      "es_asr_genuino": false,
+      "justificacion_arquitectonica": "La latencia de lectura <2s para una cooperativa piloto es alcanzable con una instancia única Node+PostgreSQL y no obliga a caché distribuida, microservicios ni arquitectura dirigida por eventos; es preferencia de UX, no un ASR genuino (doble validación ASR: is_genuine_asr=false).",
+      "escenario_tecnico_6_partes": {
+        "fuente": "Mayorista o controlador en el Mercado Central",
+        "estimulo": "Escanea el QR de una caja de un lote",
+        "artefacto": "PWA de consulta y servidor de resolución de lote",
+        "entorno": "Operación normal en la playa de descarga del Mercado Central",
+        "respuesta": "El historial completo del lote se muestra en pantalla",
+        "medida_de_respuesta": "Tiempo desde el escaneo hasta datos completos < 2 segundos"
+      },
+      "trade_offs_identificados": "Simplicidad de implementación vs. caché de lectura en frío; sin carga masiva de consultas no se justifica optimización alguna.",
+      "origen": "a11"
+    },
+    {
+      "id": "QA-002",
+      "atributo": "Disponibilidad",
+      "es_asr_genuino": true,
+      "justificacion_arquitectonica": "El registro offline de hasta 2h con sincronización posterior obliga a una decisión estructural profunda: almacenamiento local en la PWA, cola de escritura, generación de IDs de lote offline e un motor de sincronización idempotente con resolución de conflictos. No es preferencia de UX, es arquitectura offline-first.",
+      "escenario_tecnico_6_partes": {
+        "fuente": "Productor/encargada en la chacra",
+        "estimulo": "Pérdida de conectividad estable por hasta 2 horas",
+        "artefacto": "PWA de registro de lotes en el celular",
+        "entorno": "Chacra con internet inestable o nulo",
+        "respuesta": "El registro de lotes continúa offline y se sincroniza sin pérdida ni duplicados al recuperar conexión",
+        "medida_de_respuesta": "Hasta 2 horas sin conectividad sin pérdida de datos ni lotes duplicados"
+      },
+      "trade_offs_identificados": "Complejidad de sync/conflictos vs. disponibilidad en campo; posible inconsistencia temporal de lectura hasta la sincronización. SLO de caída de servidor NO definido ([a9] descartada en c1) → gap de disponibilidad del lado servidor.",
+      "origen": "a3"
+    },
+    {
+      "id": "QA-003",
+      "atributo": "Seguridad",
+      "es_asr_genuino": true,
+      "justificacion_arquitectonica": "La veracidad no negociable de los datos y la protección de datos personales del productor (Ley 18.331) obligan a decisiones estructurales: firma/integridad de lotes para evitar falsificación con lectura abierta por QR, consentimiento y derechos del titular, y cifrado de datos personales. Sin firma, un QR abierto es falsificable.",
+      "escenario_tecnico_6_partes": {
+        "fuente": "Actor que intenta falsificar un lote o acceder a datos personales del productor",
+        "estimulo": "Presenta un QR no emitido por el sistema o consulta datos de un productor sin derecho",
+        "artefacto": "Sistema de lotes y repositorio de datos personales",
+        "entorno": "Producción con lectura abierta vía QR y PIN corto de cooperativa",
+        "respuesta": "El sistema detecta la falta de firma/integridad o bloquea el acceso indebido y preserva la veracidad",
+        "medida_de_respuesta": "0 lotes falsificados aceptados; 100% de datos personales bajo medidas de la Ley 18.331"
+      },
+      "trade_offs_identificados": "Lectura abierta [a5] y PIN de 4 dígitos [a6] sin firma/integridad debilitan el anti-falsificación; confidencialidad de datos personales del productor sin definir (GAP: no hay integridad, firma ni plan de cumplimiento 18.331).",
+      "origen": "brief:valores_no_negociables, Ley 18.331"
+    },
+    {
+      "id": "QA-004",
+      "atributo": "Usabilidad",
+      "es_asr_genuino": false,
+      "justificacion_arquitectonica": "El registro en <90s desde celular básico es un target de UX, no una decisión estructural; se resuelve con formularios simples y escaneo de QR, sin arquitectura especial.",
+      "escenario_tecnico_6_partes": {
+        "fuente": "Encargada de la cooperativa",
+        "estimulo": "Debe dar de alta un lote nuevo desde su celular",
+        "artefacto": "PWA de registro",
+        "entorno": "Cooperativa, celular básico, sin escritorio",
+        "respuesta": "Completa el alta de lote con datos completos sin llamadas ni planillas",
+        "medida_de_respuesta": "Tiempo de registro de lote nuevo < 90 segundos"
+      },
+      "trade_offs_identificados": "Velocidad vs. completitud de campos; el campo mínimo obligatorio del lote aún no está decidido (GAP).",
+      "origen": "brief:metrica_sesion_exitosa"
+    }
+  ],
+  "restricciones_globales": [
+    {
+      "id": "CON-001",
+      "tipo": "Stack Tecnológico",
+      "descripcion": "Stack atado al que maneja el creador: Node.js, TypeScript, PostgreSQL y una PWA liviana (sin app nativa).",
+      "impacto": "El diseño e implementación se limitan a este stack; sin frameworks pesados ni apps nativas para iOS/Android."
+    },
+    {
+      "id": "CON-002",
+      "tipo": "Presupuesto",
+      "descripcion": "Bootstrapped, plata propia, casi nula (dominio y servidor chico pagados con changas).",
+      "impacto": "Sin servidores grandes ni herramientas de pago; se prioriza lo esencial del MVP y nada de infraestructura costosa."
+    },
+    {
+      "id": "CON-003",
+      "tipo": "Tiempo",
+      "descripcion": "Poco tiempo porque el creador sigue estudiando ingeniería; ~6 meses para el piloto.",
+      "impacto": "Alcance congelado al MVP; sin margen para features fuera de alcance ni iteraciones largas."
+    },
+    {
+      "id": "CON-004",
+      "tipo": "Legal",
+      "descripcion": "Los datos deben vivir en Uruguay por la Ley de protección de datos personales (Ley 18.331).",
+      "impacto": "Hosting/servidor en Uruguay obligatorio; aplica consentimiento, derechos del titular y medidas de seguridad sobre datos personales de productores."
+    },
+    {
+      "id": "CON-005",
+      "tipo": "Alcance",
+      "descripcion": "Fuera de la primera versión: marketplace/venta directa al consumidor, pagos, lectura RFID, integración con ERPs de cadenas, multi-mercado y app de consumidor final.",
+      "impacto": "No se diseña ni implementa ninguna de estas funciones en el piloto; el QR impreso y la app de productores son el alcance."
+    },
+    {
+      "id": "CON-006",
+      "tipo": "Ético/Legal",
+      "descripcion": "No vender jamás los datos de los productores ni usar la información para perjudicar una cooperativa frente a otra; veracidad de los datos no negociable.",
+      "impacto": "El modelo de negocio no puede monetizar datos ni emitir certificados sin datos reales ('certificadora de humo' explícitamente rechazada); la verdad del dato prevalece aunque incomode."
+    },
+    {
+      "id": "CON-007",
+      "tipo": "Organizacional",
+      "descripcion": "Adopción decide la asamblea de cada cooperativa (organizaciones horizontales); en el Mercado Central decide el director de operaciones. Productores, choferes y controladores son consultados.",
+      "impacto": "El éxito depende de simplificar la vida a productores/choferes/controladores; hay que convencer a la asamblea, no a un jefe, y validar con el director de operaciones."
+    }
+  ],
+  "glosario_de_terminos": {
+    "Lote": "Unidad de fruta/verdura registrada con un QR al momento de la cosecha, con origen, fecha y estado consultables.",
+    "QR de lote": "Código impreso que apunta únicamente al identificador del lote; el servidor resuelve los IDs escaneados [a7].",
+    "Trazabilidad": "Capacidad de demostrar origen, fecha de cosecha y estado de un lote en segundos, sin llamadas ni papel.",
+    "PWA": "App web progresiva, liviana, pensada para celulares básicos sin app nativa.",
+    "Chacra": "Explotación agrícola familiar que produce los lotes.",
+    "Mercado Central": "Mercado mayorista donde se valida el sistema y se decide la instalación del lector (autoridad: director de operaciones).",
+    "ASR": "Atributo de Calidad Significativo como Requerimiento (escenario de atributo de calidad que fuerza una decisión estructural profunda).",
+    "Ley 18.331": "Ley uruguaya de protección de datos personales; exige residencia local de datos, consentimiento y derechos del titular.",
+    "Certificadora de humo": "Modelo de negocio rechazado: vender sellos de trazabilidad sin datos reales detrás."
+  }
+}

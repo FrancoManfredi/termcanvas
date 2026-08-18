@@ -183,7 +183,7 @@ test("resolveConflictWorktree: missing issue returns error", async () => {
   assert.equal(terminalCalls.length, 0);
 });
 
-test("buildResolveConflictPrompt: single line with the merge contract", () => {
+test("buildResolveConflictPrompt: multiline with the merge contract", () => {
   const prompt = buildResolveConflictPrompt({
     issueNumber: 7,
     title: "Broken button",
@@ -191,7 +191,7 @@ test("buildResolveConflictPrompt: single line with the merge contract", () => {
     branch: "issue-7-broken-button",
   });
 
-  assert.ok(!prompt.includes("\n"), "prompt must be one line");
+  assert.ok(prompt.includes("\n"), "prompt must be multiline markdown");
   assert.ok(prompt.includes("issue #7"));
   assert.ok(prompt.includes("gh pr view 12 --comments"), "must read the [mergeador] comment with the file list");
   assert.ok(prompt.includes("[mergeador]"), "must reference the mergeador comment");
@@ -220,7 +220,7 @@ test("buildResolveConflictPrompt: injected file list replaces the gh lookups", (
     conflictFiles: ["src/login.ts", "src/store.ts"],
   });
 
-  assert.ok(!prompt.includes("\n"), "prompt must be one line");
+  assert.ok(prompt.includes("\n"), "prompt must be multiline markdown");
   assert.ok(prompt.includes("src/login.ts, src/store.ts"), "must inject the app-resolved file list");
   assert.ok(prompt.includes("NO hace falta correr gh pr view"), "must say the gh lookup is not needed");
   assert.ok(!prompt.includes("gh pr view 12 --comments"), "must not ask to re-derive the file list with gh");

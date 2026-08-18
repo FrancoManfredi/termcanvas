@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildPlanningPrompt } from "../src/planner/planningPrompt.ts";
+import { parsePlanningPlan } from "../src/planner/parsePlanResult.ts";
 
 const BASE = {
   mode: "roadmap" as const,
@@ -32,4 +33,49 @@ test("buildPlanningPrompt: la sección de issues abiertos solo aparece cuando ha
   assert.match(withIssues, /#42 Crasheo al abrir detalles/);
   assert.match(withIssues, /marcá existingIssueNumber/);
   assert.match(withIssues, /NO lo propongas como tema nuevo/);
+});
+
+test("buildPlanningPrompt: el veredicto de requerimientos solo aparece con síntesis inyectada", () => {
+  const without = buildPlanningPrompt(BASE);
+  assert.doesNotMatch(without, /## VEREDICTO DE REQUERIMIENTOS/);
+  assert.doesNotMatch(without, /requisito-no-cumplido/);
+
+  const withRequirements = buildPlanningPrompt({
+    ...BASE,
+    requirementsText: "## REQUERIMIENTOS RELEVADOS\n### RF-001 …",
+  });
+  assert.match(withRequirements, /## VEREDICTO DE REQUERIMIENTOS \(OBLIGATORIO\)/);
+  assert.match(withRequirements, /NO_VERIFICABLE/);
+  assert.match(withRequirements, /"requisito-no-cumplido"/);
+  assert.match(withRequirements, /"requisitos"/);
+});
+
+test("parsePlanningPlan: parsea requisitos tolerante (estados válidos, descarta inválidos)", () => {
+  const parsed = parsePlanningPlan(
+    JSON.stringify({
+      mode: "audit",
+      repo: "owner/repo",
+      findings: [],
+      requisitos: [
+        { id: "RF-001", estado: "CUMPLE", justificacion: "implementado en src/x.ts" },
+        { id: "ASR-001", estado: "NO_VERIFICABLE", justificacion: "requiere medir runtime" },
+        { id: "CON-001", estado: "PARCIAL", justificacion: "falta service worker" },
+        { id: "RF-999", estado: "INVENTADO", justificacion: "estado fuera de norma" },
+        { id: "", estado: "CUMPLE", justificacion: "id vacío" },
+      ],
+    }),
+  );
+  assert.ok(parsed);
+  assert.equal(parsed.result.requisitos?.length, 3);
+  assert.equal(parsed.result.requisitos?.[0].estado, "CUMPLE");
+  assert.equal(parsed.result.requisitos?.[1].estado, "NO_VERIFICABLE");
+  assert.equal(parsed.result.requisitos?.[2].estado, "PARCIAL");
+});
+
+test("parsePlanningPlan: planes sin requisitos no rompen (campo ausente)", () => {
+  const parsed = parsePlanningPlan(
+    JSON.stringify({ mode: "audit", repo: "owner/repo", findings: [] }),
+  );
+  assert.ok(parsed);
+  assert.equal(parsed.result.requisitos, undefined);
 });

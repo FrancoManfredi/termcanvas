@@ -12,6 +12,7 @@
 // cuando el terminal deja de estar vivo o cuando expira el timeout.
 import {
   REVIEW_LABEL_FIX_APPLIED,
+  REVIEW_LABEL_GATE_FAIL,
   REVIEW_LABEL_PENDING,
   canonicalReviewLabel,
 } from "./reviewVerdict";
@@ -20,7 +21,7 @@ export type CycleLabel = "review:pendiente" | "review:fix-aplicado";
 
 export interface PrLookupResult {
   ok: boolean;
-  pr?: { number: number; state: string } | null;
+  pr?: { number: number; state: string; headRefOid?: string | null } | null;
   error?: string;
 }
 
@@ -57,6 +58,16 @@ export interface IssueLabelWatcherDeps {
     issueNumber: number | null,
     label: CycleLabel,
   ) => Promise<ApplyLabelResult>;
+  // Gate de calidad: cuando está disponible, corre ANTES de materializar el
+  // label de un PR sin ciclo (runGateForIssue aplica review:pendiente o
+  // gate:fallo al terminar; el watcher converge cuando el PR deja de estar
+  // sin label del ciclo). Con un error de infra, la review avanza igual.
+  runGate?: (options: {
+    repoPath: string;
+    issueNumber: number;
+    prNumber: number;
+    headRefOid: string | null;
+  }) => void;
   isLive: () => boolean;
   notify: (kind: "info" | "warn" | "error", message: string) => void;
 }
@@ -141,6 +152,19 @@ export function watchIssuePrLabels(
       decision.reviewDecision === null ||
       decision.reviewDecision === "REVIEW_REQUIRED";
     if (canonical === null && pendingDecision) {
+      // PR nuevo sin label del ciclo: si el gate de calidad está disponible,
+      // correrlo ANTES de materializar review:pendiente (el gate aplica el
+      // label al terminar: PASS → review:pendiente, FAIL → gate:fallo; un
+      // error de infra deja el PR sin ciclo y el próximo poll materializa).
+      if (deps.runGate) {
+        deps.runGate({
+          repoPath: options.repoPath,
+          issueNumber: options.issueNumber,
+          prNumber: found.pr.number,
+          headRefOid: found.pr.headRefOid ?? null,
+        });
+        return;
+      }
       await materialize(found.pr.number, REVIEW_LABEL_PENDING);
       return;
     }
@@ -148,12 +172,25 @@ export function watchIssuePrLabels(
       decision.reviewDecision === "FIX_APPLIED" &&
       canonical !== REVIEW_LABEL_FIX_APPLIED
     ) {
+      // Push nuevo tras una review (fix o resolución de conflicto): correr el
+      // gate de nuevo (cache por sha dentro de runGateForIssue) antes de
+      // re-materializar el ciclo.
+      if (deps.runGate) {
+        deps.runGate({
+          repoPath: options.repoPath,
+          issueNumber: options.issueNumber,
+          prNumber: found.pr.number,
+          headRefOid: found.pr.headRefOid ?? null,
+        });
+        return;
+      }
       await materialize(found.pr.number, REVIEW_LABEL_FIX_APPLIED);
       return;
     }
     if (
       canonical === REVIEW_LABEL_FIX_APPLIED ||
-      canonical === REVIEW_LABEL_PENDING
+      canonical === REVIEW_LABEL_PENDING ||
+      canonical === REVIEW_LABEL_GATE_FAIL
     ) {
       // Ya está materializado por esta u otra vigilancia; convergió.
       stop();

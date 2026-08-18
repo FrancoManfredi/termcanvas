@@ -1,0 +1,127 @@
+{
+  "mode": "audit",
+  "repo": "FrancoManfredi/education-games",
+  "template": {
+    "version": "0.1.0-piloto",
+    "os": "Windows 10 / Linux (netbook 2GB RAM)",
+    "agent": "opencode (desktop)",
+    "additionalContext": "Entrevista de contexto: plataforma de juegos de matemática para primaria, offline dentro del aula, netbooks viejas, sincronización diferida con el panel de la maestra."
+  },
+  "findings": [
+    {
+      "title": "Clave de API del servicio de sincronización expuesta en el bundle del cliente",
+      "severity": "critical",
+      "file": "src/lib/sync.ts",
+      "line": 24,
+      "description": "La API key del backend de sync está hardcodeada como constante en el módulo del cliente y viaja en el bundle de la PWA. Cualquiera que abra las devtools la lee y puede falsificar sincronizaciones de progreso. Debe moverse a una variable de entorno servida por un endpoint del backend.",
+      "labels": ["security", "bug"],
+      "template": {
+        "stepsToReproduce": [
+          "Abrir la PWA y la consola de devtools.",
+          "Ejecutar fetch('/assets/index-*.js') y buscar la cadena de la API key.",
+          "Usar la clave contra el endpoint de sincronización."
+        ],
+        "expectedBehavior": "El bundle del cliente no contiene ningún secreto; la autenticación del sync la firma el backend.",
+        "actualBehavior": "La clave viaja en texto plano dentro del bundle y es visible en devtools.",
+        "area": "security",
+        "logs": "Sin logs necesarios: la clave se ve a simple vista en el source del bundle."
+      }
+    },
+    {
+      "title": "Race condition en la cola de sincronización offline al cerrar la netbook a mitad de sync",
+      "severity": "high",
+      "file": "src/lib/offline-queue.ts",
+      "line": 87,
+      "description": "Si el alumno cierra la netbook mientras el flujo de sincronización diferida está procesando la cola, el job en curso queda a medio escribir y la cola pierde consistencia: el progreso del nivel se marca como enviado sin llegar nunca al panel. Falta un commit atómico por job y un recovery al arrancar que descarte los jobs huérfanos.",
+      "labels": ["concurrency", "bug"],
+      "duplicateOf": 3,
+      "template": {
+        "stepsToReproduce": [
+          "Jugar un nivel con la netbook en modo offline.",
+          "Conectar la red y esperar a que arranque la sincronización.",
+          "Apagar la netbook a los 2 segundos de iniciado el sync y volver a encenderla."
+        ],
+        "expectedBehavior": "Al reabrir la app, la cola retoma o descarta el job incompleto y el progreso llega intacto al panel.",
+        "actualBehavior": "El job queda a medio procesar y el progreso de ese nivel se pierde sin aviso.",
+        "area": "data",
+        "logs": "offline-queue.log muestra el job en estado 'enviando' que nunca pasa a 'ok'."
+      }
+    },
+    {
+      "title": "El runtime de juegos retiene memoria entre niveles y cuelga las netbooks de 2GB",
+      "severity": "high",
+      "file": "src/game/runtime.ts",
+      "line": 156,
+      "description": "Cada nivel nuevo crea nodos del motor (sprites, timers, listeners) sin liberar los del nivel anterior: tras 3 niveles la netbook de 2GB queda sin memoria y el juego se congela. Falta un pool de objetos y el teardown del escenario al cambiar de nivel.",
+      "labels": ["perf", "bug"],
+      "template": {
+        "stepsToReproduce": [
+          "Abrir un juego y jugar el nivel 1.",
+          "Completar el nivel 2 sin recargar la página.",
+          "Entrar al nivel 3 y observar el rendimiento con el monitor de memoria."
+        ],
+        "expectedBehavior": "El consumo de memoria se mantiene estable entre niveles.",
+        "actualBehavior": "La memoria crece ~60MB por nivel y en el nivel 3 el juego se traba.",
+        "area": "performance",
+        "logs": "Devtools > Performance: heap snapshot creciente entre niveles."
+      }
+    },
+    {
+      "title": "El flujo offline (guardar y sincronizar) no tiene tests",
+      "severity": "medium",
+      "file": "src/lib/offline-queue.ts",
+      "line": 0,
+      "description": "El corazón del producto — guardar progreso sin red y sincronizarlo después — no tiene ni un test. Depende de una fecha de piloto con escuelas y cualquier regresión en la cola rompe el caso de uso principal en silencio. Se necesita cobertura mínima de los estados: encolado, enviado, reintento, fallo.",
+      "labels": ["tests"],
+      "template": {
+        "stepsToReproduce": [
+          "Revisar el árbol de tests del repo.",
+          "Buscar tests que toquen src/lib/offline-queue.ts.",
+          "Ejecutar la suite completa y verificar cobertura."
+        ],
+        "expectedBehavior": "La cola de sync tiene tests para encolado, envío y reintento.",
+        "actualBehavior": "No existe ningún test para el módulo de la cola.",
+        "area": "tests",
+        "logs": "npm test: sin casos que referencien offline-queue."
+      }
+    },
+    {
+      "title": "Duplicación del cálculo de progreso por alumno entre el dashboard y el reporte",
+      "severity": "medium",
+      "file": "src/teacher/progress.ts",
+      "line": 200,
+      "description": "El cálculo de 'alumnos que completaron la actividad' está implementado dos veces con fórmulas que ya divergieron: el dashboard cuenta solo sincronizados y el reporte suma pendientes. Misma lógica que «Cálculo de progreso en el dashboard» pero en el flujo de reportes. Unificar en un único módulo de dominio.",
+      "labels": ["refactor"],
+      "template": {
+        "stepsToReproduce": [
+          "Abrir el dashboard de la maestra.",
+          "Abrir el reporte de la misma actividad para el mismo grupo.",
+          "Comparar los totales de completados."
+        ],
+        "expectedBehavior": "Ambos totales salen del mismo cálculo y coinciden.",
+        "actualBehavior": "El dashboard y el reporte muestran números distintos para los mismos datos.",
+        "area": "refactor",
+        "logs": "Captura de pantalla de ambos paneles con la discrepancia."
+      }
+    },
+    {
+      "title": "README desactualizado: el panel de progreso figura como 'próximamente' cuando ya está implementado",
+      "severity": "low",
+      "file": "README.md",
+      "line": 12,
+      "description": "La sección de estado del README lista el panel de progreso por alumno como planificado, pero la feature ya está en producción en la escuela piloto. Un docente que lea el README no sabe qué puede usar hoy. Actualizar la sección de estado.",
+      "labels": ["docs"],
+      "template": {
+        "stepsToReproduce": [
+          "Abrir README.md.",
+          "Leer la sección 'Estado del proyecto'.",
+          "Comparar con las features visibles en la app."
+        ],
+        "expectedBehavior": "El README refleja el estado real: panel de progreso implementado.",
+        "actualBehavior": "El README marca el panel como 'próximamente'.",
+        "area": "docs",
+        "logs": "—"
+      }
+    }
+  ]
+}

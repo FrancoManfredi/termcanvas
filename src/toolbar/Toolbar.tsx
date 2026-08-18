@@ -6,11 +6,7 @@ import { useWorkspaceStore } from "../stores/workspaceStore";
 import { useHubStore } from "../stores/hubStore";
 import { SettingsModal } from "../components/SettingsModal";
 import { UpdateModal } from "../components/UpdateModal";
-import { PlannerModal } from "../components/PlannerModal";
-import { RepoContextModal } from "../components/RepoContextModal";
-import { usePlannerModalStore } from "../stores/plannerModalStore";
-import { useIssuePlannerStore } from "../stores/issuePlannerStore";
-import { useRepoContextStore } from "../stores/repoContextStore";
+import { CoreArchitectureModal } from "../components/CoreArchitectureModal";
 import { useNotificationStore } from "../stores/notificationStore";
 import { resolveActiveWorktree } from "../planner/planningSession";
 import { useT } from "../i18n/useT";
@@ -53,33 +49,23 @@ export function Toolbar() {
   const hubChord = formatShortcut(hubShortcut, isMac);
   const hubLabel = t["hub.toolbarLabel"](hubChord);
 
-  const plannerOpen = usePlannerModalStore((s) => s.open);
-  const togglePlanner = usePlannerModalStore((s) => s.togglePlanner);
-  const plannerBusy = useIssuePlannerStore(
-    (s) => s.phase === "running" || s.phase === "creating",
-  );
-  // Resultados listos (auditoría o roadmap con propuestas): el icono
-  // muestra un check verde en vez del spinner para invitar a revisar.
-  const plannerDone = useIssuePlannerStore(
-    (s) => s.phase === "results" || s.phase === "summary",
-  );
+  // Modal unificado de arquitectura: reemplaza los dos botones separados
+  // (entrevista de contexto + entrevista de requerimientos). El modal
+  // inicializa los stores de las entrevistas al abrirse.
+  const [coreOpen, setCoreOpen] = useState(false);
 
-  const repoContextOpen = useRepoContextStore((s) => s.open);
-  const openRepoContextModal = useRepoContextStore((s) => s.openModal);
-
-  const openRepoContext = () => {
+  const openCore = () => {
     const active = resolveActiveWorktree();
     if (!active) {
       useNotificationStore
         .getState()
         .notify(
           "error",
-          (t.repo_context_no_project as string) ??
-            "Open a project first to edit its context.",
+          "Open a project first to work on its architecture.",
         );
       return;
     }
-    void openRepoContextModal(active.path);
+    setCoreOpen(true);
   };
 
   const workspaceName =
@@ -151,61 +137,20 @@ export function Toolbar() {
 
           <button
             type="button"
-            data-repo-context-trigger="true"
-            data-active={repoContextOpen ? "true" : "false"}
+            data-core-architecture-trigger="true"
+            data-active={coreOpen ? "true" : "false"}
             className={iconButtonClass}
             style={{
               ...ICON_BUTTON_TRANSITION,
-              color: repoContextOpen ? "var(--text-primary)" : undefined,
-              backgroundColor: repoContextOpen
-                ? "var(--surface-hover)"
-                : undefined,
+              color: coreOpen ? "var(--text-primary)" : undefined,
+              backgroundColor: coreOpen ? "var(--surface-hover)" : undefined,
             }}
-            onClick={openRepoContext}
-            title={t.repo_context_toolbar_label}
-            aria-label={t.repo_context_toolbar_label}
+            onClick={openCore}
+            title="Arquitectura del proyecto"
+            aria-label="Arquitectura del proyecto"
+            aria-pressed={coreOpen}
           >
-            <RepoContextIcon />
-          </button>
-
-          <button
-            type="button"
-            data-planner-trigger="true"
-            data-active={plannerOpen ? "true" : "false"}
-            className={`${iconButtonClass} relative`}
-            style={{
-              ...ICON_BUTTON_TRANSITION,
-              color: plannerOpen ? "var(--text-primary)" : undefined,
-              backgroundColor: plannerOpen ? "var(--surface-hover)" : undefined,
-            }}
-            onClick={togglePlanner}
-            title={t.planner_toolbar_label}
-            aria-label={t.planner_toolbar_label}
-            aria-pressed={plannerOpen}
-          >
-            <PlannerIcon />
-            {/* When the session keeps working with the modal closed,
-                the small spinner signals background activity. */}
-            {plannerBusy && (
-              <span
-                aria-hidden="true"
-                className="absolute -bottom-0.5 -right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-[var(--bg)]"
-              >
-                <SpinnerIcon className="motion-safe:animate-spin text-[var(--accent)]" />
-              </span>
-            )}
-            {/* Results ready to review: a green check invites opening
-                the planner instead of rerunning the session. */}
-            {!plannerBusy && plannerDone && (
-              <span
-                aria-hidden="true"
-                className="absolute -bottom-0.5 -right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-[var(--bg)]"
-              >
-                <span className="flex h-2.5 w-2.5 items-center justify-center rounded-full bg-[var(--green)]">
-                  <CheckGlyph />
-                </span>
-              </span>
-            )}
+            <ArchitectureIcon />
           </button>
 
           <button
@@ -259,8 +204,9 @@ export function Toolbar() {
 
       {showSettings && <SettingsModal onClose={closeSettings} />}
       {showUpdate && <UpdateModal onClose={() => setShowUpdate(false)} />}
-      {plannerOpen && <PlannerModal />}
-      {repoContextOpen && <RepoContextModal />}
+      {coreOpen && (
+        <CoreArchitectureModal isOpen onClose={() => setCoreOpen(false)} />
+      )}
     </>
   );
 }
@@ -333,30 +279,29 @@ function HubIcon() {
   );
 }
 
-function RepoContextIcon() {
-  // File sheet with an asterisk — the repo context is a living note
-  // about the project, not code. Stroke-only like its siblings.
+function ArchitectureIcon() {
+  // Capas apiladas (3 rombos) — el modal unificado de arquitectura del
+  // proyecto: entrevistas + resultados post-entrevista. Stroke-only como
+  // sus hermanos de la barra.
   return (
     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
       <path
-        d="M4 2.5h6l2 2v9h-8z"
+        d="M8 1.5L13.5 4 8 6.5 2.5 4z"
         stroke="currentColor"
         strokeWidth="1.3"
-        strokeLinecap="round"
         strokeLinejoin="round"
       />
       <path
-        d="M10 2.5v2h2"
+        d="M2.5 8L8 10.5 13.5 8"
         stroke="currentColor"
         strokeWidth="1.3"
-        strokeLinecap="round"
         strokeLinejoin="round"
       />
       <path
-        d="M8 6.5v4M6 7.5l4 2M10 7.5l-4 2"
+        d="M2.5 12L8 14.5 13.5 12"
         stroke="currentColor"
-        strokeWidth="1.1"
-        strokeLinecap="round"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
       />
     </svg>
   );

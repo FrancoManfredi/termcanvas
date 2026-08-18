@@ -150,8 +150,8 @@ test("reviewIssueWorktree: happy path creates a detached review worktree + termi
     "prompt should target the /reviews endpoint for anchored comments",
   );
   assert.ok(
-    !terminalCalls[0].initialPrompt.includes("\n"),
-    "prompt must be a single line (opencode --prompt breaks on newlines)",
+    terminalCalls[0].initialPrompt.includes("\n"),
+    "prompt must be multiline markdown",
   );
   assert.equal(arrows.length, 1);
   assert.equal(arrows[0].issueId, "issue-42");
@@ -388,8 +388,8 @@ test("reviewIssueWorktree: injects prefetched PR context into the prompt when th
     "prompt must tell the agent to keep the fixed skeleton schema",
   );
   assert.ok(
-    !terminalCalls[0].initialPrompt.includes("\n"),
-    "context injection must keep the prompt single-line",
+    terminalCalls[0].initialPrompt.includes("\n"),
+    "context injection must keep the prompt multiline",
   );
   assert.equal(notifications.length, 0, "successful snapshot must not warn");
 });
@@ -551,7 +551,7 @@ test("buildIssueReviewPrompt: single line with strict mandatory issue-body read"
     commitSha: "deadbeef",
   });
 
-  assert.ok(!prompt.includes("\n"), "prompt must be one line");
+  assert.ok(prompt.includes("\n"), "prompt must be multiline markdown");
   assert.ok(prompt.includes("issue #7 — Broken button"));
   assert.ok(prompt.includes("gh pr view 12"));
   assert.ok(prompt.includes("gh pr diff 12"));
@@ -663,7 +663,7 @@ test("buildIssueReviewPrompt: injects prefetched context without breaking the on
       "PR head (headRefOid): f00d | Última review: COMMENTED (commit deadbeef) | Diff del PR disponible en review-context-12.diff",
   });
 
-  assert.ok(!prompt.includes("\n"), "prompt must stay single-line with injected context");
+  assert.ok(prompt.includes("\n"), "prompt must stay multiline with injected context");
   assert.ok(
     prompt.includes("CONTEXTO INYECTADO POR LA APP"),
     "prompt must mark the prefetched context block",
@@ -675,7 +675,7 @@ test("buildIssueReviewPrompt: injects prefetched context without breaking the on
   );
 });
 
-test("buildIssueReviewPrompt: prefetched review context keeps the one-line contract", () => {
+test("buildIssueReviewPrompt: prefetched review context keeps the multiline contract", () => {
   const prompt = buildIssueReviewPrompt({
     issueNumber: 7,
     title: "Broken button",
@@ -686,7 +686,7 @@ test("buildIssueReviewPrompt: prefetched review context keeps the one-line contr
       "PR head (headRefOid): f00d | Última review: CAMBIOS_PEDIDOS (commit deadbeef)",
   });
 
-  assert.ok(!prompt.includes("\n"), "prompt must stay single-line");
+  assert.ok(prompt.includes("\n"), "prompt must stay multiline");
   assert.ok(
     prompt.includes("CONTEXTO INYECTADO POR LA APP"),
     "prompt must carry the prefetched context",
@@ -725,7 +725,7 @@ test("buildIssueReviewPrompt: uses the pre-generated JSON skeleton when the app 
     prompt.includes("--input review-template-12.json"),
     "skeleton must be posted from the file via --input",
   );
-  assert.ok(!prompt.includes("\n"), "template rule must keep the prompt single-line");
+  assert.ok(prompt.includes("\n"), "template rule must keep the prompt multiline");
 });
 
 test("buildIssueReviewPrompt: no skeleton rule without the pre-generated template file", () => {

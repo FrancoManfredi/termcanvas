@@ -28,6 +28,9 @@ export const REVIEW_LABEL_CHANGES = "review:comentado";
 export const REVIEW_LABEL_FIX_APPLIED = "review:fix-aplicado";
 export const REVIEW_LABEL_APPROVED = "review:aprobado";
 export const REVIEW_LABEL_CONFLICT = "conflicto:main";
+// El gate determinista falló un check bloqueante: la review queda bloqueada
+// hasta resolver (push nuevo → el gate re-corre) o forzar con "Revisar igual".
+export const REVIEW_LABEL_GATE_FAIL = "gate:fallo";
 
 // Every label of the review cycle, in ascending state order. Used by the
 // issue mirror to clear the whole cycle before applying the canonical label.
@@ -37,12 +40,14 @@ export const REVIEW_CYCLE_LABELS = [
   REVIEW_LABEL_FIX_APPLIED,
   REVIEW_LABEL_APPROVED,
   REVIEW_LABEL_CONFLICT,
+  REVIEW_LABEL_GATE_FAIL,
 ] as const;
 
 // State precedence when a PR carries more than one cycle label (e.g. a stale
 // review:aprobado left alongside conflicto:main): the most advanced state
 // wins. Single source of truth for the label mirrored onto the issue.
 const REVIEW_LABEL_PRECEDENCE: Record<string, number> = {
+  [REVIEW_LABEL_GATE_FAIL]: 6,
   [REVIEW_LABEL_CONFLICT]: 5,
   [REVIEW_LABEL_APPROVED]: 4,
   [REVIEW_LABEL_FIX_APPLIED]: 3,

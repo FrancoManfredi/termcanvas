@@ -7,6 +7,16 @@ export type PlannerMode = "roadmap" | "audit";
 
 export type IssueSeverity = "critical" | "high" | "medium" | "low";
 
+// Veredicto de cumplimiento de un requerimiento (RF/ASR/restricción) que el
+// LLM emite en el diagnóstico contra el código real. NO_VERIFICABLE = requiere
+// medición/ejecución (no hay evidencia estática): se destaca como defecto a
+// medir, pero NO genera issue (no hay evidencia de incumplimiento).
+export interface RequisitoVerdict {
+  id: string; // RF-001, ASR-001, CON-001…
+  estado: "CUMPLE" | "NO_CUMPLE" | "PARCIAL" | "NO_VERIFICABLE";
+  justificacion: string; // evidencia file:line cuando aplica
+}
+
 // Campos del formulario de bug report (ver bug_report.yml de gentle-ai)
 // que la sesión de opencode completa en cada issue del plan; la app los
 // compone después en el body exacto del template.
@@ -50,6 +60,8 @@ export interface RoadmapPlan {
   mode: "roadmap";
   repo: string;
   proposals: RoadmapProposal[];
+  // Veredicto de cumplimiento de requerimientos (ver RequisitoVerdict).
+  requisitos?: RequisitoVerdict[];
 }
 
 export interface AuditFinding {
@@ -58,6 +70,9 @@ export interface AuditFinding {
   file: string;
   line: number;
   description: string;
+  // Origen del hallazgo cuando lo emitió el veredicto de requerimientos
+  // ("requisito-no-cumplido"): la UI lo etiqueta como Requisito.
+  rule?: string;
   // Labels temáticas (bug, security, docs, perf…). El agente las escribe
   // si quiere; si no, la app las deriva por severidad/area/archivo al
   // parsear (ver deriveAuditLabels.ts). Opcional: los planes viejos no la
@@ -74,6 +89,8 @@ export interface AuditPlan {
   mode: "audit";
   repo: string;
   findings: AuditFinding[];
+  // Veredicto de cumplimiento de requerimientos (ver RequisitoVerdict).
+  requisitos?: RequisitoVerdict[];
 }
 
 export type PlanningResult = RoadmapPlan | AuditPlan;

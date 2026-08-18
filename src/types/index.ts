@@ -17,8 +17,42 @@ import type {
   CreatePinInput,
   UpdatePinInput,
 } from "../../shared/pin";
+import type {
+  TurnResult,
+  UserAnswerInput,
+  InterviewLedger,
+  InterviewQuestion,
+  InterviewSummary,
+  BriefDocument,
+  BriefInterviewPosition,
+  SynthesisResult,
+} from "../../headless-runtime/interview/index.ts";
 
 export type { Pin, PinLink, PinStatus, CreatePinInput, UpdatePinInput };
+export type { BriefInterviewPosition } from "../../headless-runtime/interview/index.ts";
+
+// Contexto del proyecto (Fase 0) visto desde la UI: los briefs sintetizados
+// del proyecto, cuál está marcado como activo (el motor lo usa en cada
+// llamada) y las entrevistas de contexto en progreso. Es el shape que
+// devuelve el IPC interview:briefStatus.
+export interface BriefListItem {
+  brief: BriefDocument;
+  path: string;
+  timestamp: number;
+}
+
+export interface BriefInterviewInProgress {
+  ledgerPath: string;
+  timestamp: number;
+  answers_count: number;
+  total_questions: number;
+}
+
+export interface BriefStatus {
+  briefs: BriefListItem[];
+  activePath: string | null;
+  inProgress: BriefInterviewInProgress[];
+}
 
 type SessionTelemetryProvider = Exclude<TelemetryProvider, "unknown">;
 
@@ -168,6 +202,19 @@ export interface TerminalData {
   // Set on review terminals: the runtime auto-cleans the review worktree
   // when the CLI process exits, so review sessions never leave garbage.
   reviewIssueNumber?: number;
+  // Headless (non-interactive) runs: the CLI is launched with its `run`
+  // subcommand and the initialPrompt passed positionally, streams its
+  // output to the same PTY and exits by itself — no TUI, no resume, no
+  // session capture. The caller (e.g. the planning session) observes the
+  // result artifact or the process exit to finish the flow.
+  headlessRun?: boolean;
+  // Headless runs with a custom command (e.g. `node scripts/run-<tool>.mjs
+  // --repo <path>`): overrides the shell and args of the launch entirely.
+  // Same lifecycle as headlessRun (no TUI, no resume, no session capture,
+  // exits by itself). Used by the deterministic-tools phase of the
+  // diagnosis pipeline.
+  headlessShell?: string;
+  headlessArgs?: string[];
   // Captured when the review terminal is created, so the runtime can read
   // GitHub's reviewDecision from the PR before the worktree is deleted.
   reviewPrNumber?: number;
@@ -534,6 +581,12 @@ export type AgentStreamEvent =
     };
 
 export interface TermCanvasAPI {
+  // Rutas del lado de la app (proceso principal): scriptsDir es donde viven
+  // los scripts de soporte (ej. run-diagnostico-tools.mjs del pipeline de
+  // herramientas deterministas del Diagnóstico).
+  paths: {
+    scriptsDir: string;
+  };
   terminal: {
     create: (options: {
       cwd: string;
@@ -967,6 +1020,66 @@ export interface TermCanvasAPI {
     unwatchAllDirs: () => Promise<void>;
     onDirChanged: (callback: (dirPath: string) => void) => () => void;
   };
+  interview: {
+    // Motor de entrevista de requerimientos (v4): corre en el proceso
+    // principal (el renderer no puede correr node:fs + el SDK). El estado
+    // vive en el ledger <projectPath>/.agents/interview/requerimientos/entrevista-*.json y
+    // el contexto (Fase 0) en contexto-*-documento.json — cada llamada del motor
+    // usa el brief más reciente del proyecto como projectBrief.
+    create: (projectPath: string) => Promise<{
+      ledgerPath: string;
+      firstQuestion: TurnResult;
+    }>;
+    submit: (ledgerPath: string, answer: UserAnswerInput) => Promise<TurnResult>;
+    resume: (ledgerPath: string) => Promise<TurnResult>;
+    finish: (ledgerPath: string) => Promise<{
+      synthesis: SynthesisResult;
+      synthesisPath: string;
+    }>;
+    state: (ledgerPath: string) => Promise<{
+      ledger: InterviewLedger;
+      lastQuestion: InterviewQuestion | null;
+      progress: { answered: number; closed: number; total: number; pct: number };
+    }>;
+    list: (projectPath: string) => Promise<InterviewSummary[]>;
+    delete: (ledgerPath: string) => Promise<{ ok: boolean }>;
+    briefStatus: (projectPath: string) => Promise<{
+      briefs: { brief: BriefDocument; path: string; timestamp: number }[];
+      activePath: string | null;
+      inProgress: {
+        ledgerPath: string;
+        timestamp: number;
+        answers_count: number;
+        total_questions: number;
+      }[];
+    }>;
+    setActiveBrief: (projectPath: string, briefPath: string) => Promise<{ ok: boolean }>;
+    activeBriefText: (projectPath: string) => Promise<string>;
+    requirementsStatus: (projectPath: string) => Promise<{
+      synthesis: { path: string; timestamp: number; resumen: string }[];
+      activePath: string | null;
+    }>;
+    setActiveRequirements: (projectPath: string, synthesisPath: string) => Promise<{ ok: boolean }>;
+    activeRequirementsText: (projectPath: string) => Promise<string>;
+    briefCreate: (projectPath: string) => Promise<{
+      ledgerPath: string;
+      position: BriefInterviewPosition | null;
+    }>;
+    briefState: (ledgerPath: string) => Promise<{
+      position: BriefInterviewPosition | null;
+    }>;
+    briefSubmit: (
+      ledgerPath: string,
+      input: { bloque: string; pregunta: string; respuesta: string },
+    ) => Promise<{
+      position: BriefInterviewPosition | null;
+    }>;
+    briefSynthesize: (ledgerPath: string) => Promise<{
+      brief: BriefDocument;
+      briefPath: string;
+    }>;
+    briefDelete: (projectPath: string, briefPath: string) => Promise<{ ok: boolean }>;
+  };
   memory: {
     scan: (worktreePath: string) => Promise<{
       nodes: Array<{
@@ -1227,7 +1340,8 @@ export interface TermCanvasAPI {
         | "review:comentado"
         | "review:fix-aplicado"
         | "review:aprobado"
-        | "conflicto:main",
+        | "conflicto:main"
+        | "gate:fallo",
     ) => Promise<{ ok: true } | { ok: false; error: string }>;
     syncIssueReviewLabel: (
       cwd: string,
@@ -1251,6 +1365,20 @@ export interface TermCanvasAPI {
       | { ok: false; error: string }
     >;
     onMergeProgress: (callback: (event: MergeProgressEvent) => void) => () => void;
+    runIssueGate: (
+      cwd: string,
+      prNumber: number,
+    ) => Promise<
+      | {
+          ok: true;
+          verdict: "PASS" | "FAIL";
+          failedChecks: string[];
+          checks: Array<{ name: string; status: string; note: string | null }>;
+          reportPath: string;
+          headRefOid: string;
+        }
+      | { ok: false; error: string }
+    >;
   };
   agent: {
     start: (

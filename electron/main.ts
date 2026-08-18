@@ -53,6 +53,7 @@ import {
   enableHydraForProject,
 } from "./hydra-project.ts";
 import { buildLaunchSpec } from "./pty-launch.js";
+import { registerInterviewIpc, closeInterviewService } from "./interview-service";
 import {
   createDefaultComposerSubmitDeps,
   submitComposerRequest,
@@ -112,6 +113,7 @@ import {
   REVIEW_LABEL_CHANGES,
   REVIEW_LABEL_CONFLICT,
   REVIEW_LABEL_FIX_APPLIED,
+  REVIEW_LABEL_GATE_FAIL,
   REVIEW_LABEL_PENDING,
   canonicalReviewLabel,
   parseReviewBodyVerdict,
@@ -706,6 +708,14 @@ function setupIpc() {
 ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
     ptyManager.write(ptyId, data);
     telemetryService.recordPtyInputByPtyId(ptyId, data);
+  });
+
+  // Ruta de los scripts de soporte de la app (ej. run-diagnostico-tools.mjs
+  // del pipeline de herramientas del Diagnóstico). El preload corre
+  // sandboxed y no puede require('node:path'), así que la ruta se resuelve
+  // acá (proceso principal, Node completo) y se expone por IPC síncrono.
+  ipcMain.on("paths:get-scripts-dir", (event) => {
+    event.returnValue = path.join(__dirname, "..", "scripts");
   });
 
   ipcMain.on(
@@ -4365,6 +4375,9 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         // carries the verdict line wins (gh returns reviews oldest-first).
         const prs = openPrs
           .filter((pr) => {
+            // Un PR con el gate fallido nunca se mergea: primero hay que
+            // resolver (push nuevo) o forzar la review (quita gate:fallo).
+            if (pr.labels.includes(REVIEW_LABEL_GATE_FAIL)) return false;
             if (pr.labels.includes(REVIEW_LABEL_APPROVED)) return true;
             let approved = false;
             for (const body of pr.reviews) {
@@ -4641,6 +4654,197 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
     },
   );
 
+  // GATE DE CALIDAD (issues): corre scripts/run-issue-gate.mjs contra el PR
+  // en un worktree descartable (patrón del mergeador: fetch → worktree
+  // detached + junction de node_modules) para no interferir con el agente
+  // implementador. El renderer (issueGate.ts) aplica la política de labels:
+  // PASS → review:pendiente; FAIL → gate:fallo; error de infra → review
+  // igual (el gate no debe romper el flujo por problemas de entorno).
+  ipcMain.handle(
+    "github:run-issue-gate",
+    async (
+      _event,
+      cwd: string,
+      prNumber: number,
+    ): Promise<
+      | {
+          ok: true;
+          verdict: "PASS" | "FAIL";
+          failedChecks: string[];
+          checks: Array<{ name: string; status: string; note: string | null }>;
+          reportPath: string;
+          headRefOid: string;
+        }
+      | { ok: false; error: string }
+    > => {
+      const { execFile } = await import("child_process");
+      const { promisify } = await import("util");
+      const execFileAsync = promisify(execFile);
+      const execEnv: NodeJS.ProcessEnv = { ...process.env };
+      if (!execEnv.GH_TOKEN && process.env.GITHUB_TOKEN) {
+        execEnv.GH_TOKEN = process.env.GITHUB_TOKEN;
+      }
+      if (!execEnv.GITHUB_TOKEN && process.env.GH_TOKEN) {
+        execEnv.GITHUB_TOKEN = process.env.GH_TOKEN;
+      }
+      const gitOpts = { timeout: 60_000, maxBuffer: 10 * 1024 * 1024 };
+      const ghOpts = {
+        timeout: 60_000,
+        maxBuffer: 10 * 1024 * 1024,
+        env: execEnv,
+      };
+      const log = (message: string) => console.log(`[issue-gate] PR #${prNumber}: ${message}`);
+
+      let worktreePath: string | null = null;
+      try {
+        // 1) Shas del PR: el gate trabaja con shas explícitos (base/head),
+        // sin depender de refs locales ni de la rama checked out.
+        const { stdout: prJson } = await execFileAsync(
+          "gh",
+          [
+            "pr", "view", String(prNumber),
+            "--json", "state,headRefName,headRefOid,baseRefOid",
+            "--jq", "{ state: .state, headRefName: .headRefName, headRefOid: .headRefOid, baseRefOid: .baseRefOid }",
+          ],
+          { cwd, ...ghOpts },
+        );
+        const pr = JSON.parse(prJson) as {
+          state: string;
+          headRefName: string;
+          headRefOid: string;
+          baseRefOid: string;
+        };
+        if (pr.state !== "OPEN") {
+          return {
+            ok: false as const,
+            error: `PR #${prNumber} no está abierto (state: ${pr.state})`,
+          };
+        }
+        if (!pr.headRefOid || !pr.baseRefOid) {
+          return { ok: false as const, error: `PR #${prNumber} sin shas (headRefOid/baseRefOid)` };
+        }
+        log(`head ${pr.headRefOid.slice(0, 8)} (${pr.headRefName}) → base ${pr.baseRefOid.slice(0, 8)}`);
+
+        // 2) Fetch de main + rama del PR (mismo contrato que el mergeador).
+        await execFileAsync("git", ["fetch", "origin", "main"], { cwd, ...gitOpts });
+        await execFileAsync(
+          "git",
+          ["fetch", "origin", `refs/heads/${pr.headRefName}`],
+          { cwd, ...gitOpts },
+        );
+
+        // 3) Worktree descartable detached del head (nunca toca la rama local
+        // del implementador) + junction de node_modules para correr los tests
+        // sin un npm install completo.
+        worktreePath = path.join(cwd, ".worktrees", `gate-check-${prNumber}`);
+        await execFileAsync(
+          "git",
+          ["worktree", "add", "--detach", worktreePath, `origin/${pr.headRefName}`],
+          { cwd, ...gitOpts },
+        );
+        const nmSrc = path.join(cwd, "node_modules");
+        if (fs.existsSync(nmSrc)) {
+          try {
+            await execFileAsync(
+              "cmd",
+              ["/c", "mklink", "/J", path.join(worktreePath, "node_modules"), nmSrc],
+              { cwd, timeout: 30_000 },
+            );
+          } catch {
+            log("junction de node_modules falló; el gate degradará los checks que lo requieran");
+          }
+        }
+
+        // 4) Correr el orquestador del gate (proceso headless, sin tokens).
+        const outDir = path.join(cwd, ".agents", "planning");
+        fs.mkdirSync(outDir, { recursive: true });
+        const orchestrator = path.join(__dirname, "..", "scripts", "run-issue-gate.mjs");
+        const before = new Set(
+          fs.existsSync(outDir)
+            ? fs.readdirSync(outDir).filter((f) => /^gate-verdict-\d+\.json$/.test(f))
+            : [],
+        );
+        log("corriendo el gate (puede tardar 2-6 min)…");
+        await execFileAsync(
+          "node",
+          [
+            orchestrator,
+            "--repo", worktreePath,
+            "--base", pr.baseRefOid,
+            "--head", pr.headRefOid,
+            "--out", outDir,
+          ],
+          { cwd, timeout: 900_000, maxBuffer: 64 * 1024 * 1024, env: execEnv },
+        );
+        const after = fs
+          .readdirSync(outDir)
+          .filter((f) => /^gate-verdict-\d+\.json$/.test(f) && !before.has(f))
+          .sort();
+        const newest = after[after.length - 1];
+        if (!newest) {
+          return {
+            ok: false as const,
+            error: "El gate terminó sin escribir gate-verdict-*.json (revisá scripts/run-issue-gate.mjs)",
+          };
+        }
+        const reportPath = path.join(outDir, newest);
+        const verdictJson = JSON.parse(
+          fs.readFileSync(reportPath, "utf8"),
+        ) as {
+          verdict: "PASS" | "FAIL";
+          failed_checks: string[];
+          checks: Array<{ name: string; status: string; note: string | null }>;
+        };
+
+        // 5) Copia con nombre estable (cache por sha): gate-pr-<N>-<sha>.json.
+        const stableName = `gate-pr-${prNumber}-${pr.headRefOid.slice(0, 12)}.json`;
+        try {
+          fs.copyFileSync(reportPath, path.join(outDir, stableName));
+        } catch {
+          /* best effort: el reporte original queda como audit trail */
+        }
+        log(`veredicto ${verdictJson.verdict}${verdictJson.failed_checks.length ? ` (${verdictJson.failed_checks.join(", ")})` : ""} → ${stableName}`);
+        return {
+          ok: true as const,
+          verdict: verdictJson.verdict,
+          failedChecks: verdictJson.failed_checks,
+          checks: verdictJson.checks,
+          reportPath: path.join(outDir, stableName),
+          headRefOid: pr.headRefOid,
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log(`error: ${message}`);
+        return { ok: false as const, error: message };
+      } finally {
+        if (worktreePath) {
+          try {
+            fs.rmSync(path.join(worktreePath, "node_modules"), {
+              recursive: true,
+              force: true,
+            });
+          } catch {
+            /* best effort */
+          }
+          try {
+            await execFileAsync(
+              "git",
+              ["worktree", "remove", "--force", worktreePath],
+              { cwd, ...gitOpts },
+            );
+          } catch {
+            /* best effort */
+          }
+          try {
+            await execFileAsync("git", ["worktree", "prune"], { cwd, ...gitOpts });
+          } catch {
+            /* best effort */
+          }
+        }
+      }
+    },
+  );
+
   ipcMain.handle(
     "pin:save-attachment",
     (
@@ -4909,6 +5113,7 @@ app.whenReady().then(async () => {
     },
   });
   setupIpc();
+  registerInterviewIpc();
   await initAuth();
   createWindow();
   if (mainWindow) setupAutoUpdater(mainWindow);
@@ -4979,6 +5184,7 @@ app.on("will-quit", (event) => {
     hookReceiver.stop();
     stopAutoUpdater();
     apiServer.stop();
+    closeInterviewService();
     cleanupPortFile();
     app.quit();
   })();

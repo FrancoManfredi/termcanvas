@@ -120,7 +120,7 @@ test("buildIssueFixPrompt: prefetched context replaces the state queries but kee
       "PR head (headRefOid): f00d | Última review: CAMBIOS_PEDIDOS (commit deadbeef) | Diff del PR disponible en review-context-12.diff",
   });
 
-  assert.ok(!prompt.includes("\n"), "injected context must keep the fix prompt single-line");
+  assert.ok(prompt.includes("\n"), "injected context must keep the fix prompt multiline");
   assert.ok(
     prompt.includes("CONTEXTO INYECTADO POR LA APP"),
     "fix prompt must carry the prefetched context block",
@@ -171,8 +171,8 @@ const result = await fixIssueWorktree({
     "fix prompt must carry the prefetched context",
   );
   assert.ok(
-    !terminalCalls[0].initialPrompt.includes("\n"),
-    "fix prompt must stay single-line",
+    terminalCalls[0].initialPrompt.includes("\n"),
+    "fix prompt must stay multiline",
   );
   assert.equal(notifications.length, 0);
 });
@@ -290,7 +290,7 @@ test("buildIssueFixPrompt: single line with issue body flattened", () => {
     branch: "issue-7-broken-button",
   });
 
-  assert.ok(!prompt.includes("\n"), "prompt must be one line");
+  assert.ok(prompt.includes("\n"), "prompt must be multiline markdown");
   assert.ok(prompt.includes("issue #7 — Broken button"));
   assert.ok(prompt.includes("gh pr view 12 --json headRefOid"), "must confirm the head commit");
   assert.ok(prompt.includes("issue-7-broken-button"), "prompt must name the branch to push");

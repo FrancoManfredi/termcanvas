@@ -37,11 +37,14 @@ import {
   REVIEW_LABEL_CHANGES,
   REVIEW_LABEL_CONFLICT,
   REVIEW_LABEL_FIX_APPLIED,
+  REVIEW_LABEL_GATE_FAIL,
   REVIEW_LABEL_PENDING,
   canonicalReviewLabel,
   effectiveReviewLabel,
 } from "./reviewVerdict";
+import { overrideGateForIssue } from "./issueGate";
 import { buildIssueResolvePrompt } from "./issueResolvePrompt";
+import { resolveRepoContextText, resolveRequirementsText } from "../utils/repoContext";
 import { reuseTerminalForIssue } from "../actions/terminalSceneActions";
 import { useTerminalRuntimeStateStore } from "../stores/terminalRuntimeStateStore";
 import { useIssueStore, type IssueNodeData } from "../stores/issueStore";
@@ -909,11 +912,14 @@ function XyFlowCanvasInner() {
       const project = useProjectStore
         .getState()
         .projects.find((p) => p.id === target.projectId);
+      const repoContextText = await resolveRepoContextText(project?.path);
+      const requirementsText = await resolveRequirementsText(project?.path);
       const promptInput = {
         issueNumber: issue.issueNumber,
         title: issue.title,
         body: issue.body,
-        repoPath: project?.path,
+        repoContextText,
+        requirementsText,
       };
       const initialPrompt = buildIssueResolvePrompt(promptInput, "new");
       let resumePrompt = buildIssueResolvePrompt(promptInput, "resume");
@@ -1328,6 +1334,31 @@ function XyFlowCanvasInner() {
         });
     },
     [reactFlow, resolveContextMenuTarget],
+  );
+
+  // Escape manual del gate de calidad: "Revisar igual" quita gate:fallo,
+  // deja review:pendiente y lanza la review igual. El gate es una ayuda, no
+  // un dictador.
+  const handleOverrideGate = useCallback(
+    async (issueNumber: number, prNumber?: number) => {
+      const target = resolveContextMenuTarget();
+      if (!target) return;
+      let pr = prNumber;
+      if (pr === undefined) {
+        const primary = useIssueReviewStore.getState().prsByIssue[issueNumber];
+        if (primary == null || primary === "loading") return;
+        pr = primary.number;
+      }
+      const ok = await overrideGateForIssue({
+        repoPath: target.worktree.path,
+        issueNumber,
+        prNumber: pr,
+      });
+      if (ok) {
+        handleReviewIssue(issueNumber, pr);
+      }
+    },
+    [resolveContextMenuTarget, handleReviewIssue],
   );
 
   // Merge the reviewed PR once the reviewer verdict is APPROVED. Only
@@ -2204,10 +2235,15 @@ function XyFlowCanvasInner() {
               return {
                 label: isReviewing
                   ? "Revisando solución..."
-                  : openPrs.length > 1
-                    ? `REVISAR SOLUCIÓN (${openPrs.length} PRs)`
-                    : `REVISAR SOLUCIÓN (PR #${menuPrState.number})`,
-                disabled: isReviewing ? (true as const) : undefined,
+                  : menuEffective === REVIEW_LABEL_GATE_FAIL
+                    ? "REVISAR SOLUCIÓN (gate:fallo — ver card)"
+                    : openPrs.length > 1
+                      ? `REVISAR SOLUCIÓN (${openPrs.length} PRs)`
+                      : `REVISAR SOLUCIÓN (PR #${menuPrState.number})`,
+                disabled:
+                  isReviewing || menuEffective === REVIEW_LABEL_GATE_FAIL
+                    ? (true as const)
+                    : undefined,
                 onClick: () => handleReviewIssue(issueNumber),
               };
             })(),
@@ -2227,9 +2263,20 @@ function XyFlowCanvasInner() {
                 items.push({
                   label: isReviewing
                     ? "Revisando..."
-                    : `REVISAR SOLO PR #${pr.number}`,
-                  disabled: isReviewing ? (true as const) : undefined,
+                    : effective === REVIEW_LABEL_GATE_FAIL
+                      ? `REVISAR SOLO PR #${pr.number} (gate:fallo)`
+                      : `REVISAR SOLO PR #${pr.number}`,
+                  disabled:
+                    isReviewing || effective === REVIEW_LABEL_GATE_FAIL
+                      ? (true as const)
+                      : undefined,
                   onClick: () => handleReviewIssue(issueNumber, pr.number),
+                });
+              }
+              if (effective === REVIEW_LABEL_GATE_FAIL) {
+                items.push({
+                  label: `REVISAR IGUAL (PR #${pr.number})`,
+                  onClick: () => void handleOverrideGate(issueNumber, pr.number),
                 });
               }
               if (effective === REVIEW_LABEL_CHANGES) {
@@ -2290,6 +2337,14 @@ function XyFlowCanvasInner() {
                               ? (true as const)
                               : undefined,
                           onClick: () => handleFixIssue(issueNumber),
+                        } as const,
+                      ]
+                    : []),
+                  ...(menuEffective === REVIEW_LABEL_GATE_FAIL
+                    ? [
+                        {
+                          label: "REVISAR IGUAL (quita gate:fallo)",
+                          onClick: () => void handleOverrideGate(issueNumber),
                         } as const,
                       ]
                     : []),

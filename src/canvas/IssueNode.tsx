@@ -5,14 +5,17 @@ import { useIssueStore } from "../stores/issueStore";
 import { useIssueResolveStore } from "../stores/issueResolveStore";
 import { useIssueReviewStore } from "../stores/issueReviewStore";
 import { useIssueActivityStore } from "../stores/issueActivityStore";
+import { useIssueGateStore, type IssueGateState } from "../stores/issueGateStore";
 import {
   REVIEW_LABEL_APPROVED,
   REVIEW_LABEL_CHANGES,
   REVIEW_LABEL_CONFLICT,
   REVIEW_LABEL_FIX_APPLIED,
+  REVIEW_LABEL_GATE_FAIL,
   REVIEW_LABEL_PENDING,
   effectiveReviewLabel,
 } from "./reviewVerdict";
+import { overrideGateForIssue } from "./issueGate";
 import { renderMarkdown } from "../utils/markdownClass";
 
 type IssueFlowNode = Node<IssueNodeData, "issue">;
@@ -97,6 +100,8 @@ export function IssueNode({ data }: NodeProps<IssueFlowNode>) {
   // Persisted PR cycle label wins over the in-memory verdict (source of
   // truth); the verdict only covers live transitions until the next lookup.
   const effective = effectiveReviewLabel(prLabels, reviewVerdict);
+  // The issue's own repo path: cwd para los handlers de GitHub del gate.
+  const worktreePath = str((data as Record<string, unknown> | undefined)?.__worktreePath);
   const reviewingIssueNumber = useIssueReviewStore(
     (s) => s.reviewingIssueNumber,
   );
@@ -107,11 +112,45 @@ export function IssueNode({ data }: NodeProps<IssueFlowNode>) {
   const resolvingConflictIssueNumber = useIssueReviewStore(
     (s) => s.resolvingConflictIssueNumber,
   );
+  // Estado del gate de calidad por PR (map estable del store; se deriva por
+  // issue/PR sin selectores que devuelvan arrays frescos).
+  const gateByPr = useIssueGateStore((s) => s.gateByPr);
+  const gateState =
+    primaryPrNumber != null ? gateByPr[issueNumber]?.[primaryPrNumber] : undefined;
+  const [gateReport, setGateReport] = useState<{
+    path: string;
+    content: string | null;
+  } | null>(null);
+  const viewGateReport = useCallback(async (gate: IssueGateState) => {
+    if (!gate.reportPath) return;
+    try {
+      const res = await window.termcanvas.fs.readFile(gate.reportPath);
+      if ("content" in res) {
+        setGateReport({ path: gate.reportPath, content: res.content });
+      } else {
+        setGateReport({ path: gate.reportPath, content: null });
+      }
+    } catch {
+      setGateReport({ path: gate.reportPath, content: null });
+    }
+  }, []);
+  const overrideGate = useCallback(
+    async (prNumber: number) => {
+      const ok = await overrideGateForIssue({
+        repoPath: worktreePath || "",
+        issueNumber,
+        prNumber,
+      });
+      if (ok) {
+        useIssueReviewStore.getState().reviewHandler?.(issueNumber, prNumber);
+      }
+    },
+    [issueNumber, worktreePath],
+  );
   // Local activity log: select the map itself (stable reference) and derive
   // the per-issue array — same pattern as labelsByIssue above, to avoid a
   // fresh array snapshot on every evaluation. Keyed by the issue's own repo
   // path so activity from another PC (same repo) shows up on load.
-  const worktreePath = str((data as Record<string, unknown> | undefined)?.__worktreePath);
   const activityByRepo = useIssueActivityStore((s) => s.activityByRepo);
   const activity = (worktreePath ? activityByRepo[worktreePath]?.[issueNumber] : undefined) ?? [];
   const title = str(data?.title, `Issue ${issueNumber}`);
@@ -442,12 +481,15 @@ export function IssueNode({ data }: NodeProps<IssueFlowNode>) {
                   );
                   const prConflicted =
                     conflictsByPr?.[issueNumber]?.[pr.number] ?? false;
+                  const perPrGate = gateByPr[issueNumber]?.[pr.number];
                   const prDisabled =
                     reviewingIssueNumber !== null ||
                     fixingIssueNumber !== null ||
                     mergingIssueNumber !== null ||
                     resolvingConflictIssueNumber !== null ||
-                    pr.state !== "OPEN";
+                    pr.state !== "OPEN" ||
+                    prEffective === REVIEW_LABEL_GATE_FAIL ||
+                    perPrGate?.status === "running";
                   const prBusy =
                     (reviewingIssueNumber === issueNumber ||
                       fixingIssueNumber === issueNumber ||
@@ -475,7 +517,11 @@ export function IssueNode({ data }: NodeProps<IssueFlowNode>) {
                           title={
                             pr.state !== "OPEN"
                               ? `PR #${pr.number} no está abierto`
-                              : `Revisar PR #${pr.number}`
+                              : prEffective === REVIEW_LABEL_GATE_FAIL
+                                ? "El gate de calidad falló: revisá el reporte o forzá con 'Revisar igual'"
+                                : perPrGate?.status === "running"
+                                  ? "El gate de calidad está corriendo…"
+                                  : `Revisar PR #${pr.number}`
                           }
                           className="flex items-center gap-1 bg-[#21262d] hover:bg-[#30363d] border border-[rgba(240,246,252,0.1)] rounded-md px-2 py-1 text-[11px] font-medium text-[#c9d1d9] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                           onClick={(e) => {
@@ -488,8 +534,44 @@ export function IssueNode({ data }: NodeProps<IssueFlowNode>) {
                           {reviewingIssueNumber === issueNumber &&
                           pr.number === primaryPrNumber
                             ? "Revisando..."
-                            : `Revisar PR #${pr.number}`}
+                            : perPrGate?.status === "running"
+                              ? "Gate corriendo…"
+                              : `Revisar PR #${pr.number}`}
                         </button>
+                        {prEffective === REVIEW_LABEL_GATE_FAIL && (
+                          <>
+                            <button
+                              type="button"
+                              disabled={prDisabled || prBusy}
+                              title={`Ver el reporte del gate del PR #${pr.number}`}
+                              className="flex items-center gap-1 bg-[#f85149]/10 hover:bg-[#f85149]/20 border border-[rgba(248,81,73,0.5)] rounded-md px-2 py-1 text-[11px] font-medium text-[#f85149] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (perPrGate) void viewGateReport(perPrGate);
+                              }}
+                            >
+                              Ver reporte
+                            </button>
+                            <button
+                              type="button"
+                              disabled={prDisabled || prBusy}
+                              title={`Forzar la review del PR #${pr.number} (quita gate:fallo)`}
+                              className="flex items-center gap-1 bg-[#21262d] hover:bg-[#30363d] border border-[rgba(240,246,252,0.1)] rounded-md px-2 py-1 text-[11px] font-medium text-[#c9d1d9] transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void overrideGate(pr.number);
+                              }}
+                            >
+                              Revisar igual
+                            </button>
+                          </>
+                        )}
+                        {perPrGate?.status === "running" && (
+                          <span className="inline-flex items-center gap-1 bg-[#d29922]/10 border border-[rgba(210,153,34,0.5)] text-[#d29922] rounded-md px-2 py-1 text-[11px] font-medium">
+                            <span className="w-2 h-2 rounded-full bg-current animate-pulse" />
+                            Gate…
+                          </span>
+                        )}
                         {prEffective === REVIEW_LABEL_CHANGES && (
                           <button
                             type="button"
@@ -570,12 +652,27 @@ export function IssueNode({ data }: NodeProps<IssueFlowNode>) {
               </button>
               <button
                 type="button"
-                disabled={reviewingIssueNumber !== null || prStatus == null}
-                title={prStatus !== "loading" && prStatus != null ? `Review PR #${prStatus.number}` : undefined}
+                disabled={
+                  reviewingIssueNumber !== null ||
+                  prStatus == null ||
+                  effective === REVIEW_LABEL_GATE_FAIL ||
+                  gateState?.status === "running"
+                }
+                title={
+                  effective === REVIEW_LABEL_GATE_FAIL
+                    ? "El gate de calidad falló: revisá el reporte o forzá con 'Revisar igual'"
+                    : gateState?.status === "running"
+                      ? "El gate de calidad está corriendo sobre el PR…"
+                      : prStatus !== "loading" && prStatus != null
+                        ? `Review PR #${prStatus.number}`
+                        : undefined
+                }
                 className={
                   prStatus === "loading"
                     ? "flex items-center gap-1.5 bg-[#21262d] border border-[rgba(240,246,252,0.1)] rounded-md px-3 py-1.5 text-xs font-medium text-[#8b949e] cursor-wait"
-                    : prStatus == null
+                    : prStatus == null ||
+                        effective === REVIEW_LABEL_GATE_FAIL ||
+                        gateState?.status === "running"
                       ? "flex items-center gap-1.5 bg-[#21262d] border border-[rgba(240,246,252,0.1)] rounded-md px-3 py-1.5 text-xs font-medium text-[#8b949e] opacity-50 cursor-not-allowed"
                       : "flex items-center gap-1.5 bg-[#db6d28] hover:bg-[#f0883e] border border-[rgba(240,136,62,0.4)] rounded-md px-3 py-1.5 text-xs font-medium text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 }
@@ -585,11 +682,51 @@ export function IssueNode({ data }: NodeProps<IssueFlowNode>) {
                 }}>
                 {reviewingIssueNumber === issueNumber
                   ? "Revisando..."
-                  : prStatus === "loading"
-                    ? "Buscando PR..."
-                    : "Revisar Solución"}
+                  : gateState?.status === "running"
+                    ? "Gate corriendo…"
+                    : prStatus === "loading"
+                      ? "Buscando PR..."
+                      : "Revisar Solución"}
                 <svg aria-hidden="true" className="fill-current opacity-70" height="12" width="12" viewBox="0 0 16 16"><path d="M8 2c1.981 0 3.671.992 4.933 2.078 1.27 1.091 2.187 2.345 2.637 3.023a1.62 1.62 0 0 1 0 1.798c-.45.678-1.367 1.932-2.637 3.023C11.67 13.008 9.981 14 8 14c-1.981 0-3.671-.992-4.933-2.078C1.797 10.83.88 9.576.43 8.898a1.62 1.62 0 0 1 0-1.798c.45-.677 1.367-1.931 2.637-3.022C4.33 2.992 6.019 2 8 2ZM1.679 7.932a.12.12 0 0 0 0 .136c.411.622 1.241 1.75 2.366 2.717C5.176 11.758 6.527 12.5 8 12.5c1.473 0 2.825-.742 3.955-1.715 1.124-.967 1.954-2.096 2.366-2.717a.12.12 0 0 0 0-.136c-.412-.621-1.242-1.75-2.366-2.717C10.824 4.242 9.473 3.5 8 3.5c-1.473 0-2.825.742-3.955 1.715-1.124.967-1.954 2.096-2.366 2.717ZM8 10a2 2 0 1 1 0-4 2 2 0 0 1 0 4Z" /></svg>
               </button>
+              {effective === REVIEW_LABEL_GATE_FAIL && (
+                <>
+                  <button
+                    type="button"
+                    title="Ver el reporte del gate de calidad"
+                    className="flex items-center gap-1.5 bg-[#f85149]/10 hover:bg-[#f85149]/20 border border-[rgba(248,81,73,0.5)] rounded-md px-3 py-1.5 text-xs font-medium text-[#f85149] transition-colors"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (gateState) void viewGateReport(gateState);
+                    }}
+                  >
+                    Ver reporte
+                  </button>
+                  <button
+                    type="button"
+                    title="Forzar la review igual (quita gate:fallo)"
+                    className="flex items-center gap-1.5 bg-[#21262d] hover:bg-[#30363d] border border-[rgba(240,246,252,0.1)] rounded-md px-3 py-1.5 text-xs font-medium text-[#c9d1d9] transition-colors"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (primaryPrNumber != null) void overrideGate(primaryPrNumber);
+                    }}
+                  >
+                    Revisar igual
+                  </button>
+                </>
+              )}
+              {effective === REVIEW_LABEL_GATE_FAIL && (
+                <span className="inline-flex items-center gap-1.5 bg-[#f85149]/10 border border-[rgba(248,81,73,0.5)] text-[#f85149] rounded-full px-2 py-0.5 text-[11px] font-medium">
+                  <span className="w-2 h-2 rounded-full bg-current" />
+                  Gate: fallo
+                </span>
+              )}
+              {gateState?.status === "running" && (
+                <span className="inline-flex items-center gap-1.5 bg-[#d29922]/10 border border-[rgba(210,153,34,0.5)] text-[#d29922] rounded-full px-2 py-0.5 text-[11px] font-medium">
+                  <span className="w-2 h-2 rounded-full bg-current animate-pulse" />
+                  Gate corriendo…
+                </span>
+              )}
               {effective === REVIEW_LABEL_APPROVED &&
                 prStatus != null &&
                 prStatus !== "loading" &&
@@ -847,6 +984,45 @@ export function IssueNode({ data }: NodeProps<IssueFlowNode>) {
               </div>
             </section>
           </aside>
+        </div>
+      )}
+
+      {/* Reporte del gate de calidad */}
+      {gateReport && (
+        <div
+          className="absolute inset-0 z-50 flex items-center justify-center bg-[#010409]/80 p-6"
+          onClick={(e) => {
+            e.stopPropagation();
+            setGateReport(null);
+          }}
+        >
+          <div
+            className="w-[560px] max-w-full max-h-[70%] flex flex-col bg-[#0d1117] border border-[#30363d] rounded-lg shadow-xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-4 py-2.5 border-b border-[#30363d] bg-[#161b22]">
+              <span className="text-xs font-semibold text-[#c9d1d9]">
+                Reporte del gate de calidad
+              </span>
+              <button
+                type="button"
+                title="Cerrar"
+                className="text-[#8b949e] hover:text-[#c9d1d9] text-sm leading-none"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setGateReport(null);
+                }}
+              >
+                ✕
+              </button>
+            </div>
+            <div className="overflow-auto p-4 text-[11px] font-mono text-[#c9d1d9] whitespace-pre-wrap break-words">
+              {gateReport.content ?? "(no se pudo leer el reporte)"}
+            </div>
+            <div className="px-4 py-2 border-t border-[#30363d] bg-[#161b22] text-[10px] text-[#8b949e] truncate">
+              {gateReport.path}
+            </div>
+          </div>
         </div>
       )}
     </div>

@@ -35,6 +35,7 @@ import {
 } from "../stores/preferencesStore";
 import { useProjectStore } from "../stores/projectStore";
 import { useIssueReviewStore } from "../stores/issueReviewStore";
+import { runGateForIssue } from "../canvas/issueGate";
 import { useTerminalFindStore } from "../stores/terminalFindStore";
 import { getTerminalDisplayTitle } from "../stores/terminalState";
 import {
@@ -1112,11 +1113,16 @@ function wireInteractiveBindings(runtime: ManagedTerminalRuntime) {
   runtime.inputDisposable?.dispose();
   runtime.resizeDisposable?.dispose();
 
-  runtime.inputDisposable = runtime.xterm.onData((data: string) => {
-    if (runtime.ptyId !== null) {
-      window.termcanvas.terminal.input(runtime.ptyId, data);
-    }
-  });
+  // Headless runs are non-interactive: keyboard input must NOT reach the
+  // CLI process (Ctrl+C would send SIGINT and kill the run). xterm's own
+  // copy still works: with a selection, Ctrl+C/Ctrl+Shift+C copies.
+  if (!runtime.meta.terminal.headlessRun) {
+    runtime.inputDisposable = runtime.xterm.onData((data: string) => {
+      if (runtime.ptyId !== null) {
+        window.termcanvas.terminal.input(runtime.ptyId, data);
+      }
+    });
+  }
 
   runtime.resizeDisposable = runtime.xterm.onResize(
     ({ cols, rows }: { cols: number; rows: number }) => {
@@ -1676,17 +1682,40 @@ async function spawnPty(
   };
 
   if (launch) {
-    const promptArgs =
-      runtime.meta.terminal.initialPrompt &&
-      (!resumeSessionId ||
-        getTerminalPromptOnResume(runtime.meta.terminal.type))
-        ? getTerminalPromptArgs(
-            runtime.meta.terminal.type,
-            runtime.meta.terminal.initialPrompt,
-          )
-        : [];
-    options.shell = launch.shell;
-    options.args = [...launch.args, ...promptArgs];
+    // Headless custom command (e.g. `node scripts/run-diagnostico-tools.mjs
+    // --repo <path>`): the shell and args come verbatim from the terminal
+    // metadata. Same contract as headlessRun: non-interactive, exits by
+    // itself, no resume.
+    if (runtime.meta.terminal.headlessArgs && !resumeSessionId) {
+      options.shell = runtime.meta.terminal.headlessShell ?? launch.shell;
+      options.args = runtime.meta.terminal.headlessArgs;
+    } else if (runtime.meta.terminal.headlessRun && !resumeSessionId) {
+      // Headless runs (e.g. `opencode run <prompt>`): the CLI executes the
+      // initial prompt non-interactively, streams its output to the same PTY
+      // and exits by itself. The prompt is passed as a positional message
+      // instead of `--prompt`, and the run subcommand must come before the
+      // flags. Resume is not supported: a headless run is always a fresh one.
+      options.shell = launch.shell;
+      options.args = [
+        "run",
+        ...launch.args,
+        ...(runtime.meta.terminal.initialPrompt
+          ? [runtime.meta.terminal.initialPrompt]
+          : []),
+      ];
+    } else {
+      const promptArgs =
+        runtime.meta.terminal.initialPrompt &&
+        (!resumeSessionId ||
+          getTerminalPromptOnResume(runtime.meta.terminal.type))
+          ? getTerminalPromptArgs(
+              runtime.meta.terminal.type,
+              runtime.meta.terminal.initialPrompt,
+            )
+          : [];
+      options.shell = launch.shell;
+      options.args = [...launch.args, ...promptArgs];
+    }
   }
 
   // Register hook listener BEFORE spawning pty to avoid race condition (C2)
@@ -1766,7 +1795,11 @@ async function spawnPty(
             scheduleSessionCapture(runtime, ptyId, runtime.meta.terminal.type);
           }
         }, HOOK_SESSION_FALLBACK_MS);
-      } else if (runtime.meta.terminal.type !== "shell") {
+      } else if (
+        runtime.meta.terminal.type !== "shell" &&
+        !runtime.meta.terminal.headlessRun &&
+        !runtime.meta.terminal.headlessArgs
+      ) {
         scheduleSessionCapture(runtime, ptyId, runtime.meta.terminal.type);
       }
     }
@@ -1985,6 +2018,26 @@ function startTerminalRuntime(runtime: ManagedTerminalRuntime) {
         return;
       }
 
+      // Headless runs end with the CLI process: no shell demotion, no
+      // respawn. The caller (planning session / tools session) observes
+      // the result artifact or this exit and destroys the runtime itself.
+      if (
+        runtime.meta.terminal.headlessRun ||
+        runtime.meta.terminal.headlessArgs
+      ) {
+        if (runtime.waitingTimer) {
+          clearTimeout(runtime.waitingTimer);
+          runtime.waitingTimer = null;
+        }
+        clearWatchedSession(runtime);
+        setSessionId(runtime, undefined);
+        const exitNotice = `\r\n\x1b[2m[Headless process exited with code ${exitCode}]\x1b[0m\r\n`;
+        appendPreview(runtime, exitNotice);
+        runtime.xterm?.write(exitNotice);
+        setStatus(runtime, exitCode === 0 ? "completed" : "error");
+        return;
+      }
+
       if (runtime.waitingTimer) {
         clearTimeout(runtime.waitingTimer);
         runtime.waitingTimer = null;
@@ -2145,6 +2198,9 @@ function startTerminalRuntime(runtime: ManagedTerminalRuntime) {
               `\r\n\x1b[33m[label watch] ${message}\x1b[0m\r\n`,
             );
           }
+        },
+        runGate: (options) => {
+          void runGateForIssue(options);
         },
       },
       {

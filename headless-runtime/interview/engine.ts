@@ -1,233 +1,1410 @@
-// Motor de entrevista de requerimientos adaptativa: API pública del
-// módulo (sin UI). El contrato completo que la UI va a consumir es:
-//   createInterview / submitAnswer / loadInterviewState / listInterviews
-// El SDK de opencode queda encapsulado detrás de InterviewModelGateway.
+// Motor de entrevista de requerimientos — FASE 6 (revisión final de huecos
+// + doble validación de temas arquitectónicos).
+//
+// Patrón base (Fases 1-5): UNA sesión de opencode reusada; server dedicado;
+// scheduler determinístico; el modelo clasifica (informative/noise/deferred),
+// juzga suficiencia y detecta contradicciones en la misma llamada.
+//
+// Novedad de la Fase 6 — dos pasadas PUNTUALES (una sola vez, no por turno):
+//
+//   Parte A — gap-check final: cuando la entrevista se queda sin tópicos
+//     pendientes, UNA llamada adicional mira el conjunto COMPLETO de
+//     respuestas (todo junto, no tópico por tópico) buscando huecos que la
+//     evaluación turno a turno no puede ver. Si hay huecos con
+//     suggested_action="reopen_topic", los tópicos relacionados se reabren
+//     (ledger.reopens) y se les da una oportunidad más antes de cerrar.
+//     Una sola vez por entrevista (ledger.gap_check), best-effort.
+//
+//   Parte B — doble validación ASR: al cerrar un tópico ARQUITECTÓNICO
+//     (ARCHITECTURAL_TOPICS) con respuesta suficiente, una llamada adicional
+//     e independiente revisa si la restricción es genuinamente arquitectónica
+//     o una preferencia de producto. El veredicto queda registrado
+//     (ledger.asr_reviews) SIN perder la respuesta original; si no es
+//     genuina, el tópico se re-clasifica para la síntesis futura.
+//
+// Fuera de esta fase (anotado, NO implementado): UI.
 
 import fs from "node:fs";
 import path from "node:path";
+import { createOpencodeClient, createOpencodeServer, type OpencodeClient } from "@opencode-ai/sdk/v2";
 import {
-  createLedger,
-  interviewDir,
-  ledgerFilePath,
-  loadLedger,
-  markContradictionPending,
-  normalizeConflictingAnswerId,
-  recordAnswer,
-  resolveContradictionsForAnswer,
-  saveLedger,
-  updateTopicStatusForQuestion,
-} from "./ledger.ts";
-import { buildTurnPrompt } from "./prompt.ts";
-import {
-  OpenCodeModelGateway,
-  closeInterviewServer,
-  type InterviewModelGateway,
-} from "./open-code-client.ts";
-import {
-  InterviewEngineError,
-  type InterviewLedger,
-  type InterviewQuestion,
-  type InterviewSummary,
-  type UserAnswerInput,
-} from "./types.ts";
+  AsrReviewVerdictSchema,
+  GapCheckResultSchema,
+  QuestionOutputSchema,
+  SynthesisSchema,
+  QUESTION_SCHEMA,
+  GAP_CHECK_SCHEMA,
+  ASR_REVIEW_SCHEMA,
+  SYNTHESIS_SCHEMA,
+  type QuestionOutput,
+  type GapCheckResult,
+  type GapRecord,
+  type AsrReviewVerdict,
+  type SynthesisResult,
+} from "./schema.ts";
 
-// Modelo por defecto del motor, decidido EMPÍRICAMENTE (ver
-// scripts/interview-model-probe.ts y la sección "Modelo elegido" del PR):
-//   provider: opencode-go (suscripción Go, auth vía OPENCODE_GO_AUTH_COOKIE
-//   + OPENCODE_GO_WORKSPACE_ID que hereda el server spawnado)
-//   modelID:  gpt-5.6-luna
-//   variant:  none (reasoningEffort "none" — el gateway Console Go rechaza
-//   tool_choice, que es lo que usa json_schema, cuando thinking está activo)
-// Probados y DESCARTADOS con evidencia: big-pickle y deepseek-v4-* fallan
-// con "Thinking mode does not support this tool_choice" (no tienen variante
-// sin thinking); hy3/none devuelve el JSON anidado en un string;
-// minimax-m3/none omite campos requeridos del schema.
+export { QUESTION_SCHEMA, GAP_CHECK_SCHEMA, ASR_REVIEW_SCHEMA, SYNTHESIS_SCHEMA, QuestionOutputSchema, GapCheckResultSchema, AsrReviewVerdictSchema, SynthesisSchema } from "./schema.ts";
+export type { QuestionOutput, GapCheckResult, GapRecord, AsrReviewVerdict, SynthesisResult } from "./schema.ts";
+
+// ─── Configuración ───────────────────────────────────────────────────────
+
 export const DEFAULT_PROVIDER_ID = "opencode-go";
-export const DEFAULT_MODEL_ID = "gpt-5.6-luna";
-export const DEFAULT_MODEL_VARIANT = "none";
+export const DEFAULT_MODEL_ID = "hy3";
+// ─────────────────────────────────────────────────────────────────────────
+// deepseek-v4-flash (DESCARTADO POR AHORA — volver a probar en el futuro):
+//   DEFAULT_MODEL_ID = "deepseek-v4-flash";
+// El provider rechaza las llamadas de output estructurado del motor con
+// "Thinking mode does not support this tool_choice" cuando se activa
+// cualquier variante de thinking (low/medium/high/max → reasoningEffort), y
+// sin variante también falla con APIError en json_schema (error observado
+// en interview:create e interview:briefSynthesize). El motor depende de
+// format:json_schema (herramienta StructuredOutput + tool_choice forzado de
+// opencode), así que para usarlo habría que migrar a parsear el JSON del
+// texto del modelo. hy3 funciona sin variante ni fricción.
+// ─────────────────────────────────────────────────────────────────────────
+// Variante de razonamiento (thinking) — por defecto DESACTIVADA. Aunque el
+// provider algún día la soporte con json_schema, el motor no la necesita.
+export const DEFAULT_MODEL_VARIANT: string | undefined = undefined;
 
-export interface InterviewEngineOptions {
-  providerID?: string;
-  modelID?: string;
-  variant?: string;
-  gateway?: InterviewModelGateway;
+export const TOPICS = [
+  "problema",
+  "usuarios",
+  "flujo_principal",
+  "criterio_exito",
+  "rendimiento",
+] as const;
+export type TopicId = (typeof TOPICS)[number];
+
+// Tópicos de naturaleza arquitectónica: merecen la doble validación ASR al
+// cerrar con suficiente (Parte B de la Fase 6). Los demás no la disparan.
+export const ARCHITECTURAL_TOPICS: ReadonlySet<string> = new Set(["rendimiento"]);
+
+// Cupo duro por tópico: cuenta SOLO respuestas informativas (las basura y
+// diferidas no gastan presupuesto de preguntas reales).
+export const MAX_QUESTIONS_PER_TOPIC = 3;
+
+// Streak de basura: 2 respuestas noise SEGUIDAS cierran el tópico como
+// exhausted(noise) — un contador distinto del cupo.
+export const MAX_NOISE_STREAK = 2;
+
+// Diferidas: la 1ra deja el tópico parked; la 2da (la última chance, al
+// final de la entrevista) lo cierra como parked_unresolved.
+export const MAX_DEFERRED_RETRIES = 2;
+
+// Tópico virtual de las preguntas de resolución de contradicciones.
+export const CONTRADICTION_TOPIC_ID = "__contradiction__";
+
+const SUMMARY_ENTRY_MAX_CHARS = 120;
+
+// Los schemas JSON del prompt viven en schema.ts (derivados de Zod con
+// z.toJSONSchema — una sola fuente de verdad).
+const MODEL_CALL_TIMEOUT_MS = 180_000;
+const SERVER_START_TIMEOUT_MS = 10_000;
+
+// ─── Tipos ───────────────────────────────────────────────────────────────
+
+export interface QuestionOption {
+  id: string;
+  label: string;
 }
 
-let defaultGateway: InterviewModelGateway | null = null;
+export interface InterviewQuestion {
+  question_text: string;
+  kind: "single_select" | "free_only";
+  options: QuestionOption[];
+}
 
-function resolveGateway(options: InterviewEngineOptions): InterviewModelGateway {
-  if (options.gateway) return options.gateway;
-  // Overrides explícitos (modelID/providerID/variant) no se cachean: cada
-  // llamada con config distinta recibe su propio gateway.
+export type ResponseKind = "informative" | "noise" | "deferred";
+
+export interface ContradictionFlag {
+  conflicting_answer_id: string;
+  reason: string;
+}
+
+// Output completo de la llamada de pregunta. Tipado garantizado por Zod
+// (QuestionOutputSchema); los campos con .optional() pueden venir undefined
+// hasta la normalización final de askQuestion.
+export type QuestionWithJudgment = QuestionOutput;
+
+export interface InterviewAnswer {
+  id: string;
+  topic: string;
+  question_text: string;
+  selected_option_id: string | null;
+  // Label legible de la opción elegida (para el resumen que ve el modelo y
+  // para auditoría). Ausente cuando la respuesta fue texto libre.
+  selected_option_label?: string | null;
+  free_text: string | null;
+  // Juicio del modelo sobre ESTA respuesta (llega en la llamada siguiente).
+  sufficient?: boolean | null;
+  // Clasificación de la Fase 5. Ausente (ledgers viejos) = "informative".
+  response_kind?: ResponseKind;
+  superseded?: boolean;
+  superseded_by?: string;
+}
+
+export type ContradictionStatus = "open" | "resolved";
+
+export interface ContradictionRecord {
+  id: string;
+  answer_id: string;
+  conflicting_answer_id: string;
+  reason: string;
+  status: ContradictionStatus;
+  resolution: { selected_option_id: string | null; free_text: string | null } | null;
+}
+
+export interface InterviewLedger {
+  session_id: string;
+  project_path: string;
+  topics: string[];
+  answers: InterviewAnswer[];
+  contradictions: ContradictionRecord[];
+  // Fase 6A: tópicos reabiertos por el gap-check (se limpia al re-cerrarlos).
+  reopens: { topic: string; reason: string }[];
+  // Fase 6A: resultado de la ÚNICA pasada final (null si todavía no corrió).
+  gap_check: { gaps: GapRecord[]; at: string } | null;
+  // Fase 6B: veredictos de la doble validación arquitectónica.
+  asr_reviews: { topic: string; answer_id: string; verdict: AsrReviewVerdict; at: string }[];
+  // Síntesis final: planilla de salida llena al terminar la entrevista.
+  synthesis: { at: string; data: SynthesisResult } | null;
+  // La pregunta que el motor generó y el usuario todavía no respondió: se
+  // persiste para que RETOMAR devuelva la MISMA pregunta (sin regenerarla).
+  // Se limpia al responder y se rellena con la siguiente pregunta generada.
+  pending_question: { topic: string; question: QuestionWithJudgment } | null;
+}
+
+// Labels legibles de los tópicos internos (la UI los muestra como enums).
+export const TOPIC_LABELS: Record<string, string> = {
+  problema: "Problema",
+  usuarios: "Usuarios",
+  flujo_principal: "Flujo principal",
+  criterio_exito: "Criterio de éxito",
+  rendimiento: "Rendimiento",
+  [CONTRADICTION_TOPIC_ID]: "Resolución de contradicción",
+};
+
+// Label de un tópico: el enum legible si es conocido; si la IA definió un
+// tópico distinto, se muestra el valor tal cual.
+export function topicLabel(topic: string): string {
+  return TOPIC_LABELS[topic] ?? topic;
+}
+
+export interface ModelUsage {
+  input_tokens: number;
+  output_tokens: number;
+}
+
+export interface UserAnswerInput {
+  topic: string;
+  question_text: string;
+  free_text: string | null;
+  selected_option_id: string | null;
+  selected_option_label?: string | null;
+}
+
+export type TurnResult =
+  | {
+      done: false;
+      kind: "question";
+      question: InterviewQuestion;
+      topic: string;
+      sufficient: boolean | null;
+      contradiction: ContradictionRecord | null;
+      usage: ModelUsage;
+    }
+  | {
+      done: false;
+      kind: "resolution";
+      question: InterviewQuestion;
+      topic: typeof CONTRADICTION_TOPIC_ID;
+      contradiction: ContradictionRecord;
+      usage: ModelUsage;
+    }
+  | { done: true; reason: "all_topics_closed"; usage: ModelUsage };
+
+// ─── Server + cliente (singleton del proceso) ───────────────────────────
+
+interface ServerHandle {
+  url: string;
+  close: () => void;
+}
+
+let runningServer: ServerHandle | null = null;
+let runningClient: OpencodeClient | null = null;
+
+// Seam de TESTS: inyecta un cliente mockeado (sin server real). Pasar null
+// restaura el comportamiento normal (y cierra el server real si estaba
+// levantado). NO es parte del contrato de runtime de la app.
+export function setTestClient(client: OpencodeClient | null): void {
+  if (runningServer) {
+    runningServer.close();
+    runningServer = null;
+  }
+  runningClient = client;
+}
+
+// Exportada para los módulos hermanos del motor (ej: brief.ts).
+export async function ensureClient(): Promise<OpencodeClient> {
+  if (!runningClient) {
+    const server = await createOpencodeServer({
+      hostname: "127.0.0.1",
+      port: 0,
+      timeout: SERVER_START_TIMEOUT_MS,
+    });
+    runningServer = server;
+    runningClient = createOpencodeClient({ baseUrl: server.url });
+  }
+  return runningClient;
+}
+
+export function closeInterviewServer(): void {
+  if (runningServer) {
+    runningServer.close();
+    runningServer = null;
+  }
+  runningClient = null;
+}
+
+// ─── Ledger (persistencia) ───────────────────────────────────────────────
+//
+// LAYOUT DE ARCHIVOS (organizado por tipo de entrevista, dos subcarpetas):
+//   <proyecto>/.agents/interview/requerimientos/
+//     entrevista-<ts>.json            ledger de la entrevista de requerimientos
+//     entrevista-<ts>-sintesis.json   planilla de salida (JSON standalone)
+//   <proyecto>/.agents/interview/contexto/
+//     contexto-<ts>.json              borrador de la entrevista de contexto
+//     contexto-<ts>-documento.json    documento del contexto sintetizado
+//     contexto-activo.json            marcador del contexto activo
+// Los archivos del layout LEGACY (interview-*.json / brief-*.json /
+// active-brief.json en la raíz de .agents/interview/) se MIGRAN a la
+// subcarpeta correcta al primer acceso (ensureInterviewLayout).
+
+export function interviewDir(projectPath: string): string {
+  return path.join(projectPath, ".agents", "interview");
+}
+
+export function requirementsDir(projectPath: string): string {
+  return path.join(interviewDir(projectPath), "requerimientos");
+}
+
+export function contextDir(projectPath: string): string {
+  return path.join(interviewDir(projectPath), "contexto");
+}
+
+// Migra el layout legacy (raíz de .agents/interview/) al nuevo por
+// subcarpetas. Idempotente y best-effort; se llama desde todos los puntos
+// de lectura/escritura para que los proyectos existentes sigan funcionando.
+export function ensureInterviewLayout(projectPath: string): void {
+  const root = interviewDir(projectPath);
+  if (!fs.existsSync(root)) return;
+  const req = requirementsDir(projectPath);
+  const ctx = contextDir(projectPath);
+  fs.mkdirSync(req, { recursive: true });
+  fs.mkdirSync(ctx, { recursive: true });
+
+  for (const f of fs.readdirSync(root)) {
+    const source = path.join(root, f);
+    let dest: string | null = null;
+    let m: RegExpExecArray | null;
+    if ((m = /^interview-(\d+)\.json$/.exec(f))) dest = path.join(req, `entrevista-${m[1]}.json`);
+    else if ((m = /^interview-(\d+)-synthesis\.json$/.exec(f))) dest = path.join(req, `entrevista-${m[1]}-sintesis.json`);
+    else if ((m = /^brief-(\d+)\.json$/.exec(f))) dest = path.join(ctx, `contexto-${m[1]}.json`);
+    else if ((m = /^brief-(\d+)-brief\.json$/.exec(f))) dest = path.join(ctx, `contexto-${m[1]}-documento.json`);
+    else if (f === "active-brief.json") dest = path.join(ctx, "contexto-activo.json");
+    if (!dest) continue;
+    try {
+      fs.renameSync(source, dest);
+    } catch {
+      // Ya movido o en conflicto: se conserva el destino.
+    }
+  }
+
+  // El marcador del contexto activo guarda la RUTA absoluta del documento:
+  // si apuntaba al layout legacy, se reescribe a la ruta nueva.
+  const marker = path.join(ctx, "contexto-activo.json");
+  if (fs.existsSync(marker)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(marker, "utf-8")) as { path?: string };
+      if (typeof parsed.path === "string") {
+        const m2 = /brief-(\d+)-brief\.json$/.exec(parsed.path);
+        if (m2) {
+          parsed.path = path.join(ctx, `contexto-${m2[1]}-documento.json`);
+          fs.writeFileSync(marker, JSON.stringify(parsed, null, 2));
+        }
+      }
+    } catch {
+      // Marcador corrupto: getActiveBrief ya lo trata como inexistente.
+    }
+  }
+}
+
+export function ledgerFilePath(projectPath: string, timestamp: number = Date.now()): string {
+  return path.join(requirementsDir(projectPath), `entrevista-${timestamp}.json`);
+}
+
+export function saveLedger(ledgerPath: string, ledger: InterviewLedger): void {
+  fs.mkdirSync(path.dirname(ledgerPath), { recursive: true });
+  fs.writeFileSync(ledgerPath, JSON.stringify(ledger, null, 2));
+}
+
+export function loadLedger(ledgerPath: string): InterviewLedger {
+  if (!fs.existsSync(ledgerPath)) {
+    throw new Error(`Ledger no encontrado: ${ledgerPath}`);
+  }
+  const ledger = JSON.parse(fs.readFileSync(ledgerPath, "utf-8")) as InterviewLedger;
+  if (!Array.isArray(ledger.contradictions)) ledger.contradictions = [];
+  if (!Array.isArray(ledger.reopens)) ledger.reopens = [];
+  if (ledger.gap_check === undefined) ledger.gap_check = null;
+  if (!Array.isArray(ledger.asr_reviews)) ledger.asr_reviews = [];
+  if (ledger.synthesis === undefined) ledger.synthesis = null;
+  if (ledger.pending_question === undefined) ledger.pending_question = null;
+  return ledger;
+}
+
+// ─── Resumen de una entrevista guardada (para la UI: listar/retomar) ─────
+
+export interface InterviewSummary {
+  ledgerPath: string;
+  created_at: string;
+  answers_count: number;
+  topics_closed: number;
+  topics_total: number;
+  pending_contradictions: number;
+}
+
+// Progreso de cobertura de una entrevista, derivado del estado de sus
+// tópicos (el estado es derivado del historial; esta es la única fuente de
+// verdad para la UI — el renderer no puede importar el motor).
+export function interviewProgress(ledger: InterviewLedger): {
+  answered: number;
+  closed: number;
+  total: number;
+  pct: number;
+} {
+  const answered = ledger.answers.length;
+  const closed = ledger.topics.filter((t) => {
+    const st = topicState(ledger, t);
+    return st === "covered" || st === "exhausted";
+  }).length;
+  const total = ledger.topics.length;
+  const pct = total > 0 ? Math.round((closed / total) * 100) : 0;
+  return { answered, closed, total, pct };
+}
+
+// Entrevistas existentes del proyecto, ordenadas de más reciente a más
+// antigua. Pura (sin llamadas al modelo): lee los ledgers de la subcarpeta
+// de requerimientos (migrando el layout legacy si hace falta).
+export function listInterviews(projectPath: string): InterviewSummary[] {
+  ensureInterviewLayout(projectPath);
+  const dir = requirementsDir(projectPath);
+  if (!fs.existsSync(dir)) return [];
+  const summaries: InterviewSummary[] = [];
+  for (const file of fs.readdirSync(dir)) {
+    const m = /^entrevista-(\d+)\.json$/.exec(file);
+    if (!m) continue;
+    const ledgerPath = path.join(dir, file);
+    try {
+      const ledger = loadLedger(ledgerPath);
+      const progress = interviewProgress(ledger);
+      summaries.push({
+        ledgerPath,
+        created_at: new Date(Number(m[1])).toISOString(),
+        answers_count: progress.answered,
+        topics_closed: progress.closed,
+        topics_total: progress.total,
+        pending_contradictions: ledger.contradictions.filter((c) => c.status !== "resolved").length,
+      });
+    } catch {
+      // Ledger corrupto/incompleto: no se lista (se conserva en disco).
+    }
+  }
+  return summaries.sort((a, b) => (a.created_at < b.created_at ? 1 : -1));
+}
+
+// Elimina una entrevista guardada (ledger + su síntesis standalone, si hay).
+export function deleteInterview(ledgerPath: string): void {
+  for (const target of [ledgerPath, synthesisFilePath(ledgerPath)]) {
+    try {
+      fs.unlinkSync(target);
+    } catch {
+      // El archivo ya no existe (o no se pudo borrar): no es crítico.
+    }
+  }
+}
+
+function mergeUsage(a: ModelUsage, b: ModelUsage): ModelUsage {
+  return {
+    input_tokens: a.input_tokens + b.input_tokens,
+    output_tokens: a.output_tokens + b.output_tokens,
+  };
+}
+
+// ─── Resumen del historial (cuidado de costo de la Fase 4) ───────────────
+
+function buildSummary(ledger: InterviewLedger, maxChars: number = SUMMARY_ENTRY_MAX_CHARS): string {
+  if (ledger.answers.length === 0) return "(ninguna todavía)";
+  return ledger.answers
+    .map((a) => {
+      const text = (a.free_text ?? a.selected_option_label ?? a.selected_option_id ?? "(sin texto)")
+        .replace(/\s+/g, " ")
+        .trim();
+      const corto = text.length > maxChars ? `${text.slice(0, maxChars - 3)}...` : text;
+      const descartada = a.superseded ? ` (descartada en ${a.superseded_by ?? "resolución"})` : "";
+      return `- [${a.id}] ${a.topic}: "${corto}"${descartada}`;
+    })
+    .join("\n");
+}
+
+// ─── Prompt por tópico (suficiencia + contradicción + clasificación) ─────
+
+function buildTopicPrompt(ledger: InterviewLedger, topic: string, projectBrief: string): string {
+  const reabierto = (ledger.reopens ?? []).find((r) => r.topic === topic);
+  const notaReapertura = reabierto
+    ? ` Este tópico fue REABIERTO por la revisión final porque: ${reabierto.reason}. Preguntá específicamente sobre ese hueco, sin repetir lo ya cubierto.`
+    : "";
+  return `Sos un Analista de Requerimientos y Arquitecto de Software Senior. Generá UNA pregunta estratégica sobre el tópico "${topic}" para el proyecto: ${projectBrief}.${notaReapertura}
+
+Resumen de las respuestas ya dadas (el id entre corchetes es el identificador de cada respuesta; la ÚLTIMA línea es la respuesta que acabás de recibir):
+${buildSummary(ledger)}
+
+Tu objetivo: no solo recolectar funciones, sino identificar ASRs (Requerimientos Arquitectónicamente Significativos) que fuercen decisiones estructurales.
+
+Regla de Oro (técnica "Play Dumb"): si el usuario usó términos vagos como "rápido", "seguro" o "escalable", NO los aceptes. Fingí que no entendés la magnitud y presioná por un rango numérico o medida de respuesta (ej: "¿24 horas es rápido o buscamos < 200ms?").
+
+Regla de clasificación de la ÚLTIMA respuesta recibida: response_kind="informative" si aporta datos reales, aunque sea vaga (vaga NO es basura: una respuesta vaga es informative con previous_answer_sufficient=false). response_kind="noise" SOLO si es basura real: desconectada de la pregunta, sin sentido, o ruido tipeado sin pensar. response_kind="deferred" si el usuario dice explícitamente que no sabe o no decidió todavía (ej: "no sé", "no lo pensé", "lo vemos después") — es información honesta, no es ruido. Si response_kind es noise o deferred, previous_answer_sufficient=null.
+
+Regla de Suficiencia: marcá previous_answer_sufficient=true SOLO si la respuesta (la última de este tópico, y solo si es informative) permite completar un Escenario de Atributo de Calidad con: (1) Estímulo: el evento que llega; (2) Ambiente: el contexto de carga o estado en el que ocurre (operación normal, pico de carga, fallo parcial); (3) Artefacto afectado: qué parte del sistema se impacta (toda la app, la base de datos, el frontend); (4) Medida de Respuesta: la métrica cuantificable (latencia, throughput, tiempo de recuperación). Distinguí la Respuesta — qué actividad realiza el sistema (ej: "bloquear acceso") — de la Medida — el criterio con el que se mide (ej: "en < 1 segundo"). Si esta es la primera pregunta del tópico (todavía no hay respuesta de este tópico que juzgar), marcá previous_answer_sufficient=null.
+
+Regla de Contradicciones: compará la última respuesta contra TODAS las anteriores, de CUALQUIER tópico, no solo del mismo. Las respuestas marcadas "(descartada en ...)" ya no valen: ignorálas al comparar. Si una decisión (ej: alta velocidad) choca con otra (ej: cifrado pesado), señalá el Trade-off (compromiso) inmediatamente: completá contradiction con el id de la respuesta anterior en conflicto (el de los corchetes) y un motivo que nombre los DOS atributos en pugna (ej: "velocidad vs seguridad"). La priorización de cuál atributo gana es decisión del dueño del producto, no del analista: cuando haya un choque, tu siguiente pregunta debe hacerlo elegir cuál de los dos atributos es más prioritario para el éxito del negocio. Si no hay choque, contradiction=null. No inventes conflictos donde no los hay: respuestas complementarias o de distinto alcance no son contradicciones.
+
+Regla de Opciones (anti-anclaje): las opciones deben representar NIVELES DE SERVICIO que el dueño del producto pueda entender (ej: "Disponibilidad básica: tolera caídas de horas" vs "Disponibilidad crítica: menos de 5 minutos de caída por mes") ANTES de hablar de milisegundos o porcentajes — no ancles al usuario con tecnicismos que no puede valorar; el rango numérico se negocia después de elegir el nivel. La pregunta debe ofrecer 2-4 opciones concretas con ese espíritu, o ser kind=free_only si es una definición de dominio pura. Generá la pregunta ahora.`;
+}
+
+// ─── Validación del contrato (Zod) ───────────────────────────────────────
+
+// Sanea los ruidos CONOCIDOS y baratos del modelo antes de validar con Zod
+// (así no se desperdicia un reintento en algo arreglable en una línea):
+//   - key de kind con tags basura ("free_only<arg_key:...>") → enum extraído
+//     del nombre de la key.
+//   - response_kind como STRING "null" → null.
+//   - contradiction como {conflicting_answer_id: null, reason: null} (objeto
+//     de nulos = "sin choque") → null; reason ausente → texto por defecto.
+function sanitizeQuestionOutput(raw: unknown): unknown {
+  if (typeof raw !== "object" || raw === null) return raw;
+  const q = raw as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...q };
+
+  if (out.kind !== "single_select" && out.kind !== "free_only") {
+    const kindLoose = Object.keys(out).find((k) => k.includes("single_select") || k.includes("free_only"));
+    if (kindLoose?.includes("single_select")) out.kind = "single_select";
+    else if (kindLoose?.includes("free_only")) out.kind = "free_only";
+  }
+
+  if (out.response_kind === "null") out.response_kind = null;
+
+  if (out.contradiction !== null && typeof out.contradiction === "object") {
+    const c = out.contradiction as Record<string, unknown>;
+    if (typeof c.conflicting_answer_id !== "string" || c.conflicting_answer_id.length === 0) {
+      out.contradiction = null;
+    } else if (typeof c.reason !== "string" || c.reason.trim() === "") {
+      c.reason = "sin motivo especificado";
+    }
+  }
+
+  return out;
+}
+
+// Valida el output de la llamada de pregunta con Zod (tipos garantizados).
+export function parseQuestionOutput(raw: unknown): { ok: true; data: QuestionOutput } | { ok: false } {
+  const result = QuestionOutputSchema.safeParse(sanitizeQuestionOutput(raw));
+  return result.success ? { ok: true, data: result.data } : { ok: false };
+}
+
+export function isValidQuestion(value: unknown): value is QuestionWithJudgment {
+  return parseQuestionOutput(value).ok;
+}
+
+export function isValidGapCheckResult(value: unknown): value is GapCheckResult {
+  return GapCheckResultSchema.safeParse(value).success;
+}
+
+export function isValidAsrReviewResult(value: unknown): value is AsrReviewVerdict {
+  return AsrReviewVerdictSchema.safeParse(value).success;
+}
+
+export function isValidSynthesisResult(value: unknown): value is SynthesisResult {
+  return SynthesisSchema.safeParse(value).success;
+}
+
+// ─── Scheduler determinístico (100% código, sin llamada al modelo) ───────
+
+// Estado de un tópico, derivado de sus answers:
+//   - pending:   sin respuestas, o la última fue informative insuficiente con
+//                cupo restante, o hubo 1 solo noise (streak < MAX — se
+//                repregunta una vez más).
+//   - covered:   la última respuesta informative fue juzgada suficiente.
+//   - parked:    la última respuesta fue deferred (se deja para el final).
+//   - exhausted: cerrado: por cupo de informativas (budget), por streak de
+//                basura (noise) o por diferida repetida (parked_unresolved).
+export type TopicCoverage = "pending" | "covered" | "parked" | "exhausted";
+
+export type ClosedReason = "budget" | "noise" | "parked_unresolved";
+
+export function answersOfTopic(ledger: InterviewLedger, topic: string): InterviewAnswer[] {
+  return ledger.answers.filter((a) => a.topic === topic);
+}
+
+export function lastAnswerOfTopic(ledger: InterviewLedger, topic: string): InterviewAnswer | undefined {
+  const ofTopic = answersOfTopic(ledger, topic);
+  return ofTopic[ofTopic.length - 1];
+}
+
+export function countAnswersOfTopic(ledger: InterviewLedger, topic: string): number {
+  return ledger.answers.filter((a) => a.topic === topic).length;
+}
+
+export function countInformativeOfTopic(ledger: InterviewLedger, topic: string): number {
+  return answersOfTopic(ledger, topic).filter((a) => (a.response_kind ?? "informative") === "informative").length;
+}
+
+export function countDeferredOfTopic(ledger: InterviewLedger, topic: string): number {
+  return answersOfTopic(ledger, topic).filter((a) => a.response_kind === "deferred").length;
+}
+
+// Basura SEGUIDA al final del tópico (el streak se corta con cualquier
+// respuesta que no sea noise).
+export function noiseStreakOfTopic(ledger: InterviewLedger, topic: string): number {
+  let streak = 0;
+  const ofTopic = answersOfTopic(ledger, topic);
+  for (let i = ofTopic.length - 1; i >= 0; i--) {
+    if (ofTopic[i].response_kind === "noise") streak += 1;
+    else break;
+  }
+  return streak;
+}
+
+// Por qué un tópico está cerrado (exhausted), o null si no lo está.
+// El cierre por basura queda marcado DISTINTO del cierre normal ("budget")
+// y del diferido sin resolver ("parked_unresolved"): la síntesis futura
+// debe saber que un tópico noise NO tiene datos confiables.
+export function closedReasonOf(ledger: InterviewLedger, topic: string): ClosedReason | null {
+  const last = lastAnswerOfTopic(ledger, topic);
+  if (!last) return null;
+  if (noiseStreakOfTopic(ledger, topic) >= MAX_NOISE_STREAK) return "noise";
+  if (last.response_kind === "deferred" && countDeferredOfTopic(ledger, topic) >= MAX_DEFERRED_RETRIES) {
+    return "parked_unresolved";
+  }
   if (
-    options.modelID !== undefined ||
-    options.providerID !== undefined ||
-    options.variant !== undefined
+    (last.response_kind ?? "informative") === "informative" &&
+    last.sufficient !== true &&
+    countInformativeOfTopic(ledger, topic) >= MAX_QUESTIONS_PER_TOPIC
   ) {
-    return new OpenCodeModelGateway(
-      options.modelID ?? DEFAULT_MODEL_ID,
-      options.providerID ?? DEFAULT_PROVIDER_ID,
-      options.variant ?? DEFAULT_MODEL_VARIANT,
+    return "budget";
+  }
+  return null;
+}
+
+export function topicState(ledger: InterviewLedger, topic: string): TopicCoverage {
+  const last = lastAnswerOfTopic(ledger, topic);
+  if (!last) return "pending";
+  if (closedReasonOf(ledger, topic)) return "exhausted";
+  if (last.response_kind === "deferred") return "parked";
+  if (last.response_kind === "noise") return "pending";
+  if (last.sufficient === true) return "covered";
+  if (countInformativeOfTopic(ledger, topic) >= MAX_QUESTIONS_PER_TOPIC) return "exhausted";
+  return "pending";
+}
+
+// El próximo tópico a preguntar: pending primero; si no, un tópico REABIERTO
+// por el gap-check (Fase 6A); si no, un parked (diferido, última chance); si
+// no queda nada, null → la entrevista termina ahí.
+export function pickNextTopic(ledger: InterviewLedger): string | null {
+  const pending = ledger.topics.find((topic) => topicState(ledger, topic) === "pending");
+  if (pending) return pending;
+  const reopened = (ledger.reopens ?? []).find((r) => topicState(ledger, r.topic) !== "exhausted");
+  if (reopened) return reopened.topic;
+  const parked = ledger.topics.find((topic) => topicState(ledger, topic) === "parked");
+  return parked ?? null;
+}
+
+// ─── Contador de llamadas al modelo (para tests) ─────────────────────────
+
+let modelCallCountValue = 0;
+
+export function modelCallCount(): number {
+  return modelCallCountValue;
+}
+
+// ─── Arranque y turnos ───────────────────────────────────────────────────
+
+export async function startInterview(
+  projectPath: string,
+): Promise<{ ledgerPath: string; ledger: InterviewLedger }> {
+  ensureInterviewLayout(projectPath);
+  const client = await ensureClient();
+  const sesion = await client.session.create({
+    title: "Entrevista de requerimientos",
+    directory: projectPath,
+  });
+  if (sesion.error || !sesion.data) {
+    throw new Error(`No se pudo crear la sesión: ${JSON.stringify(sesion.error)}`);
+  }
+  const ledger: InterviewLedger = {
+    session_id: sesion.data.id,
+    project_path: projectPath,
+    topics: [...TOPICS],
+    answers: [],
+    contradictions: [],
+    reopens: [],
+    gap_check: null,
+    asr_reviews: [],
+    synthesis: null,
+    pending_question: null,
+  };
+  const ledgerPath = ledgerFilePath(projectPath);
+  saveLedger(ledgerPath, ledger);
+  return { ledgerPath, ledger };
+}
+
+// UNA llamada al modelo sobre un tópico: clasifica la última respuesta,
+// juzga su suficiencia (si es informative), detecta contradicciones contra
+// el resto del historial y genera la próxima pregunta. SIEMPRE la misma
+// sesión del ledger. Con reintentos automáticos si el output no valida.
+export async function askQuestion(
+  ledger: InterviewLedger,
+  topic: string,
+  projectBrief: string,
+): Promise<{ question: QuestionWithJudgment; usage: ModelUsage }> {
+  const { data, usage } = await promptStructured(
+    ledger,
+    QUESTION_SCHEMA,
+    buildTopicPrompt(ledger, topic, projectBrief),
+    isValidQuestion,
+    "Generación de pregunta",
+  );
+  const question = data;
+
+  // Normalización final al contrato interno (los defaults que Zod no puede
+  // conocer: el modelo los omite a veces y el motor prefiere null/valores
+  // explícitos a undefined):
+  //   - previous_answer_sufficient ausente → null.
+  //   - response_kind ausente (o null) → "informative".
+  //   - contradiction ausente → null.
+  //   - opción con "description" en vez de "label" → label = description.
+  if (question.previous_answer_sufficient === undefined) question.previous_answer_sufficient = null;
+  const rawKind = (question as unknown as { response_kind?: string }).response_kind;
+  if (rawKind === undefined || rawKind === null) {
+    question.response_kind = "informative";
+  }
+  if (question.contradiction === undefined || question.contradiction === null) {
+    question.contradiction = null;
+  }
+  for (const option of question.options) {
+    const o = option as { label?: string; description?: string };
+    if (typeof o.label !== "string" && typeof o.description === "string") {
+      o.label = o.description;
+    }
+  }
+  return { question, usage };
+}
+
+// Reanuda una entrevista guardada (ledger) desde donde quedó: carga el
+// estado, deja que el scheduler elija el próximo tópico pendiente y genera
+// su primera pregunta con la MISMA sesión del ledger (el historial persiste
+// en la sesión de opencode; el server nuevo la reabre desde el storage).
+export async function resumeInterview(
+  ledgerPath: string,
+  projectBrief: string,
+): Promise<TurnResult> {
+  const ledger = loadLedger(ledgerPath);
+  const next = pickNextTopic(ledger);
+  if (!next) {
+    ledger.pending_question = null;
+    saveLedger(ledgerPath, ledger);
+    return { done: true, reason: "all_topics_closed", usage: { input_tokens: 0, output_tokens: 0 } };
+  }
+  // La pregunta pendiente persiste en el ledger: si el scheduler sigue
+  // pidiendo el MISMO tópico, se devuelve tal cual, sin regenerar (cerrar y
+  // reabrir la app no cambia la pregunta en pantalla).
+  if (ledger.pending_question && ledger.pending_question.topic === next) {
+    return {
+      done: false,
+      kind: "question",
+      question: ledger.pending_question.question,
+      topic: next,
+      sufficient: null,
+      contradiction: null,
+      usage: { input_tokens: 0, output_tokens: 0 },
+    };
+  }
+  const turn = await askQuestion(ledger, next, projectBrief);
+  ledger.pending_question = { topic: next, question: turn.question };
+  saveLedger(ledgerPath, ledger);
+  return {
+    done: false,
+    kind: "question",
+    question: turn.question,
+    topic: next,
+    sufficient: null,
+    contradiction: null,
+    usage: turn.usage,
+  };
+}
+
+// ─── Parseo de la respuesta del usuario (opciones sugeridas + texto libre)
+
+// Interpreta lo que el usuario escribe cuando se le muestran opciones
+// sugeridas (2-4) + un campo de escritura libre:
+//   - un número entero dentro de 1..N → elige la opción N;
+//   - el id exacto de una opción, con o sin corchetes ("[id]" o "id") y
+//     case-insensitive → elige esa opción;
+//   - cualquier otra cosa (incluido "1 hora", o un número FUERA de rango
+//     como "0" o "9") → texto libre.
+// En preguntas free_only (sin opciones) todo es texto libre.
+// Devuelve null solo si el input está vacío (respuesta inválida).
+// En la UI futura los botones mandan el id directo; esta función protege
+// únicamente el campo de escritura libre.
+export interface ParsedUserResponse {
+  selected_option_id: string | null;
+  selected_option_label: string | null;
+  free_text: string | null;
+}
+
+export function parseUserResponse(question: InterviewQuestion, input: string): ParsedUserResponse | null {
+  const text = input.trim();
+  if (text.length === 0) return null;
+
+  const options = question.options ?? [];
+  if (options.length > 0) {
+    // Número entero dentro de 1..N → opción N (con su label legible).
+    if (/^\d+$/.test(text)) {
+      const n = Number(text);
+      if (n >= 1 && n <= options.length) {
+        const chosen = options[n - 1];
+        return { selected_option_id: chosen.id, selected_option_label: chosen.label, free_text: null };
+      }
+      // Número fuera de rango → se trata como texto libre.
+    }
+    // Id exacto de una opción, con o sin corchetes, case-insensitive.
+    const normalized = text.replace(/^\[|\]$/g, "").toLowerCase();
+    const byId = options.find((o) => o.id.toLowerCase() === normalized);
+    if (byId) {
+      return { selected_option_id: byId.id, selected_option_label: byId.label, free_text: null };
+    }
+  }
+
+  return { selected_option_id: null, selected_option_label: null, free_text: text };
+}
+
+// ─── Llamada estructurada con reintentos ─────────────────────────────────
+
+// El modelo es barato pero ruidoso: de vez en cuando devuelve JSON con keys rotas
+// (tags "<arg_key:...>" incrustados, objetos de nulos, options ausentes).
+// El server 1.18.18 no aplica estrictamente el schema (retryCount interno
+// roto), así que el MOTOR reintenta la llamada completa cuando el output no
+// valida. Cada reintento es una llamada más al modelo (se audita aparte).
+const MAX_STRUCTURED_RETRIES = 2;
+
+// La síntesis (final o del brief) es la llamada más cara del flujo: recibe el
+// contexto completo y genera el JSON más grande. Los errores de API y los
+// timeouts se reintentan igual que los outputs fuera de contrato.
+export const SYNTHESIS_TIMEOUT_MS = 360_000;
+
+let structuredRetryCountValue = 0;
+
+// Cantidad de reintentos por output fuera de contrato (auditoría para tests).
+export function structuredRetryCount(): number {
+  return structuredRetryCountValue;
+}
+
+// Llamada estructurada con reintentos (exportada para módulos hermanos,
+// ej: brief.ts — el ledger puede ser cualquier objeto con session_id).
+export async function promptStructured<T>(
+  ledger: InterviewLedger,
+  schema: Record<string, unknown>,
+  text: string,
+  validate: (value: unknown) => value is T,
+  context: string,
+  timeoutMs: number = MODEL_CALL_TIMEOUT_MS,
+): Promise<{ data: T; usage: ModelUsage }> {
+  const client = await ensureClient();
+  let lastRaw: unknown;
+  for (let attempt = 0; attempt <= MAX_STRUCTURED_RETRIES; attempt++) {
+    const respuesta = await client.session.prompt(
+      {
+        sessionID: ledger.session_id,
+        model: { providerID: DEFAULT_PROVIDER_ID, modelID: DEFAULT_MODEL_ID },
+        // Solo se manda variant cuando hay una configurada: cualquier
+        // variante de thinking rompe json_schema en deepseek-v4-flash
+        // (ver DEFAULT_MODEL_VARIANT).
+        ...(DEFAULT_MODEL_VARIANT ? { variant: DEFAULT_MODEL_VARIANT } : {}),
+        tools: {},
+        parts: [{ type: "text", text }],
+        format: { type: "json_schema", schema },
+      },
+      { signal: AbortSignal.timeout(timeoutMs) },
     );
+    if (respuesta.error || !respuesta.data) {
+      // Error de API/timeout: transitorio — se reintenta igual que un
+      // output fuera de contrato. Solo se rinde tras agotar los intentos.
+      const serializado = JSON.stringify(respuesta.error);
+      const esSesionPerdida = serializado.includes("Session not found");
+      if (esSesionPerdida) {
+        // La sesión original ya no existe (expiró o se limpió al cerrar el
+        // server). La re-síntesis NO la necesita: el contexto completo viaja
+        // en el prompt. Se crea una sesión nueva como canal para el modelo.
+        const sesion = await client.session.create({
+          title: `${context} (sesión recreada)`,
+          directory: ledger.project_path,
+        });
+        if (sesion.error || !sesion.data) {
+          throw new Error(`${context}: no se pudo recrear la sesión: ${JSON.stringify(sesion.error)}`);
+        }
+        ledger.session_id = sesion.data.id;
+        console.warn(`[interview] ${context}: sesión original no encontrada; recreada como ${sesion.data.id}`);
+        continue;
+      }
+      if (attempt < MAX_STRUCTURED_RETRIES) {
+        console.warn(`[interview] ${context}: error de llamada (${serializado}); reintentando`);
+        continue;
+      }
+      throw new Error(`${context} falló: ${serializado}`);
+    }
+    const info = respuesta.data.info;
+    if (info.error?.name === "StructuredOutputError") {
+      throw new Error(`${context}: el modelo no cumplió el schema (${info.error.name})`);
+    }
+    if (info.error) {
+      throw new Error(`${context}: error del modelo (${info.error.name})`);
+    }
+    modelCallCountValue += 1;
+    const raw = info.structured as T;
+    if (validate(raw)) {
+      return {
+        data: raw,
+        usage: {
+          input_tokens: info.tokens?.input ?? 0,
+          output_tokens: info.tokens?.output ?? 0,
+        },
+      };
+    }
+    lastRaw = raw;
+    structuredRetryCountValue += 1;
+    console.warn(`[interview] ${context}: output fuera de contrato (intento ${attempt + 1}/${MAX_STRUCTURED_RETRIES + 1}); reintentando`);
   }
-  if (!defaultGateway) {
-    defaultGateway = new OpenCodeModelGateway(DEFAULT_MODEL_ID, DEFAULT_PROVIDER_ID, DEFAULT_MODEL_VARIANT);
-  }
-  return defaultGateway;
+  throw new Error(`${context} fuera de contrato tras ${MAX_STRUCTURED_RETRIES + 1} intentos: ${JSON.stringify(lastRaw)}`);
 }
 
-export function getDefaultGateway(): InterviewModelGateway {
-  return resolveGateway({});
+// Fase 6A: pasada final de huecos. UNA llamada con el conjunto COMPLETO de
+// respuestas (todo junto, no tópico por tópico). Es la llamada más cara de la
+// entrevista a propósito, pero se paga una sola vez.
+export async function askGapCheck(
+  ledger: InterviewLedger,
+  projectBrief: string,
+): Promise<{ result: { gaps: GapRecord[] }; usage: ModelUsage }> {
+  const prompt = `Sos un Revisor de Calidad de Arquitectura (Portal de Calidad). Tu misión es encontrar HUECOS en la entrevista que impidan a un desarrollador empezar a programar sin incertidumbre.
+
+Proyecto: ${projectBrief}
+Tópicos de la entrevista: ${ledger.topics.join(", ")}
+
+Respuestas de la entrevista (texto completo, sin truncar — esta es la pasada que se puede pagar el contexto):
+${buildSummary(ledger, 500)}
+
+Instrucciones Críticas:
+1. Olfateo de Atributos Implícitos: revisá si el usuario omitió atributos de calidad estándar (ISO 25010) que son obvios para el dominio pero no se dijeron (ej: si es una app de salud, ¿dónde está la Seguridad/Privacidad y la Protección/Safety?).
+2. Verificabilidad: detectá cualquier requerimiento que no tenga un criterio de ajuste medible.
+3. Cabos Sueltos: si se mencionó una integración externa (API, DB adyacente) pero no el estilo de interacción (¿RPC, REST, Mensajería?), marcalo como hueco. También revisá dependencias externas (APIs, hardware) cuyas FALLAS no estén contempladas en los escenarios de Disponibilidad o Protección (las interfaces son vías de dos sentidos: no basta el estilo, hay que prever el fallo del otro lado).
+4. Restricciones Globales: buscá huecos de cumplimiento normativo o legal según el país o la industria del proyecto (ej: GDPR, Sarbanes-Oxley, normativa de salud) — una restricción externa obligatoria que no se contempló es un hueco, aunque no parezca "técnico".
+5. Consistencia Global: compará el conjunto COMPLETO de respuestas — una decisión de Rendimiento en un tópico que anula una de Seguridad en otro es un hueco de consistencia (el portal de calidad exige comprobar la consistencia como última instancia).
+6. Cohesión y Acoplamiento: si una funcionalidad está repartida en demasiados tópicos sin un componente claro que la "adueñe", marcalo como hueco de Modularidad — un desarrollador no sabrá dónde escribir ese código.
+
+Por cada hueco real, devolvé el tópico de la lista al que corresponde, el motivo técnico y suggested_action="reopen_topic". Si los atributos de Disponibilidad, Rendimiento y Seguridad están cubiertos con métricas, devolvé gaps=[].`;
+  const { data, usage } = await promptStructured(
+    ledger,
+    GAP_CHECK_SCHEMA,
+    prompt,
+    isValidGapCheckResult,
+    "Gap-check",
+  );
+  return { result: data, usage };
 }
 
-export { closeInterviewServer };
+// Fase 6B: doble validación ASR. Rol de Arquitecto Revisor INDEPENDIENTE
+// sobre un tópico arquitectónico recién cerrado con suficiente. El output
+// (is_genuine_asr + reason + title/body opcionales) queda persistido en el
+// ledger — la justificación queda trazable como Issue de GitHub.
+export async function runAsrReview(
+  ledger: InterviewLedger,
+  topic: string,
+  projectBrief: string,
+): Promise<{ result: AsrReviewVerdict; usage: ModelUsage }> {
+  const last = lastAnswerOfTopic(ledger, topic);
+  const texto = last ? truncate(last.free_text ?? last.selected_option_id ?? "(sin texto)", 200) : "(sin respuesta)";
+  const prompt = `Sos un Arquitecto Revisor Independiente. Debés juzgar si el tópico "${topic}" del proyecto "${projectBrief}" cerró con un ASR genuino.
 
-function interviewTitle(projectPath: string): string {
-  return `Entrevista de requerimientos — ${path.basename(projectPath)}`;
+Respuesta del tópico:
+"${texto}"
+
+Definición de ASR: un requerimiento es un ASR solo si tiene un impacto profundo en la estructura (ej: obliga a usar microservicios, caché distribuida, o un estilo dirigido por eventos). Si se puede resolver con "buen código" sin cambiar la forma del sistema, es solo una preferencia de producto.
+
+Análisis Requerido:
+1. Impacto Estructural: ¿qué decisión técnica fuerza este requerimiento? Distinguí decisión TÉCNICA de decisión ARQUITECTÓNICA: elegir una tecnología (ej: React.js) es técnico; se vuelve arquitectónico solo si se elige específicamente para soportar un atributo (rendimiento, escalabilidad). Si la respuesta del usuario menciona una tecnología, validá si es un MEDIO para un fin (el ASR) o una preferencia de stack.
+2. Escenario de 6 partes: redactá el escenario técnico final (Fuente, Estímulo, Artefacto, Entorno, Respuesta, Medida).
+3. Análisis de Compromisos (Trade-offs): identificá qué otro atributo de calidad se ve perjudicado por esta decisión (ej: +Seguridad = -Rendimiento).
+4. Restricciones (Constraints): no ignores requerimientos que, aunque no parezcan "técnicos", restringen la libertad de diseño de forma obligatoria (presupuesto, tiempo, leyes como GDPR).
+5. Justificación Arquitectónica: si es un ASR genuino, explicá qué patrón o estilo se estaría eligiendo (capas, microservicios, dirigido por eventos) y por qué es la solución "menos mala" para ese problema — el "porqué" es lo más valioso de la documentación.
+
+Respondé is_genuine_asr (true solo si es un ASR genuino según la definición, incluyendo restricciones obligatorias) y el motivo en una frase en reason.`;
+  const { data, usage } = await promptStructured(
+    ledger,
+    ASR_REVIEW_SCHEMA,
+    prompt,
+    isValidAsrReviewResult,
+    "Revisión ASR",
+  );
+  return { result: data, usage };
 }
 
-// Núcleo del turno: registra la respuesta (si hay), arma el contexto
-// compacto del ledger, pide la siguiente pregunta con structured output y
-// persiste lo que el modelo decidió (tópicos nuevos, status,
-// contradicciones). La respuesta se persiste ANTES de llamar al modelo:
-// un fallo de red o de structured output nunca pierde la respuesta, y el
-// reintento deduplica. El estado del tópico respondido (open_vague vs
-// closed) lo decide el modelo en este turno vía topic_action — el código
-// no duplica ese juicio con heurísticas locales.
-async function nextTurn(
+export function recordAnswer(
   ledgerPath: string,
   ledger: InterviewLedger,
-  userAnswer: UserAnswerInput | null,
-  gateway: InterviewModelGateway,
-): Promise<InterviewQuestion> {
-  let answeredTopicId: string | null = null;
-  if (userAnswer) {
-    const answer = recordAnswer(ledger, userAnswer);
-    resolveContradictionsForAnswer(ledger, answer);
-    answeredTopicId = answer.topic_id;
+  answer: Omit<InterviewAnswer, "id">,
+): InterviewAnswer {
+  // UPSERT por (topic, question_text): si el usuario re-respondió la MISMA
+  // pregunta (volver atrás y editar), se reemplaza la respuesta anterior en
+  // vez de duplicarla — dos respuestas al mismo texto generaban
+  // contradicciones falsas y ruido en el historial.
+  const existente = [...ledger.answers]
+    .reverse()
+    .find((a) => a.topic === answer.topic && a.question_text === answer.question_text);
+  if (existente) {
+    existente.selected_option_id = answer.selected_option_id;
+    existente.selected_option_label = answer.selected_option_label ?? null;
+    existente.free_text = answer.free_text;
+    // La clasificación/juicio llegan en la llamada siguiente (se re-juzga).
+    existente.response_kind = "informative";
+    existente.sufficient = null;
+    // La respuesta cambió: las contradicciones ABIERTAS que la referenciaban
+    // ya no aplican (el conflicto era contra la versión anterior).
+    ledger.contradictions = ledger.contradictions.filter(
+      (c) =>
+        c.status !== "open" ||
+        (c.answer_id !== existente.id && c.conflicting_answer_id !== existente.id),
+    );
+    saveLedger(ledgerPath, ledger);
+    return existente;
+  }
+  const registrada: InterviewAnswer = { ...answer, id: `a${ledger.answers.length + 1}` };
+  ledger.answers.push(registrada);
+  saveLedger(ledgerPath, ledger);
+  return registrada;
+}
+
+function truncate(text: string, max: number): string {
+  const limpio = text.replace(/\s+/g, " ").trim();
+  return limpio.length > max ? `${limpio.slice(0, max - 3)}...` : limpio;
+}
+
+function buildResolutionQuestion(ledger: InterviewLedger, contradiction: ContradictionRecord): InterviewQuestion {
+  const nueva = ledger.answers.find((a) => a.id === contradiction.answer_id);
+  const anterior = ledger.answers.find((a) => a.id === contradiction.conflicting_answer_id);
+  const textoNueva = truncate(nueva?.free_text ?? nueva?.selected_option_id ?? "(sin texto)", 60);
+  const textoAnterior = truncate(anterior?.free_text ?? anterior?.selected_option_id ?? "(sin texto)", 60);
+  return {
+    question_text: `Detectamos una contradicción: ${contradiction.reason} Acabás de decir "${textoNueva}", pero antes dijiste "${textoAnterior}". ¿Cuál de las dos vale?`,
+    kind: "single_select",
+    options: [
+      { id: "nueva", label: `Vale lo que acabo de decir: "${textoNueva}"` },
+      { id: "anterior", label: `Vale lo que dije antes: "${textoAnterior}"` },
+      { id: "ambas", label: "Ambas: se complementan y aclaro cómo" },
+    ],
+  };
+}
+
+// Turno completo de un tópico: registra la respuesta, hace la llamada que
+// clasifica + juzga + detecta contradicciones + genera, escribe la
+// clasificación en la answer, y deja que el SCHEDULER decida el próximo
+// tópico (el estado del tópico es derivado: el scheduler salta exhausted,
+// vuelve a pending para drill-down y deja parked para el final).
+export async function submitAnswer(
+  ledgerPath: string,
+  ledger: InterviewLedger,
+  input: UserAnswerInput,
+  projectBrief: string,
+): Promise<TurnResult> {
+  // 0. Contradicción abierta: este turno es su RESOLUCIÓN (sin llamada al
+  //    modelo para juzgar; la pregunta de resolución ya está armada).
+  const open = lastOpenContradiction(ledger);
+  if (open) {
+    return resolveContradiction(ledgerPath, ledger, open, input, projectBrief);
+  }
+
+  // 1. Registra la respuesta (su clasificación llega en la llamada). La
+  //    pregunta pendiente se consume: la próxima se re-genera/encola.
+  ledger.pending_question = null;
+  const nueva = recordAnswer(ledgerPath, ledger, {
+    topic: input.topic,
+    question_text: input.question_text,
+    selected_option_id: input.selected_option_id,
+    selected_option_label: input.selected_option_label ?? null,
+    free_text: input.free_text,
+  });
+
+  // 2. La llamada que clasifica + juzga + detecta + genera. (El scheduler
+  //    nunca elige un tópico exhausted, así que la llamada siempre aporta;
+  //    el cupo viejo de "saltar la llamada" quedó cubierto por la
+  //    transición derivada en topicState.)
+  const turn = await askQuestion(ledger, input.topic, projectBrief);
+  const generated = turn.question;
+  let usage = turn.usage;
+
+  // 3. Escribe la clasificación y el juicio en la respuesta registrada.
+  nueva.response_kind = generated.response_kind ?? "informative";
+  if (generated.response_kind === "informative") {
+    nueva.sufficient = generated.previous_answer_sufficient;
+  } else {
+    // Basura y diferida no se juzgan por suficiencia (el modelo devuelve
+    // null por la regla del prompt); si igual lo mandó, no se guarda.
+    nueva.sufficient = null;
+  }
+  saveLedger(ledgerPath, ledger);
+
+  // 4. Contradicción detectada: se registra (open) y el turno pasa a ser de
+  //    resolución — el usuario elige cuál versión vale ANTES de que nada
+  //    avance. La pregunta se arma en código, sin llamada al modelo.
+  //
+  //    VALIDACIÓN: la contradicción debe apuntar a una respuesta ANTERIOR
+  //    distinta de la recién dada. El modelo a veces marca como "conflicto"
+  //    la propia respuesta que está clasificando (falso positivo → c: a1 vs
+  //    a1) o un id inexistente; en ese caso se descarta, no se registra.
+  if (generated.contradiction) {
+    const conflictingId = generated.contradiction.conflicting_answer_id;
+    const existeOtraAnterior = ledger.answers.some((a) => a.id === conflictingId && a.id !== nueva.id);
+    if (!existeOtraAnterior) {
+      console.warn(
+        `[interview] contradicción descartada: apunta a "${conflictingId}" (no es una respuesta anterior distinta de "${nueva.id}")`,
+      );
+    } else {
+      const contradiction: ContradictionRecord = {
+        id: `c${ledger.contradictions.length + 1}`,
+        answer_id: nueva.id,
+        conflicting_answer_id: conflictingId,
+        reason: generated.contradiction.reason,
+        status: "open",
+        resolution: null,
+      };
+      ledger.contradictions.push(contradiction);
+      saveLedger(ledgerPath, ledger);
+      return {
+        done: false,
+        kind: "resolution",
+        question: buildResolutionQuestion(ledger, contradiction),
+        topic: CONTRADICTION_TOPIC_ID,
+        contradiction,
+        usage,
+      };
+    }
+  }
+
+  // 4b. Cierre del tópico: si quedó cerrado (por suficiente O por cupo/
+  //     basura), ya no puede volver a preguntarse → sale de reopens (si
+  //     había sido reabierto por el gap-check). Y si cerró CON suficiente
+  //     siendo un tópico ARQUITECTÓNICO, corre la doble validación ASR
+  //     (Parte B de la Fase 6): una llamada extra e independiente;
+  //     best-effort (si falla, la entrevista no se cuelga).
+  const cerrado = nueva.sufficient === true || topicState(ledger, input.topic) === "exhausted";
+  if (cerrado) {
+    ledger.reopens = (ledger.reopens ?? []).filter((r) => r.topic !== input.topic);
+    if (
+      nueva.sufficient === true &&
+      ARCHITECTURAL_TOPICS.has(input.topic) &&
+      !(ledger.asr_reviews ?? []).some((r) => r.topic === input.topic)
+    ) {
+      try {
+        const review = await runAsrReview(ledger, input.topic, projectBrief);
+        (ledger.asr_reviews ??= []).push({
+          topic: input.topic,
+          answer_id: nueva.id,
+          verdict: review.result,
+          at: new Date().toISOString(),
+        });
+        usage = mergeUsage(usage, review.usage);
+      } catch (err) {
+        console.error(`[interview] revisión ASR falló (best-effort): ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     saveLedger(ledgerPath, ledger);
   }
 
-  const turnPrompt = buildTurnPrompt(ledger);
-  const question = await gateway.nextQuestion({
-    sessionId: ledger.session_id,
-    turnPrompt,
-  });
-
-  if (question.contradiction_flag) {
-    question.contradiction_flag.conflicting_answer_id = normalizeConflictingAnswerId(ledger, question);
-  }
-
-  updateTopicStatusForQuestion(ledger, question, answeredTopicId);
-  if (question.topic_action === "resolve_contradiction" && question.contradiction_flag) {
-    markContradictionPending(ledger, question);
-  }
-
-  ledger.last_question = question;
-  ledger.last_turn_at = new Date().toISOString();
-  saveLedger(ledgerPath, ledger);
-  return question;
-}
-
-// ─── API pública ────────────────────────────────────────────────────────
-
-// Crea una entrevista nueva (ledger + sesión de opencode) y devuelve la
-// primera pregunta. Si el primer turno falla, el ledger se descarta para
-// que reintentar no acumule sesiones huérfanas.
-export async function createInterview(
-  projectPath: string,
-  options: InterviewEngineOptions = {},
-): Promise<{ ledgerPath: string; firstQuestion: InterviewQuestion }> {
-  const gateway = resolveGateway(options);
-  const sessionId = await gateway.createSession(interviewTitle(projectPath), projectPath);
-
-  const ledger = createLedger({ projectPath, sessionId });
-  const ledgerPath = ledgerFilePath(projectPath, Date.now());
-  saveLedger(ledgerPath, ledger);
-
-  try {
-    const firstQuestion = await nextTurn(ledgerPath, ledger, null, gateway);
-    return { ledgerPath, firstQuestion };
-  } catch (err) {
-    try {
-      fs.unlinkSync(ledgerPath);
-    } catch {
-      // Ledger ya inexistente o sin permisos: el error original es lo que importa.
-    }
-    throw err;
-  }
-}
-
-// Envía una respuesta y devuelve la siguiente pregunta. Idempotente ante
-// reintentos (doble click o reintento tras fallo del modelo): si la última
-// respuesta registrada corresponde exactamente a la pregunta que se está
-// mostrando y coincide con el input, no se registra duplicado.
-export async function submitAnswer(
-  ledgerPath: string,
-  answer: UserAnswerInput,
-  options: InterviewEngineOptions = {},
-): Promise<InterviewQuestion> {
-  const gateway = resolveGateway(options);
-  const ledger = loadLedger(ledgerPath);
-
-  const last = ledger.answers[ledger.answers.length - 1];
-  const isRetry =
-    last !== undefined &&
-    ledger.last_question !== null &&
-    last.question_text === ledger.last_question.question_text &&
-    last.selected_option_id === answer.selected_option_id &&
-    last.free_text === answer.free_text;
-
-  return nextTurn(ledgerPath, ledger, isRetry ? null : answer, gateway);
-}
-
-// Estado actual para retomar una sesión pausada. lastQuestion es la
-// última pregunta mostrada (null solo en un ledger vacío), para que la UI
-// pueda re-renderizar la pregunta pendiente.
-export async function loadInterviewState(
-  ledgerPath: string,
-): Promise<{ ledger: InterviewLedger; lastQuestion: InterviewQuestion | null }> {
-  const ledger = loadLedger(ledgerPath);
-  return { ledger, lastQuestion: ledger.last_question };
-}
-
-// Lista las entrevistas existentes de un proyecto para el selector
-// "retomar", ordenadas de más reciente a más antigua.
-export async function listInterviews(projectPath: string): Promise<InterviewSummary[]> {
-  const dir = interviewDir(projectPath);
-  let entries: fs.Dirent[];
-  try {
-    entries = fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-
-  const summaries: InterviewSummary[] = [];
-  for (const entry of entries) {
-    if (!entry.isFile() || !/^interview-\d+\.json$/.test(entry.name)) continue;
-    const ledgerPath = path.join(dir, entry.name);
-    try {
-      const ledger = loadLedger(ledgerPath);
-      summaries.push({
-        ledgerPath,
-        projectPath,
-        session_id: ledger.session_id,
-        created_at: ledger.created_at,
-        last_turn_at: ledger.last_turn_at,
-        topics_total: ledger.topics.length,
-        topics_closed: ledger.topics.filter((topic) => topic.status === "closed").length,
-        answers_count: ledger.answers.length,
-        pending_contradictions: ledger.contradictions.filter((record) => !record.resolved).length,
-      });
-    } catch (err) {
-      if (err instanceof InterviewEngineError && err.kind === "ledger_corrupt") {
-        console.error(`[interview] skipping malformed ledger ${ledgerPath}: ${err.message}`);
-        continue;
+  // 5. El scheduler decide el próximo tópico — 100% código, sin modelo.
+  const next = pickNextTopic(ledger);
+  if (!next) {
+    // 5a. Fase 6A — gap-check final: se queda sin pendientes, pero antes de
+    //     dar por terminada la entrevista corre UNA vez (solo si nunca
+    //     corrió) la pasada holística de huecos. Si detecta huecos con
+    //     reopen_topic, los tópicos se reabren y se les da una oportunidad
+    //     más. Best-effort: si la llamada falla, la entrevista termina igual.
+    if (ledger.gap_check === null) {
+      try {
+        const gap = await askGapCheck(ledger, projectBrief);
+        usage = mergeUsage(usage, gap.usage);
+        ledger.gap_check = { gaps: gap.result.gaps, at: new Date().toISOString() };
+        for (const hueco of gap.result.gaps) {
+          if (
+            hueco.suggested_action === "reopen_topic" &&
+            ledger.topics.includes(hueco.topic) &&
+            !ledger.reopens.some((r) => r.topic === hueco.topic)
+          ) {
+            ledger.reopens.push({ topic: hueco.topic, reason: hueco.reason });
+          }
+        }
+        saveLedger(ledgerPath, ledger);
+      } catch (err) {
+        console.error(`[interview] gap-check falló (best-effort): ${err instanceof Error ? err.message : String(err)}`);
+        return { done: true, reason: "all_topics_closed", usage };
       }
-      throw err;
+      const reopened = pickNextTopic(ledger);
+      if (reopened) {
+        const turn = await askQuestion(ledger, reopened, projectBrief);
+        ledger.pending_question = { topic: reopened, question: turn.question };
+        saveLedger(ledgerPath, ledger);
+        return {
+          done: false,
+          kind: "question",
+          question: turn.question,
+          topic: reopened,
+          sufficient: null,
+          contradiction: null,
+          usage: mergeUsage(usage, turn.usage),
+        };
+      }
     }
+    return { done: true, reason: "all_topics_closed", usage };
   }
 
-  summaries.sort((a, b) => b.last_turn_at.localeCompare(a.last_turn_at));
-  return summaries;
+  // 6. Mismo tópico (drill-down o repregunta tras un noise): la pregunta
+  //    generada en el paso 2 sirve.
+  if (next === input.topic) {
+    ledger.pending_question = { topic: next, question: generated };
+    saveLedger(ledgerPath, ledger);
+    return {
+      done: false,
+      kind: "question",
+      question: generated,
+      topic: next,
+      sufficient: nueva.sufficient ?? null,
+      contradiction: null,
+      usage,
+    };
+  }
+
+  // 7. Otro tópico (avance, última chance de un parked, o tópico nuevo):
+  //    primera pregunta del tópico decidido por el scheduler.
+  const nextTurn = await askQuestion(ledger, next, projectBrief);
+  ledger.pending_question = { topic: next, question: nextTurn.question };
+  saveLedger(ledgerPath, ledger);
+  return {
+    done: false,
+    kind: "question",
+    question: nextTurn.question,
+    topic: next,
+    sufficient: null,
+    contradiction: null,
+    usage: {
+      input_tokens: usage.input_tokens + nextTurn.usage.input_tokens,
+      output_tokens: usage.output_tokens + nextTurn.usage.output_tokens,
+    },
+  };
+}
+
+// Procesa la respuesta a una pregunta de resolución: marca la contradicción
+// como resuelta (con la elección del usuario), descarta la versión perdedora
+// (superseded — no participará de la detección de choques futura) y retoma
+// la entrevista normal: el scheduler elige el próximo tópico.
+async function resolveContradiction(
+  ledgerPath: string,
+  ledger: InterviewLedger,
+  contradiction: ContradictionRecord,
+  input: UserAnswerInput,
+  projectBrief: string,
+): Promise<TurnResult> {
+  contradiction.status = "resolved";
+  contradiction.resolution = {
+    selected_option_id: input.selected_option_id,
+    free_text: input.free_text,
+  };
+
+  // Aplica el veredicto del usuario: la versión que NO vale queda descartada.
+  // ("ambas" o una aclaración libre no descartan ninguna — anotado para
+  // fases futuras.)
+  const nueva = ledger.answers.find((a) => a.id === contradiction.answer_id);
+  const anterior = ledger.answers.find((a) => a.id === contradiction.conflicting_answer_id);
+  if (input.selected_option_id === "nueva" && anterior) {
+    anterior.superseded = true;
+    anterior.superseded_by = contradiction.id;
+  } else if (input.selected_option_id === "anterior" && nueva) {
+    nueva.superseded = true;
+    nueva.superseded_by = contradiction.id;
+  }
+  saveLedger(ledgerPath, ledger);
+
+  const next = pickNextTopic(ledger);
+  if (!next) {
+    return { done: true, reason: "all_topics_closed", usage: { input_tokens: 0, output_tokens: 0 } };
+  }
+  const turn = await askQuestion(ledger, next, projectBrief);
+  return {
+    done: false,
+    kind: "question",
+    question: turn.question,
+    topic: next,
+    sufficient: null,
+    contradiction: null,
+    usage: turn.usage,
+  };
+}
+
+// La contradicción abierta más antigua (FIFO), o null si no hay ninguna.
+export function lastOpenContradiction(ledger: InterviewLedger): ContradictionRecord | null {
+  return ledger.contradictions.find((c) => c.status === "open") ?? null;
+}
+
+// ─── Síntesis final (planilla de salida) ─────────────────────────────────
+
+// Ruta del JSON standalone de la síntesis (junto al ledger).
+export function synthesisFilePath(ledgerPath: string): string {
+  return ledgerPath.replace(/\.json$/, "-sintesis.json");
+}
+
+// Contexto enriquecido que ve el modelo en la síntesis: respuestas con su
+// estado (suficiente/ruido/diferida/descartada), tópicos cerrados, huecos,
+// veredictos ASR y contradicciones — para que la planilla se llene SOLO con
+// evidencia real de la entrevista.
+function buildSynthesisContext(ledger: InterviewLedger, projectBrief: string): string {
+  const answers = ledger.answers
+    .map((a) => {
+      const marca = a.superseded
+        ? " (DESCARTADA — el usuario eligió la otra versión en la resolución de contradicción)"
+        : a.response_kind === "noise"
+          ? " (RUIDO — no es dato confiable)"
+          : a.response_kind === "deferred"
+            ? " (DIFERIDA — el usuario no la respondió)"
+            : "";
+      const juicio = a.sufficient === true ? " [suficiente]" : a.sufficient === false ? " [insuficiente]" : "";
+      const texto = (a.free_text ?? a.selected_option_label ?? a.selected_option_id ?? "(sin texto)")
+        .replace(/\s+/g, " ")
+        .trim();
+      return `- [${a.id}] ${a.topic}: "${texto}"${juicio}${marca}`;
+    })
+    .join("\n");
+
+  const estados = ledger.topics
+    .map((t) => {
+      const st = topicState(ledger, t);
+      const motivo = closedReasonOf(ledger, t);
+      return `${t}: ${st}${motivo ? ` (${motivo})` : ""}`;
+    })
+    .join(", ");
+
+  const contradicciones =
+    ledger.contradictions.length === 0
+      ? "(ninguna)"
+      : ledger.contradictions
+          .map(
+            (c) =>
+              `- ${c.id}: [${c.answer_id}] vs [${c.conflicting_answer_id}] — ${c.reason} [${c.status}${
+                c.resolution?.selected_option_id ? ` → eligió "${c.resolution.selected_option_id}"` : ""
+              }]`,
+          )
+          .join("\n");
+
+  const gaps =
+    !ledger.gap_check || ledger.gap_check.gaps.length === 0
+      ? "(sin huecos detectados)"
+      : ledger.gap_check.gaps.map((g) => `- ${g.topic}: ${g.reason}`).join("\n");
+
+  const asr =
+    ledger.asr_reviews.length === 0
+      ? "(sin revisiones ASR)"
+      : ledger.asr_reviews
+          .map((r) => `- ${r.topic}: is_genuine_asr=${r.verdict.is_genuine_asr} — ${r.verdict.reason}`)
+          .join("\n");
+
+  return `Proyecto: ${projectBrief}
+session_id: ${ledger.session_id}
+
+Respuestas de la entrevista (texto completo):
+${answers}
+
+Estado de los tópicos: ${estados}
+
+Contradicciones:
+${contradicciones}
+
+Revisión final de huecos:
+${gaps}
+
+Doble validación ASR:
+${asr}`;
+}
+
+function buildSynthesisPrompt(ledger: InterviewLedger, projectBrief: string): string {
+  return `Sos un Analista de Requerimientos y Arquitecto de Software Senior. La entrevista de requerimientos TERMINÓ y tenés el conjunto completo de datos. Completá la planilla de síntesis con TODOS los campos, basándote SOLO en la evidencia de la entrevista — no inventes requerimientos que no estén respaldados por una respuesta.
+
+${buildSynthesisContext(ledger, projectBrief)}
+
+Reglas de calidad:
+- requerimientos_funcionales: derivados SOLO de respuestas informativas ACTIVAS (sin RUIDO, DIFERIDA ni DESCARTADA). Cada uno con criterio_de_ajuste verificable y el id de la answer que lo originó en "origen". Asigná prioridad MoSCoW según la importancia que el creador le dio.
+- atributos_de_calidad_y_asrs: un ítem por cada atributo de calidad relevante (rendimiento, disponibilidad, seguridad, etc.) con su escenario_tecnico_6_partes COMPLETO (fuente, estímulo, artefacto, entorno, respuesta, medida_de_respuesta cuantificable) y los trade_offs_identificados. es_asr_genuino=true SOLO si fuerza una decisión estructural profunda — usá los veredictos de la doble validación ASR si existen.
+- restricciones_globales: restricciones explícitas de la entrevista o normativas obvias del dominio (ej: GDPR si hay datos personales).
+- glosario_de_terminos: términos técnicos o de dominio ambiguos usados en la entrevista (objeto vacío si no aplica).
+- proyecto_metadata: nombre_proyecto del brief, id_sesion de la entrevista, fecha_relevamiento (hoy, ISO8601), brief_contexto (resumen del dominio y metas del negocio).
+
+Completá TODOS los campos.`;
+}
+
+// Síntesis final: UNA llamada al modelo con el contexto completo de la
+// entrevista. Se llama DESPUÉS de que la entrevista terminó (done) — no la
+// dispara el motor automáticamente (los tests de fases anteriores no suman
+// llamadas). Guarda el resultado en el ledger (ledger.synthesis) y escribe
+// el JSON standalone junto al ledger.
+export async function synthesizeInterview(
+  ledgerPath: string,
+  projectBrief: string,
+): Promise<{ synthesis: SynthesisResult; usage: ModelUsage; synthesisPath: string }> {
+  const ledger = loadLedger(ledgerPath);
+  const { data, usage } = await promptStructured(
+    ledger,
+    SYNTHESIS_SCHEMA,
+    buildSynthesisPrompt(ledger, projectBrief),
+    isValidSynthesisResult,
+    "Síntesis final",
+    SYNTHESIS_TIMEOUT_MS,
+  );
+  // Re-parsea para aplicar defaults/.catch de Zod (promptStructured devuelve
+  // el raw; el documento guardado debe quedar completo).
+  const parsed = SynthesisSchema.safeParse(data);
+  const synthesis = parsed.success ? parsed.data : (data as SynthesisResult);
+  ledger.synthesis = { at: new Date().toISOString(), data: synthesis };
+  saveLedger(ledgerPath, ledger);
+  const synthesisPath = synthesisFilePath(ledgerPath);
+  fs.writeFileSync(synthesisPath, JSON.stringify(synthesis, null, 2));
+  return { synthesis, usage, synthesisPath };
+}
+
+// Limpieza best-effort al terminar la entrevista: borra la sesión (si el
+// server ya no está, la deja huérfana) y apaga el server dedicado.
+export async function cleanupInterview(ledger: InterviewLedger): Promise<void> {
+  if (runningClient && ledger.session_id) {
+    try {
+      const result = await runningClient.session.delete({ sessionID: ledger.session_id });
+      if (result.error) {
+        // Sesión huérfana tolerable.
+      }
+    } catch {
+      // Idem: el cleanup nunca bloquea el flujo.
+    }
+  }
+  closeInterviewServer();
 }
