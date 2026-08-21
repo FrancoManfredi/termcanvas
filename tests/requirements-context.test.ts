@@ -9,6 +9,8 @@ import {
   listSynthesis,
   resolveRequirementsForPrompt,
   setActiveRequirements,
+  backfillStoriesForSynthesis,
+  normalizeSynthesis,
 } from "../headless-runtime/interview/requirements.ts";
 import type { SynthesisResult } from "../headless-runtime/interview/schema.ts";
 
@@ -20,6 +22,19 @@ function makeSynthesis(overrides: Partial<SynthesisResult> = {}): SynthesisResul
       fecha_relevamiento: "2026-08-16T12:00:00.000Z",
       brief_contexto: "Contexto",
     },
+    historias_de_usuario: [
+      {
+        id: "HS-001",
+        titulo: "Asignar juegos por grupo",
+        rol: "maestra",
+        quiero: "asignar un juego a un grupo",
+        para: "que cada grupo practique los ejercicios que le faltan",
+        criterios_de_aceptacion: ["La maestra elige grupo y juego", "El grupo ve el juego asignado al entrar"],
+        prioridad: "Must have",
+        origen: "a1",
+      },
+    ],
+    historias_backfilled: false,
     requerimientos_funcionales: [
       {
         id: "RF-001",
@@ -28,6 +43,8 @@ function makeSynthesis(overrides: Partial<SynthesisResult> = {}): SynthesisResul
         prioridad: "Must have",
         criterio_de_ajuste: "Criterio",
         origen: "a1",
+        historia_origen: "HS-001",
+        historias_origen: ["HS-001"],
       },
     ],
     atributos_de_calidad_y_asrs: [
@@ -129,6 +146,85 @@ test("formatRequirementsForPrompt: fallback selection is marked for log traceabi
   assert.ok(text.includes("FALLBACK: más reciente (sin selección activa)"), "fallback must be explicit");
 });
 
+test("formatRequirementsForPrompt: compact mode (default) omits stories and the RF→story link", () => {
+  const text = formatRequirementsForPrompt(makeSynthesis(), "entrevista-1-sintesis.json", false);
+  assert.ok(!text.includes("HISTORIAS DE USUARIO"), "compact mode must not emit the stories section");
+  assert.ok(!text.includes("Formaliza la historia"), "compact mode must not emit the RF→story link");
+  assert.ok(text.includes("### RF-001 [Must have]"), "compact mode keeps the RF section");
+  assert.ok(text.includes("- Origen: a1"), "compact mode keeps the RF provenance line");
+});
+
+test("formatRequirementsForPrompt: includeStories adds stories and the RF→story link", () => {
+  const text = formatRequirementsForPrompt(makeSynthesis(), "entrevista-1-sintesis.json", false, {
+    includeStories: true,
+  });
+  assert.ok(text.includes("HISTORIAS DE USUARIO"), "stories mode must emit the stories section");
+  assert.ok(text.includes("### HS-001 [Must have]"), "stories mode must list the story id and priority");
+  assert.ok(
+    text.includes("Como maestra, quiero asignar un juego a un grupo, para que cada grupo practique los ejercicios que le faltan."),
+    "stories mode must render the full Como/quiere/para narrative",
+  );
+  assert.ok(text.includes("La maestra elige grupo y juego"), "stories mode must include acceptance criteria");
+  assert.ok(text.includes("- Formaliza las historias: HS-001"), "stories mode must link the RF to its story");
+});
+
+test("formatRequirementsForPrompt: includeStories with empty stories degrades to the compact shape", () => {
+  const text = formatRequirementsForPrompt(
+    makeSynthesis({ historias_de_usuario: [] }),
+    "entrevista-1-sintesis.json",
+    false,
+    { includeStories: true },
+  );
+  assert.ok(!text.includes("HISTORIAS DE USUARIO"), "no stories -> section omitted even in stories mode");
+  assert.ok(text.includes("REQUERIMIENTOS FUNCIONALES"), "RF section always present");
+});
+
+test("formatRequirementsForPrompt: N:N relation renders ALL the stories of an RF", () => {
+  const text = formatRequirementsForPrompt(
+    makeSynthesis({
+      requerimientos_funcionales: [
+        {
+          id: "RF-001",
+          descripcion: "El sistema debe permitir a la maestra asignar un juego",
+          justificacion: "Justificacion",
+          prioridad: "Must have",
+          criterio_de_ajuste: "Criterio",
+          origen: "a1",
+          historia_origen: "(sin historia)",
+          historias_origen: ["HS-001", "HS-002"],
+        },
+      ],
+    }),
+    "entrevista-1-sintesis.json",
+    false,
+    { includeStories: true },
+  );
+  assert.ok(
+    text.includes("- Formaliza las historias: HS-001, HS-002"),
+    "an RF formalizing several stories must list all of them",
+  );
+});
+
+test("normalizeSynthesis: legacy single historia_origen is derived into historias_origen", () => {
+  const legacy = makeSynthesis({
+    requerimientos_funcionales: [
+      {
+        id: "RF-001",
+        descripcion: "El sistema debe permitir a la maestra asignar un juego",
+        justificacion: "Justificacion",
+        prioridad: "Must have",
+        criterio_de_ajuste: "Criterio",
+        origen: "a1",
+        historia_origen: "HS-001",
+        historias_origen: [],
+      },
+    ],
+  });
+  const normalized = normalizeSynthesis(legacy);
+  assert.deepEqual(normalized.requerimientos_funcionales[0].historias_origen, ["HS-001"]);
+  assert.deepEqual(normalizeSynthesis(makeSynthesis()).requerimientos_funcionales[0].historias_origen, ["HS-001"]);
+});
+
 test("formatRequirementsForPrompt: handles empty collections gracefully", () => {
   const text = formatRequirementsForPrompt(
     makeSynthesis({
@@ -210,4 +306,66 @@ test("resolveRequirementsForPrompt: active wins, then fallback to latest, then n
   assert.ok(activo!.text.includes("selección activa del dueño"));
   assert.ok(activo!.sourcePath.endsWith("entrevista-1000-sintesis.json"), "must use the selected one");
   void latest;
+});
+
+test("resolveRequirementsForPrompt: opts propagate to the formatted text", () => {
+  const project = makeProject();
+  writeSynthesis(project, 2000);
+
+  const compact = resolveRequirementsForPrompt(project);
+  assert.ok(compact, "compact must resolve");
+  assert.ok(!compact!.text.includes("HISTORIAS DE USUARIO"), "default opts stay compact");
+
+  const withStories = resolveRequirementsForPrompt(project, { includeStories: true });
+  assert.ok(withStories, "stories mode must resolve");
+  assert.ok(withStories!.text.includes("HISTORIAS DE USUARIO"), "includeStories adds the stories section");
+});
+
+test("backfillStoriesForSynthesis: already-migrated synthesis is repaired (ledger synced) without calling the model", async () => {
+  const project = makeProject();
+  const path = writeSynthesis(project, 2000);
+  const before = fs.readFileSync(path, "utf-8");
+
+  const res = await backfillStoriesForSynthesis(project, path);
+  assert.ok(res.ok, "already-migrated must resolve ok (no model call)");
+  if (res.ok) {
+    assert.ok(res.synthesis.historias_de_usuario.length > 0, "returned synthesis carries the stories");
+  }
+  assert.equal(fs.readFileSync(path, "utf-8"), before, "standalone must be untouched when already migrated");
+});
+
+test("backfillStoriesForSynthesis: repairs the ledger copy of an already-migrated synthesis", async () => {
+  // Escenario real del bug: la migración vieja escribió el JSON standalone pero
+  // NO el ledger (la UI lee del ledger). La reparación debe sincronizar el
+  // ledger con el standalone sin tocar el standalone.
+  const project = makeProject();
+  const path = writeSynthesis(project, 2000);
+  const ledgerPath = path.replace(/-sintesis\.json$/, ".json");
+  // Ledger sin historias (estado roto previo a la reparación).
+  fs.writeFileSync(
+    ledgerPath,
+    JSON.stringify({
+      session_id: "ses_1",
+      project_path: project,
+      synthesis: { at: new Date().toISOString(), data: { ...makeSynthesis(), historias_de_usuario: [] } },
+    }),
+  );
+
+  const res = await backfillStoriesForSynthesis(project, path);
+  assert.ok(res.ok, res.ok ? "ok" : res.error);
+  const ledger = JSON.parse(fs.readFileSync(ledgerPath, "utf-8"));
+  assert.ok(
+    Array.isArray(ledger.synthesis.data.historias_de_usuario) &&
+      ledger.synthesis.data.historias_de_usuario.length > 0,
+    "ledger must be synced with the standalone stories",
+  );
+});
+
+test("backfillStoriesForSynthesis: missing synthesis returns no_synthesis", async () => {
+  const project = makeProject();
+  const res = await backfillStoriesForSynthesis(project, path.join(project, "nope.json"));
+  assert.equal(res.ok, false, "missing synthesis must fail cleanly");
+  if (!res.ok) {
+    assert.equal(res.reason, "no_synthesis", "reason must be no_synthesis");
+  }
 });

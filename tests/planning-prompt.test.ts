@@ -50,6 +50,21 @@ test("buildPlanningPrompt: el veredicto de requerimientos solo aparece con sínt
   assert.match(withRequirements, /"requisitos"/);
 });
 
+test("buildPlanningPrompt: las historias de usuario son contexto, no ítems de veredicto", () => {
+  const withStories = buildPlanningPrompt({
+    ...BASE,
+    requirementsText: "## REQUERIMIENTOS RELEVADOS\nHISTORIAS DE USUARIO\n### HS-001 …",
+  });
+  assert.match(withStories, /HISTORIAS DE USUARIO/);
+  assert.match(withStories, /NO se evalúan como ítems de veredicto/);
+
+  const compact = buildPlanningPrompt({
+    ...BASE,
+    requirementsText: "## REQUERIMIENTOS RELEVADOS\n### RF-001 …",
+  });
+  assert.doesNotMatch(compact, /NO se evalúan como ítems de veredicto/);
+});
+
 test("parsePlanningPlan: parsea requisitos tolerante (estados válidos, descarta inválidos)", () => {
   const parsed = parsePlanningPlan(
     JSON.stringify({

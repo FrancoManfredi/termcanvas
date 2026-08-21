@@ -9,6 +9,8 @@ import {
   getTerminalPtyId,
 } from "../terminal/terminalRuntimeStore.ts";
 import { useNotificationStore } from "../stores/notificationStore.ts";
+import { runModelFlagArgs } from "./modelPin.ts";
+import { formatModelRef, type ModelRef } from "../../shared/phaseModels";
 
 // Sesión REAL de planificación: crea un runtime de terminal (el mismo
 // pipeline que usa el canvas: ensureTerminalRuntime spawnea el PTY de
@@ -73,6 +75,9 @@ export interface LaunchPlanningSessionOptions {
   // reemplaza por un mensaje corto "escribí el plan ahora" porque todo el
   // contexto ya está en la sesión de opencode.
   resumeSessionId?: string;
+  // Pin de modelo por fase (routing): ref efectivo resuelto por el caller
+  // (resolvePhaseModelRef). null/ausente = sin pin (default global del CLI).
+  model?: ModelRef | null;
   onResult: (result: PlanningResult, warnings: string[]) => void;
   onError: (message: string) => void;
 }
@@ -85,6 +90,7 @@ export type LaunchActivePlanningSessionOptions = Pick<
   | "headless"
   | "toolFindingsText"
   | "resumeSessionId"
+  | "model"
   | "onExitedWithoutFile"
   | "onResult"
   | "onError"
@@ -304,7 +310,12 @@ export async function launchPlanningSession(
   const outputPath = planningOutputPath(options.repoPath, options.mode);
   const openIssues = await readOpenIssues(options.repoPath);
   const repoContextText = await resolveRepoContextText(options.repoPath);
-  const requirementsText = await resolveRequirementsText(options.repoPath);
+  // PLANNING redacta issues para humanos y otros agentes que los leen en
+  // GitHub: recibe la narrativa completa de las historias de usuario además
+  // de los RFs (ver plan: RESOLVE/FIX/REVIEW/CONFLICT corren sin historias).
+  const requirementsText = await resolveRequirementsText(options.repoPath, {
+    includeStories: true,
+  });
   // Momento de arranque: el poller lo usa para identificar la sesión de
   // opencode de ESTA corrida (findOpenCode) y poder reintentarla resumida.
   const startedAt = new Date().toISOString();
@@ -345,6 +356,11 @@ export async function launchPlanningSession(
     }
   }
 
+  // Pin de modelo por fase: en headless viaja como flags de `opencode run`
+  // (verificados contra la CLI instalada); en TUI viaja por metadatos del
+  // terminal y el runtime lo inyecta al spawnear.
+  const modelPinFlags = options.model ? runModelFlagArgs(options.model) : [];
+
   // TerminalData sintética que solo alimenta al runtime: nunca entra a la
   // escena, así que no hay tile que renderizar ni arrastrar en el canvas.
   // Con TUI (headless=false) el prompt viaja como initialPrompt → el runtime
@@ -359,11 +375,16 @@ export async function launchPlanningSession(
     true,
     "agent",
   );
+  if (options.model) {
+    terminal.modelOverride = formatModelRef(options.model);
+    terminal.variantOverride = options.model.variant;
+  }
   if (options.resumeSessionId) {
     // Reintento resumido: `opencode run -s <id> --auto <mensaje corto>`.
     // El contexto completo ya está en la sesión; no se re-paga el prompt.
     terminal.headlessArgs = [
       "run",
+      ...modelPinFlags,
       "-s",
       options.resumeSessionId,
       "--auto",
@@ -373,7 +394,7 @@ export async function launchPlanningSession(
     // Headless: `opencode run @<prompt-file> --auto` (sin TUI). El proceso
     // escribe el plan y termina solo; el poller resuelve con el archivo o el
     // exit del proceso.
-    terminal.headlessArgs = ["run", "--auto", promptRef];
+    terminal.headlessArgs = ["run", ...modelPinFlags, "--auto", promptRef];
   }
   // else: TUI interactiva (initialPrompt ya está en el terminal) — el
   // usuario ve la sesión y puede intervenir; el poller la cierra cuando el

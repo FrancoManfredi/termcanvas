@@ -204,3 +204,111 @@ test("preferences persist and sanitize worktree compact columns", async () => {
   const raw = JSON.parse(localStorage.getItem("termcanvas-preferences")!);
   assert.equal(raw.worktreeCompactColumns, 2);
 });
+
+test("preferences default phaseModels is empty (fresh install)", async () => {
+  installLocalStorage();
+  const { usePreferencesStore } = await loadPreferencesStoreModule(
+    "phase-models-fresh",
+  );
+  assert.deepEqual(usePreferencesStore.getState().phaseModels, {});
+});
+
+test("preferences persist and reset per-phase model overrides", async () => {
+  installLocalStorage();
+  const { usePreferencesStore } = await loadPreferencesStoreModule(
+    "phase-models-set",
+  );
+  const store = usePreferencesStore.getState();
+
+  store.setPhaseModel("requirements", {
+    providerID: "openai",
+    modelID: "gpt-5.2",
+  });
+  assert.deepEqual(usePreferencesStore.getState().phaseModels, {
+    requirements: { providerID: "openai", modelID: "gpt-5.2" },
+  });
+  const persistedA = JSON.parse(localStorage.getItem("termcanvas-preferences")!);
+  assert.deepEqual(persistedA.phaseModels, {
+    requirements: { providerID: "openai", modelID: "gpt-5.2" },
+  });
+
+  // La variant sobrevive el round-trip de persistencia.
+  store.setPhaseModel("synthesis", {
+    providerID: "opencode-go",
+    modelID: "deepseek-v4-flash",
+    variant: "max",
+  });
+  assert.deepEqual(usePreferencesStore.getState().phaseModels.synthesis, {
+    providerID: "opencode-go",
+    modelID: "deepseek-v4-flash",
+    variant: "max",
+  });
+
+  // null elimina la entrada: la fase vuelve a su default.
+  store.setPhaseModel("requirements", null);
+  assert.deepEqual(usePreferencesStore.getState().phaseModels, {
+    synthesis: {
+      providerID: "opencode-go",
+      modelID: "deepseek-v4-flash",
+      variant: "max",
+    },
+  });
+  const persistedB = JSON.parse(localStorage.getItem("termcanvas-preferences")!);
+  assert.equal("requirements" in persistedB.phaseModels, false);
+});
+
+test("preferences sanitize corrupt phaseModels on load", async () => {
+  installLocalStorage(
+    JSON.stringify({
+      phaseModels: {
+        requirements: { providerID: "", modelID: "hy3" },
+        inventada: { providerID: "x", modelID: "y" },
+        gapCheck: "opencode-go/deepseek-v4-flash",
+        synthesis: { providerID: "opencode-go", modelID: "deepseek-v4-flash" },
+      },
+    }),
+  );
+  const { usePreferencesStore } = await loadPreferencesStoreModule(
+    "phase-models-corrupt",
+  );
+  // Solo la entrada válida sobrevive; la basura se descarta sin fallar.
+  assert.deepEqual(usePreferencesStore.getState().phaseModels, {
+    synthesis: { providerID: "opencode-go", modelID: "deepseek-v4-flash" },
+  });
+});
+
+test("preferences load valid pre-seeded phaseModels untouched", async () => {
+  installLocalStorage(
+    JSON.stringify({
+      phaseModels: {
+        plannerRoadmap: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
+      },
+    }),
+  );
+  const { usePreferencesStore } = await loadPreferencesStoreModule(
+    "phase-models-preseeded",
+  );
+  assert.deepEqual(usePreferencesStore.getState().phaseModels, {
+    plannerRoadmap: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
+  });
+});
+
+test("preferences persist phaseCliTui (default false = headless)", async () => {
+  installLocalStorage();
+  const { usePreferencesStore } = await loadPreferencesStoreModule(
+    "phase-cli-tui",
+  );
+  const store = usePreferencesStore.getState();
+
+  assert.equal(store.phaseCliTui, false);
+
+  store.setPhaseCliTui(true);
+  assert.equal(usePreferencesStore.getState().phaseCliTui, true);
+  const raw = JSON.parse(localStorage.getItem("termcanvas-preferences")!);
+  assert.equal(raw.phaseCliTui, true);
+
+  // Corrupto en carga → default headless.
+  installLocalStorage(JSON.stringify({ phaseCliTui: "sí" }));
+  const reloaded = await loadPreferencesStoreModule("phase-cli-tui-corrupt");
+  assert.equal(reloaded.usePreferencesStore.getState().phaseCliTui, false);
+});

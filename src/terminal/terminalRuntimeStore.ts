@@ -1682,6 +1682,18 @@ async function spawnPty(
   };
 
   if (launch) {
+    // Pin de modelo por fase: los metadatos del terminal viajan solo en las
+    // sesiones de planificación/diagnóstico que lo fijaron. La TUI de
+    // opencode acepta -m/--model pero NO --variant (es flag exclusiva de
+    // `run`): el pin de variante solo viaja en las ramas headless.
+    const isOpencode = runtime.meta.terminal.type === "opencode";
+    const pinModel = isOpencode ? runtime.meta.terminal.modelOverride : undefined;
+    const pinVariant = isOpencode ? runtime.meta.terminal.variantOverride : undefined;
+    const tuiPinArgs = pinModel ? ["--model", pinModel] : [];
+    const runPinArgs = [
+      ...tuiPinArgs,
+      ...(pinVariant ? ["--variant", pinVariant] : []),
+    ];
     // Headless custom command (e.g. `node scripts/run-diagnostico-tools.mjs
     // --repo <path>`): the shell and args come verbatim from the terminal
     // metadata. Same contract as headlessRun: non-interactive, exits by
@@ -1699,6 +1711,7 @@ async function spawnPty(
       options.args = [
         "run",
         ...launch.args,
+        ...runPinArgs,
         ...(runtime.meta.terminal.initialPrompt
           ? [runtime.meta.terminal.initialPrompt]
           : []),
@@ -1714,7 +1727,20 @@ async function spawnPty(
             )
           : [];
       options.shell = launch.shell;
-      options.args = [...launch.args, ...promptArgs];
+      options.args = [...launch.args, ...tuiPinArgs, ...promptArgs];
+    }
+
+    // Trazabilidad del pin: el argv final queda en los diagnósticos del
+    // runtime, así cualquier disputa de "qué modelo corrió" es un vistazo.
+    if (pinModel) {
+      const argv = (options.args ?? []).join(" ");
+      console.info(
+        `[model-pin] ${runtime.meta.terminal.type} ref=${pinVariant ? `${pinModel}@${pinVariant}` : pinModel} argv="${argv}"`,
+      );
+      recordRuntimeDiagnostic(runtime, "model_pin_applied", {
+        ref: pinVariant ? `${pinModel}@${pinVariant}` : pinModel,
+        argv,
+      });
     }
   }
 

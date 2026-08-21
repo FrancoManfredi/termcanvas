@@ -3,6 +3,11 @@ import type { TerminalType } from "../types/index.ts";
 import type { AgentProviderConfig } from "../agentProviders";
 import { defaultProviderConfig, getPreset, PROVIDER_PRESETS } from "../agentProviders";
 import {
+  sanitizePhaseModels,
+  type ModelRef,
+  type PhaseId,
+} from "../../shared/phaseModels";
+import {
   DEFAULT_WORKTREE_COMPACT_COLUMNS,
   sanitizeWorktreeCompactColumns,
 } from "../canvas/worktreeCompactLayout";
@@ -60,6 +65,20 @@ interface PreferencesStore {
   apiKeyReady: boolean;
 
   /**
+   * Override de proveedor/modelo por fase (routing de IA). Ausencia = la
+   * fase usa su default (shared/phaseModels.ts). Se sanitiza al cargar:
+   * claves desconocidas y entradas malformadas se descartan, nunca fallan.
+   */
+  phaseModels: Partial<Record<PhaseId, ModelRef>>;
+
+  /**
+   * Ejecutar las fases CLI (planner/diagnóstico LLM) en TUI interactiva en
+   * vez de headless. Default false: headless garantiza el pin --model/
+   * --variant; la TUI depende de que el CLI lo honre (hoy no es confiable).
+   */
+  phaseCliTui: boolean;
+
+  /**
    * Per-id flag bag for capability discovery cues. A cue is "seen" once
    * the user has acted on it or dismissed it. We persist only the `true`
    * side; absence means "not seen yet". Keeping the schema this thin
@@ -88,6 +107,12 @@ interface PreferencesStore {
   setCli: (type: TerminalType, config: CliCommandConfig | null) => void;
   setAgentConfig: (config: AgentProviderConfig) => void;
   patchAgentConfig: (patch: Partial<AgentProviderConfig>) => void;
+  /**
+   * Fija el override de modelo de una fase; null la devuelve a su default
+   * (elimina la entrada en vez de persistir un null explícito).
+   */
+  setPhaseModel: (phaseId: PhaseId, ref: ModelRef | null) => void;
+  setPhaseCliTui: (value: boolean) => void;
   setDefaultTerminalSize: (size: StoredTerminalSize | null) => void;
   markHintSeen: (hintId: string) => void;
 }
@@ -118,6 +143,8 @@ interface SavedPrefs {
   cliCommands: Partial<Record<TerminalType, CliCommandConfig>>;
   defaultTerminalSize: StoredTerminalSize | null;
   agentConfig: AgentProviderConfig;
+  phaseModels: Partial<Record<PhaseId, ModelRef>>;
+  phaseCliTui: boolean;
   seenHints: Record<string, true>;
 }
 
@@ -267,6 +294,9 @@ function loadPreferences(): SavedPrefs {
       }
 
       const agentConfig = loadAgentConfig(parsed);
+      const phaseModels = sanitizePhaseModels(parsed.phaseModels);
+      let phaseCliTui = false;
+      if (parsed.phaseCliTui === true) phaseCliTui = true;
       const defaultTerminalSize = sanitizeStoredTerminalSize(
         parsed.defaultTerminalSize,
       );
@@ -294,6 +324,8 @@ function loadPreferences(): SavedPrefs {
         cliCommands,
         defaultTerminalSize,
         agentConfig,
+        phaseModels,
+        phaseCliTui,
         seenHints,
       };
     }
@@ -321,6 +353,8 @@ function loadPreferences(): SavedPrefs {
     cliCommands: {},
     defaultTerminalSize: null,
     agentConfig: defaultProviderConfig(),
+    phaseModels: {},
+    phaseCliTui: false,
     seenHints: {},
   };
 }
@@ -428,6 +462,8 @@ function getSaveState(state: PreferencesStore): SavedPrefs {
     cliCommands: state.cliCommands,
     defaultTerminalSize: state.defaultTerminalSize,
     agentConfig: state.agentConfig,
+    phaseModels: state.phaseModels,
+    phaseCliTui: state.phaseCliTui,
     seenHints: state.seenHints,
   };
 }
@@ -456,6 +492,8 @@ export const usePreferencesStore = create<PreferencesStore>((set, get) => ({
   cliCommands: initialPrefs.cliCommands,
   defaultTerminalSize: initialPrefs.defaultTerminalSize,
   agentConfig: initialPrefs.agentConfig,
+  phaseModels: initialPrefs.phaseModels,
+  phaseCliTui: initialPrefs.phaseCliTui,
   apiKeyReady: false,
   seenHints: initialPrefs.seenHints,
 
@@ -555,6 +593,20 @@ export const usePreferencesStore = create<PreferencesStore>((set, get) => ({
     const updated = { ...current, ...patch };
     set({ agentConfig: updated });
     savePreferences(getSaveState({ ...get(), agentConfig: updated }));
+  },
+  setPhaseModel: (phaseId, ref) => {
+    const current = { ...get().phaseModels };
+    if (ref === null) {
+      delete current[phaseId];
+    } else {
+      current[phaseId] = ref;
+    }
+    set({ phaseModels: current });
+    savePreferences(getSaveState({ ...get(), phaseModels: current }));
+  },
+  setPhaseCliTui: (value) => {
+    set({ phaseCliTui: value });
+    savePreferences(getSaveState({ ...get(), phaseCliTui: value }));
   },
   setDefaultTerminalSize: (size) => {
     const sanitized = size === null ? null : sanitizeStoredTerminalSize(size);

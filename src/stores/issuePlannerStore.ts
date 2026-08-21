@@ -16,7 +16,13 @@ import {
   loadPlannerResults,
   savePlannerResults,
 } from "../planner/plannerResultsPersistence.ts";
-import { buildIssueTemplateBody } from "../planner/issueTemplate.ts";
+import { buildIssueTemplateBody, buildFindingIssueBody } from "../planner/issueTemplate.ts";
+import {
+  assertPhaseModelAvailable,
+  getPhaseOutputTail,
+  resolvePhaseModelRef,
+  shouldRunPhaseInTui,
+} from "../planner/modelPin";
 import { useNotificationStore } from "./notificationStore.ts";
 
 // Estado de la pantalla de Planificación. La sesión de opencode corre en
@@ -311,9 +317,7 @@ function buildIssueBody(
   }
   if (isAuditPlan(result)) {
     const finding = result.findings[index];
-    return finding.template
-      ? buildIssueTemplateBody(finding.description, finding.template, repoUrl)
-      : finding.description;
+    return buildFindingIssueBody(finding, repoUrl);
   }
   return "";
 }
@@ -415,12 +419,39 @@ export const useIssuePlannerStore = create<IssuePlannerState>((set, get) => ({
     // En el entorno de tests no hay window: la corrida se avanza a mano.
     if (typeof window === "undefined") return;
     clearBackgroundTimers();
-    // Sesión real: runtime headless de opencode en el worktree activo +
-    // espera del plan JSON en disco. Si no hay ningún proyecto en la
-    // escena, el launch ya notificó el error y no hay nada que simular:
-    // sin sesión real la pantalla no debe inventar un plan de ejemplo.
+
+    // Gate previo del pin CLI: si el modelo configurado no existe en el
+    // catálogo real de opencode, fallar ACÁ con motivo accionable — no
+    // spawnear para descubrirlo dentro del CLI (que cae silenciosamente al
+    // último modelo usado en vez de rechazar).
+    const phaseId = mode === "roadmap" ? "plannerRoadmap" : "plannerAudit";
+    const blockReason = await assertPhaseModelAvailable(phaseId);
+    if (blockReason) {
+      activeSession = null;
+      useNotificationStore.getState().notify(
+        "error",
+        `[${phaseId}] ${blockReason}`,
+      );
+      set({ phase: "idle", startedAt: null, sessionRuntime: null });
+      return;
+    }
+
+    // Sesión REAL: por defecto HEADLESS (`opencode run --model X --auto`) —
+    // es donde el pin --model/--variant es confiable; la TUI interactiva
+    // ignora el pin y cae al último modelo usado. El log vive en el panel
+    // attachado; si la sesión muere, el error incluye el tail del proceso.
+    // TUI solo si se habilita explícitamente en Settings (sin garantía).
+    let handleRef: PlanningSessionHandle | null = null;
+    const tailSuffix = () => {
+      const tail = handleRef ? getPhaseOutputTail(handleRef.terminalId) : "";
+      return tail ? `\n\nÚltimas líneas del proceso:\n${tail}` : "";
+    };
     const session = await launchPlanningSessionForActiveWorktree({
       mode,
+      headless: !shouldRunPhaseInTui(),
+      // Pin por fase (routing): roadmap y audit se pinnean por separado.
+      // null = sin pin, default global de opencode (conducta actual).
+      model: resolvePhaseModelRef(phaseId),
       roadmapText,
       attachmentNames: roadmapFiles.map((file) => file.name),
       onResult: (result, warnings) => {
@@ -430,10 +461,13 @@ export const useIssuePlannerStore = create<IssuePlannerState>((set, get) => ({
       },
       onError: (message) => {
         activeSession = null;
-        useNotificationStore.getState().notify("error", message);
+        useNotificationStore
+          .getState()
+          .notify("error", `${message}${tailSuffix()}`);
         set({ phase: "idle", startedAt: null, sessionRuntime: null });
       },
     });
+    handleRef = session;
     if (!session) {
       set({ phase: "idle", startedAt: null });
       return;

@@ -43,28 +43,150 @@ import {
   type SynthesisResult,
 } from "./schema.ts";
 
+// Routing de modelo por fase: tipos/defaults del contrato compartido y el
+// catálogo de disponibilidad (server efímero propio, cache TTL) para el gate.
+import {
+  DEFAULT_PHASE_MODELS,
+  type PhaseActivityEvent,
+  type PhaseId,
+} from "../../shared/phaseModels.ts";
+import {
+  fetchModelCatalog,
+  validatePhaseAgainstCatalog,
+} from "../../electron/model-catalog.ts";
+
 export { QUESTION_SCHEMA, GAP_CHECK_SCHEMA, ASR_REVIEW_SCHEMA, SYNTHESIS_SCHEMA, QuestionOutputSchema, GapCheckResultSchema, AsrReviewVerdictSchema, SynthesisSchema } from "./schema.ts";
 export type { QuestionOutput, GapCheckResult, GapRecord, AsrReviewVerdict, SynthesisResult } from "./schema.ts";
 
 // ─── Configuración ───────────────────────────────────────────────────────
+// NOTA (routing por fase): los valores de acá son los DEFAULTS históricos.
+// Desde WU4 cada llamada resuelve su modelo vía phaseModelRef — override del
+// usuario (Settings → Models per phase, ver docs/model-routing-por-fase.md)
+// > estas constantes. Un test de sync garantiza que no se desalineen del
+// contrato compartido en shared/phaseModels.ts.
 
 export const DEFAULT_PROVIDER_ID = "opencode-go";
 export const DEFAULT_MODEL_ID = "hy3";
 // ─────────────────────────────────────────────────────────────────────────
-// deepseek-v4-flash (DESCARTADO POR AHORA — volver a probar en el futuro):
-//   DEFAULT_MODEL_ID = "deepseek-v4-flash";
-// El provider rechaza las llamadas de output estructurado del motor con
-// "Thinking mode does not support this tool_choice" cuando se activa
-// cualquier variante de thinking (low/medium/high/max → reasoningEffort), y
-// sin variante también falla con APIError en json_schema (error observado
-// en interview:create e interview:briefSynthesize). El motor depende de
-// format:json_schema (herramienta StructuredOutput + tool_choice forzado de
-// opencode), así que para usarlo habría que migrar a parsear el JSON del
-// texto del modelo. hy3 funciona sin variante ni fricción.
+// deepseek-v4-flash (opencode-go): HABILITADO para las llamadas grandes.
+// Re-verificado empíricamente con el server 1.18.18 (2026-08-18): el
+// contrato completo de la síntesis (json_schema + SYNTHESIS_SCHEMA +
+// variant "max" + contexto completo de la entrevista) funcionó en ~60s y
+// validó con Zod. Antes el provider rechazaba el tool_choice forzado de
+// json_schema con "Thinking mode does not support this tool_choice" cuando
+// el modelo razonaba (DeepSeek V4 razona SIEMPRE) — ese límite ya no se da
+// en el server actual. Ventaja: ventana de contexto 1M, la síntesis y el
+// gap-check corren con el contexto COMPLETO sin desbordar (el problema que
+// traía hy3, ventana chica).
 // ─────────────────────────────────────────────────────────────────────────
-// Variante de razonamiento (thinking) — por defecto DESACTIVADA. Aunque el
-// provider algún día la soporte con json_schema, el motor no la necesita.
+// Los turnos por pregunta siguen con hy3 + json_schema SIN variant (el
+// camino que ya funcionaba y es rápido/barato). El thinking máximo (variant
+// "max") SOLO se aplica a la síntesis final, por decisión del dueño
+// (costo/velocidad). El gap-check usa deepseek sin variant.
+export interface ModelRef {
+  providerID: string;
+  modelID: string;
+  variant?: string;
+}
+export const HEAVY_MODEL_ID = "deepseek-v4-flash";
+export const SYNTHESIS_MODEL: ModelRef = { providerID: DEFAULT_PROVIDER_ID, modelID: HEAVY_MODEL_ID, variant: "max" };
+export const GAP_CHECK_MODEL: ModelRef = { providerID: DEFAULT_PROVIDER_ID, modelID: HEAVY_MODEL_ID };
+
+// Variante de razonamiento (thinking) — por defecto DESACTIVADA en los
+// turnos por pregunta (hy3 + json_schema sin variant).
 export const DEFAULT_MODEL_VARIANT: string | undefined = undefined;
+
+// ─── Routing de modelo por fase ──────────────────────────────────────────
+// La app inyecta overrides por fase (preferencesStore → IPC → acá) y TODA
+// llamada del motor resuelve su modelo vía phaseModelRef — única puerta de
+// resolución. Sin override rige el default; las constantes SYNTHESIS_MODEL /
+// GAP_CHECK_MODEL quedan como fallback documental (un test de sync garantiza
+// que no se desalineen de shared/phaseModels.ts).
+
+export class ModelUnavailableError extends Error {
+  constructor(
+    readonly phaseId: PhaseId,
+    readonly requested: ModelRef,
+    readonly motive: string,
+    readonly alternatives: string[],
+  ) {
+    super(
+      `[${phaseId}] ${requested.providerID}/${requested.modelID} no está disponible: ${motive}` +
+        (alternatives.length > 0
+          ? ` Alternativas conectadas: ${alternatives.join(", ")}.`
+          : ""),
+    );
+    this.name = "ModelUnavailableError";
+  }
+}
+
+let phaseModelOverrides: Partial<Record<PhaseId, ModelRef>> = {};
+
+/** Inyecta los overrides resueltos en preferences (null limpia todo). */
+export function setPhaseModelOverrides(
+  overrides: Partial<Record<PhaseId, ModelRef>> | null | undefined,
+): void {
+  phaseModelOverrides = overrides ? { ...overrides } : {};
+}
+
+// ─── Feed de actividad ("IA actuando") ───────────────────────────────────
+// Un solo listener: la app lo conecta al push IPC hacia el renderer. Los
+// errores del listener NUNCA tumban el motor.
+
+let phaseActivityListener: ((event: PhaseActivityEvent) => void) | null = null;
+
+export function setPhaseActivityListener(
+  listener: ((event: PhaseActivityEvent) => void) | null,
+): void {
+  phaseActivityListener = listener;
+}
+
+function emitActivity(event: PhaseActivityEvent): void {
+  try {
+    phaseActivityListener?.(event);
+  } catch {
+    // Listener roto no interrumpe la llamada en curso.
+  }
+}
+
+/** Modelo efectivo de una fase: override del usuario > default del motor. */
+export function phaseModelRef(phaseId: PhaseId): ModelRef {
+  const override = phaseModelOverrides[phaseId];
+  if (override) return override;
+  const def = DEFAULT_PHASE_MODELS[phaseId];
+  if (def) return def;
+  // Fases CLI (default null en el contrato compartido) no deberían
+  // resolverse por acá: si ocurre, cae al default de turno del motor.
+  return { providerID: DEFAULT_PROVIDER_ID, modelID: DEFAULT_MODEL_ID };
+}
+
+// Gate best-effort ANTES de pagar la llamada: valida el ref resuelto contra
+// el catálogo real de opencode y falla temprano con ModelUnavailableError
+// (modelo removido del registry, proveedor sin auth, variant insoportada).
+// Si el catálogo mismo no se puede obtener (server caído, endpoint roto), el
+// gate NO bloquea: la llamada procede y el error real del modelo ya tiene su
+// propio camino de reintentos/mensajes accionables.
+async function gateModeloDeFase(phaseId: PhaseId, ref: ModelRef): Promise<void> {
+  try {
+    const catalog = await fetchModelCatalog();
+    const veredicto = validatePhaseAgainstCatalog(phaseId, catalog, {
+      [phaseId]: ref,
+    });
+    if (!veredicto.ok) {
+      throw new ModelUnavailableError(
+        phaseId,
+        ref,
+        veredicto.reason ?? "no disponible",
+        veredicto.alternatives ?? [],
+      );
+    }
+  } catch (err) {
+    if (err instanceof ModelUnavailableError) throw err;
+    console.warn(
+      `[interview] gate de modelo omitido (${phaseId}): ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
 
 export const TOPICS = [
   "problema",
@@ -99,7 +221,11 @@ const SUMMARY_ENTRY_MAX_CHARS = 120;
 // Los schemas JSON del prompt viven en schema.ts (derivados de Zod con
 // z.toJSONSchema — una sola fuente de verdad).
 const MODEL_CALL_TIMEOUT_MS = 180_000;
-const SERVER_START_TIMEOUT_MS = 10_000;
+// Arranque del server de opencode: 10s quedaba corto en cold start / con
+// antivirus / bajo carga (se observó "Timeout waiting for server to start
+// after 10000ms" en la síntesis real). 30s + reintento lo hace resiliente.
+const SERVER_START_TIMEOUT_MS = 30_000;
+const SERVER_START_RETRIES = 2;
 
 // ─── Tipos ───────────────────────────────────────────────────────────────
 
@@ -247,13 +373,30 @@ export function setTestClient(client: OpencodeClient | null): void {
 // Exportada para los módulos hermanos del motor (ej: brief.ts).
 export async function ensureClient(): Promise<OpencodeClient> {
   if (!runningClient) {
-    const server = await createOpencodeServer({
-      hostname: "127.0.0.1",
-      port: 0,
-      timeout: SERVER_START_TIMEOUT_MS,
-    });
-    runningServer = server;
-    runningClient = createOpencodeClient({ baseUrl: server.url });
+    let lastError: unknown;
+    for (let attempt = 0; attempt < SERVER_START_RETRIES; attempt++) {
+      try {
+        const server = await createOpencodeServer({
+          hostname: "127.0.0.1",
+          // Puerto efímero ALEATORIO, no 0: `opencode serve --port=0` mapea
+          // al default 4096, y un `opencode serve` huérfano de otra sesión
+          // que haya quedado en 4096 hace que el arranque se cuelgue hasta el
+          // timeout ("Timeout waiting for server to start"). Un puerto alto
+          // aleatorio evita esa colisión con restos de procesos viejos.
+          port: 20000 + Math.floor(Math.random() * 45000),
+          timeout: SERVER_START_TIMEOUT_MS,
+        });
+        runningServer = server;
+        runningClient = createOpencodeClient({ baseUrl: server.url });
+        return runningClient;
+      } catch (err) {
+        lastError = err;
+        console.warn(
+          `[interview] no se pudo arrancar el server de opencode (intento ${attempt + 1}/${SERVER_START_RETRIES}): ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    throw lastError instanceof Error ? lastError : new Error("No se pudo arrancar el server de opencode.");
   }
   return runningClient;
 }
@@ -682,6 +825,9 @@ export async function askQuestion(
     buildTopicPrompt(ledger, topic, projectBrief),
     isValidQuestion,
     "Generación de pregunta",
+    MODEL_CALL_TIMEOUT_MS,
+    phaseModelRef("requirements"),
+    "requirements",
   );
   const question = data;
 
@@ -820,25 +966,50 @@ export function structuredRetryCount(): number {
 
 // Llamada estructurada con reintentos (exportada para módulos hermanos,
 // ej: brief.ts — el ledger puede ser cualquier objeto con session_id).
-export async function promptStructured<T>(
+// `model` opcional: override de modelo por llamada (las llamadas GRANDES —
+// síntesis y gap-check — usan deepseek-v4-flash con su ventana de contexto
+// 1M; los turnos por pregunta usan los defaults hy3). Sin `model`, usa
+// DEFAULT_PROVIDER_ID/DEFAULT_MODEL_ID/DEFAULT_MODEL_VARIANT.
+// `phaseId` opcional: activa el routing por fase (modelo efectivo vía
+// phaseModelRef si no hay `model` explícito) y el gate de disponibilidad —
+// valida el ref resuelto contra el catálogo real ANTES de abrir sesión.
+export async function promptStructuredInner<T>(
   ledger: InterviewLedger,
   schema: Record<string, unknown>,
   text: string,
   validate: (value: unknown) => value is T,
   context: string,
   timeoutMs: number = MODEL_CALL_TIMEOUT_MS,
+  model?: ModelRef,
+  phaseId?: PhaseId,
 ): Promise<{ data: T; usage: ModelUsage }> {
   const client = await ensureClient();
+  // Resolución ÚNICA acá adentro: si llega phaseId sin model explícito, el
+  // modelo efectivo sale de phaseModelRef (override del usuario > default).
+  // Ningún call site puede "olvidarse" del routing por descuido.
+  const efectivo = model ?? (phaseId ? phaseModelRef(phaseId) : undefined);
+  const providerID = efectivo?.providerID ?? DEFAULT_PROVIDER_ID;
+  const modelID = efectivo?.modelID ?? DEFAULT_MODEL_ID;
+  const variant = efectivo?.variant !== undefined ? efectivo.variant : DEFAULT_MODEL_VARIANT;
+  // Gate temprano con el ref RESUELTO (override del usuario o default):
+  // un modelo inexistente falla acá, no a mitad de la entrevista.
+  if (phaseId) {
+    await gateModeloDeFase(phaseId, { providerID, modelID, ...(variant ? { variant } : {}) });
+  }
   let lastRaw: unknown;
+  // Marca si ya se recreó la sesión por overflow de contexto en ESTA llamada:
+  // el reintento tras recrear es ÚNICO (si vuelve a desbordar, es un error
+  // determinista del contexto inline y no se reintenta de nuevo).
+  let recreadaPorOverflow = false;
   for (let attempt = 0; attempt <= MAX_STRUCTURED_RETRIES; attempt++) {
     const respuesta = await client.session.prompt(
       {
         sessionID: ledger.session_id,
-        model: { providerID: DEFAULT_PROVIDER_ID, modelID: DEFAULT_MODEL_ID },
+        model: { providerID, modelID },
         // Solo se manda variant cuando hay una configurada: cualquier
-        // variante de thinking rompe json_schema en deepseek-v4-flash
-        // (ver DEFAULT_MODEL_VARIANT).
-        ...(DEFAULT_MODEL_VARIANT ? { variant: DEFAULT_MODEL_VARIANT } : {}),
+        // variante de thinking rompía json_schema en deepseek-v4-flash con
+        // servidores viejos (ver comentario de configuración arriba).
+        ...(variant ? { variant } : {}),
         tools: {},
         parts: [{ type: "text", text }],
         format: { type: "json_schema", schema },
@@ -876,6 +1047,26 @@ export async function promptStructured<T>(
       throw new Error(`${context}: el modelo no cumplió el schema (${info.error.name})`);
     }
     if (info.error) {
+      // Overflow de contexto: el contexto pedido excede la ventana del
+      // modelo. Regla del dueño: si se excede, se prueba UNA vez en una
+      // sesión nueva (el historial acumulado puede ser el que desborda; el
+      // contexto de la llamada ya viaja inline). Si re-desborda, es
+      // determinista y se falla (no los 3 reintentos de 6 min).
+      if (!recreadaPorOverflow && esOverflowDeContexto(info.error)) {
+        const sesion = await client.session.create({
+          title: `${context} (sesión nueva por overflow)`,
+          directory: ledger.project_path,
+        });
+        if (sesion.error || !sesion.data) {
+          throw new Error(`${context}: no se pudo crear sesión por overflow: ${JSON.stringify(sesion.error)}`);
+        }
+        ledger.session_id = sesion.data.id;
+        recreadaPorOverflow = true;
+        console.warn(
+          `[interview] ${context}: overflow de contexto (${info.error.name}); reintento único en sesión nueva ${sesion.data.id}`,
+        );
+        continue;
+      }
       throw new Error(`${context}: error del modelo (${info.error.name})`);
     }
     modelCallCountValue += 1;
@@ -894,6 +1085,90 @@ export async function promptStructured<T>(
     console.warn(`[interview] ${context}: output fuera de contrato (intento ${attempt + 1}/${MAX_STRUCTURED_RETRIES + 1}); reintentando`);
   }
   throw new Error(`${context} fuera de contrato tras ${MAX_STRUCTURED_RETRIES + 1} intentos: ${JSON.stringify(lastRaw)}`);
+}
+
+/**
+ * Wrapper público que emite el feed de actividad (start/end con timing,
+ * usage y error) alrededor del cuerpo con reintentos. El ref para el evento
+ * se resuelve igual que adentro (override > default) para que el feed
+ * muestre SIEMPRE lo mismo que la llamada va a usar.
+ */
+export async function promptStructured<T>(
+  ledger: InterviewLedger,
+  schema: Record<string, unknown>,
+  text: string,
+  validate: (value: unknown) => value is T,
+  context: string,
+  timeoutMs: number = MODEL_CALL_TIMEOUT_MS,
+  model?: ModelRef,
+  phaseId?: PhaseId,
+): Promise<{ data: T; usage: ModelUsage }> {
+  const startedAt = Date.now();
+  const efectivo = model ?? (phaseId ? phaseModelRef(phaseId) : undefined);
+  const modelRefForEvent: ModelRef = efectivo ?? {
+    providerID: DEFAULT_PROVIDER_ID,
+    modelID: DEFAULT_MODEL_ID,
+  };
+  emitActivity({
+    kind: "start",
+    phaseId,
+    context,
+    modelRef: modelRefForEvent,
+    startedAt,
+  });
+  try {
+    const result = await promptStructuredInner(
+      ledger,
+      schema,
+      text,
+      validate,
+      context,
+      timeoutMs,
+      model,
+      phaseId,
+    );
+    emitActivity({
+      kind: "end",
+      phaseId,
+      context,
+      modelRef: modelRefForEvent,
+      startedAt,
+      durationMs: Date.now() - startedAt,
+      usage: {
+        input_tokens: result.usage.input_tokens,
+        output_tokens: result.usage.output_tokens,
+      },
+    });
+    return result;
+  } catch (err) {
+    emitActivity({
+      kind: "end",
+      phaseId,
+      context,
+      modelRef: modelRefForEvent,
+      startedAt,
+      durationMs: Date.now() - startedAt,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
+}
+
+// ¿El error del modelo es un overflow de contexto? El server lo reporta como
+// ContextOverflowError (nombre) o con mensajes de "context length exceeded" /
+// "prompt is too long" según el provider. Los mensajes reales de DeepSeek
+// (contexto 1M, no debería pasar) y de proveedores OpenAI-compatibles varían,
+// así que se matchea nombre + patrones comunes del mensaje.
+function esOverflowDeContexto(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const e = error as { name?: unknown; message?: unknown };
+  if (typeof e.name === "string" && /contextoverflow|max.*context|context.*length|prompt.*too (long|large)|request.*too large/i.test(e.name)) {
+    return true;
+  }
+  if (typeof e.message === "string") {
+    return /context length exceeded|maximum context|context overflow|prompt is too long|request too large|content is too large/i.test(e.message);
+  }
+  return false;
 }
 
 // Fase 6A: pasada final de huecos. UNA llamada con el conjunto COMPLETO de
@@ -926,6 +1201,9 @@ Por cada hueco real, devolvé el tópico de la lista al que corresponde, el moti
     prompt,
     isValidGapCheckResult,
     "Gap-check",
+    MODEL_CALL_TIMEOUT_MS,
+    phaseModelRef("gapCheck"),
+    "gapCheck",
   );
   return { result: data, usage };
 }
@@ -962,6 +1240,9 @@ Respondé is_genuine_asr (true solo si es un ASR genuino según la definición, 
     prompt,
     isValidAsrReviewResult,
     "Revisión ASR",
+    MODEL_CALL_TIMEOUT_MS,
+    phaseModelRef("asrReview"),
+    "asrReview",
   );
   return { result: data, usage };
 }
@@ -1355,11 +1636,13 @@ function buildSynthesisPrompt(ledger: InterviewLedger, projectBrief: string): st
 ${buildSynthesisContext(ledger, projectBrief)}
 
 Reglas de calidad:
-- requerimientos_funcionales: derivados SOLO de respuestas informativas ACTIVAS (sin RUIDO, DIFERIDA ni DESCARTADA). Cada uno con criterio_de_ajuste verificable y el id de la answer que lo originó en "origen". Asigná prioridad MoSCoW según la importancia que el creador le dio.
+- historias_de_usuario: derivadas PRIMERO, SOLO de respuestas informativas ACTIVAS (sin RUIDO, DIFERIDA ni DESCARTADA) y de los roles del brief. Una historia captura intención de producto: "Como <rol>, quiero <acción>, para <beneficio>", con criterios_de_aceptacion verificables, prioridad MoSCoW y el id de la answer que la originó en "origen". El rol sale del brief (usuarios_objetivo / stakeholders); si el brief no lo especifica, usá el rol que la propia evidencia de la entrevista indique. No inventes historias sin respaldo en una respuesta.
+- requerimientos_funcionales: FORMALIZAN las historias. La relación es N:N: cada RF lleva "historias_origen" (array de ids) con TODAS las historias que formaliza — mínimo UNA. Un RF puede satisfacer varias intenciones de negocio y NO debe duplicarse por historia (atomicidad / DRY): si una misma capacidad sirve a dos historias, un solo RF con ambas en historias_origen. Un RF jamás nace de otra fuente que no sea una historia (o, en casos excepcionales sin historia, de una respuesta que no justificó una historia propia). Cada RF con criterio_de_ajuste verificable y el id de la answer que lo originó en "origen". Asigná prioridad MoSCoW según la importancia que el creador le dio.
 - atributos_de_calidad_y_asrs: un ítem por cada atributo de calidad relevante (rendimiento, disponibilidad, seguridad, etc.) con su escenario_tecnico_6_partes COMPLETO (fuente, estímulo, artefacto, entorno, respuesta, medida_de_respuesta cuantificable) y los trade_offs_identificados. es_asr_genuino=true SOLO si fuerza una decisión estructural profunda — usá los veredictos de la doble validación ASR si existen.
 - restricciones_globales: restricciones explícitas de la entrevista o normativas obvias del dominio (ej: GDPR si hay datos personales).
 - glosario_de_terminos: términos técnicos o de dominio ambiguos usados en la entrevista (objeto vacío si no aplica).
 - proyecto_metadata: nombre_proyecto del brief, id_sesion de la entrevista, fecha_relevamiento (hoy, ISO8601), brief_contexto (resumen del dominio y metas del negocio).
+- historias_backfilled: false (es la generación original; la migración legacy es la única que lo pone en true).
 
 Completá TODOS los campos.`;
 }
@@ -1381,6 +1664,8 @@ export async function synthesizeInterview(
     isValidSynthesisResult,
     "Síntesis final",
     SYNTHESIS_TIMEOUT_MS,
+    phaseModelRef("synthesis"),
+    "synthesis",
   );
   // Re-parsea para aplicar defaults/.catch de Zod (promptStructured devuelve
   // el raw; el documento guardado debe quedar completo).

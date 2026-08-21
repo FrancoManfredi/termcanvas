@@ -13,6 +13,8 @@
   },
   "include": [
     "headless-runtime",
+    "electron/model-catalog.ts",
+    "electron/model-catalog-ipc.ts",
     "electron/pty-manager.ts",
     "electron/pty-launch.ts",
     "electron/telemetry-service.ts",

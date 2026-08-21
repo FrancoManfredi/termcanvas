@@ -5,6 +5,9 @@ import { useRepoContextStore } from "../stores/repoContextStore";
 import { useBodyScrollLock } from "../hooks/useBodyScrollLock";
 import { JsonCodeBlock } from "./JsonCodeBlock";
 import { useNotificationStore } from "../stores/notificationStore";
+import { PhaseActivityFeed } from "./ai/PhaseActivityFeed";
+import { EffectiveModelChip } from "./ai/EffectiveModelChip";
+import type { PhaseId } from "../../shared/phaseModels";
 import type { InterviewQuestion } from "../../headless-runtime/interview/index.ts";
 
 // Modal de entrevista de requerimientos — REDISEÑO (Figma: "Replicate
@@ -407,11 +410,16 @@ const handleCopy = async (text: string) => {
   );
 
   // ── Pantallas de carga a pantalla completa ────────────────────────────
-  const renderLoadingScreen = (title: string, subtitle: string) => (
+  const renderLoadingScreen = (
+    title: string,
+    subtitle: string,
+    chipPhase?: PhaseId,
+  ) => (
     <div className="py-12 flex flex-col items-center justify-center gap-3 text-center">
       <div className="w-6 h-6 rounded-full border-2 border-[var(--border)] border-t-[var(--accent)] animate-spin" />
       <p className="text-xs text-[var(--text-primary)] font-medium">{title}</p>
       <p className="text-[11px] text-[var(--text-muted)] max-w-xs">{subtitle}</p>
+      {chipPhase && <EffectiveModelChip phaseId={chipPhase} />}
     </div>
   );
 
@@ -426,7 +434,10 @@ const handleCopy = async (text: string) => {
       <div className="space-y-2.5">
         <div className="flex items-center justify-between text-[11px] text-[var(--text-muted)]">
           <span className="font-semibold text-[var(--accent)]">Tópico: {labelTopic}</span>
-          <span>{answered} respondida(s)</span>
+          <span className="flex items-center gap-3">
+            <EffectiveModelChip phaseId="requirements" />
+            <span>{answered} respondida(s)</span>
+          </span>
         </div>
 
         <div className="space-y-2.5">
@@ -548,6 +559,7 @@ const handleCopy = async (text: string) => {
             <span className="text-[10.5px] font-mono text-[var(--text-muted)] uppercase block font-semibold">Resumen de la Síntesis Generada</span>
             <p className="font-bold text-[var(--text-primary)] text-xs sm:text-sm">{synthesis.proyecto_metadata?.nombre_proyecto ?? "—"}</p>
             <div className="grid grid-cols-2 gap-2 text-xs text-[var(--text-secondary)] pt-1 border-t border-[var(--border)]">
+              <div className="flex items-center gap-1.5"><span className="text-emerald-400">✓</span> {synthesis.historias_de_usuario.length} Historias de Usuario</div>
               <div className="flex items-center gap-1.5"><span className="text-emerald-400">✓</span> {synthesis.requerimientos_funcionales.length} Requerimientos Funcionales</div>
               <div className="flex items-center gap-1.5"><span className="text-emerald-400">✓</span> {synthesis.atributos_de_calidad_y_asrs.length} Atributos de Calidad (ASR)</div>
               <div className="flex items-center gap-1.5"><span className="text-emerald-400">✓</span> {synthesis.restricciones_globales.length} Restricciones Globales</div>
@@ -626,17 +638,25 @@ const handleCopy = async (text: string) => {
   );
 
   const renderBody = () => {
-    if (phase === "pick") return renderPickPhase();
-    if (phase === "generating_questions")
-      return renderLoadingScreen("Generando las preguntas…", "Preparando la sesión de entrevista y cargando el contexto…");
-    if (phase === "loading_next")
-      return renderLoadingScreen("Cargando siguiente pregunta…", "Procesando tu respuesta y formulando la pregunta correspondiente…");
-    if (phase === "interview") return renderInterviewPhase();
-    if (phase === "synthesizing")
-      return renderLoadingScreen("Generando resultados…", "Sintetizando la planilla de requerimientos (RFs, ASRs, restricciones, glosario)…");
-    if (phase === "done") return renderDone();
-    if (phase === "error") return renderError();
-    return null;
+    const phaseContent =
+      phase === "pick" ? renderPickPhase()
+      : phase === "generating_questions"
+        ? renderLoadingScreen("Generando las preguntas…", "Preparando la sesión de entrevista y cargando el contexto…", "requirements")
+        : phase === "loading_next"
+          ? renderLoadingScreen("Cargando siguiente pregunta…", "Procesando tu respuesta y formulando la pregunta correspondiente…", "requirements")
+          : phase === "interview" ? renderInterviewPhase()
+          : phase === "synthesizing"
+            ? renderLoadingScreen("Generando resultados…", "Sintetizando la planilla de requerimientos (RFs, ASRs, restricciones, glosario)…", "synthesis")
+            : phase === "done" ? renderDone()
+            : phase === "error" ? renderError()
+            : null;
+    return (
+      <div className="space-y-3">
+        {phaseContent}
+        {/* Feed "IA actuando": oculto en pick (no hay llamadas al modelo ahí). */}
+        {phase !== "pick" && phase !== "done" && <PhaseActivityFeed />}
+      </div>
+    );
   };
 
   const isGenerating = phase === "synthesizing" || phase === "generating_questions" || phase === "loading_next";

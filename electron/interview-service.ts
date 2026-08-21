@@ -18,6 +18,7 @@
 import { ipcMain } from "electron";
 import path from "node:path";
 import {
+  setPhaseActivityListener,
   startInterview,
   askQuestion,
   submitAnswer,
@@ -45,6 +46,21 @@ import {
   getActiveRequirements,
   setActiveRequirements,
   resolveRequirementsForPrompt,
+  backfillStoriesForSynthesis,
+  loadSynthesis,
+  synthesisFilePath,
+  addUserStory,
+  updateUserStory,
+  deleteUserStory,
+  recoverUserStory,
+  purgeUserStory,
+  addCuration,
+  updateCuration,
+  deleteCuration,
+  recoverCuration,
+  purgeCuration,
+  type CurationKind,
+  type UserStoryInput,
   type TurnResult,
   type UserAnswerInput,
 } from "../headless-runtime/interview/index.ts";
@@ -63,7 +79,26 @@ function projectPathOf(ledgerPath: string): string {
   return loadLedger(ledgerPath).project_path;
 }
 
+// ─── Feed de actividad (interview:activity) ──────────────────────────────
+
+type PhaseActivitySink = (payload: unknown) => void;
+
+let activitySink: PhaseActivitySink | null = null;
+
+/**
+ * main.ts inyecta acá el emisor hacia la ventana (sendToWindow). El listener
+ * del motor se conecta UNA vez al registrar los handlers.
+ */
+export function setInterviewActivitySink(sink: PhaseActivitySink | null): void {
+  activitySink = sink;
+}
+
 export function registerInterviewIpc(): void {
+  // Feed "IA actuando": cada llamada del motor emite start/end y viaja a la
+  // ventana si main inyectó el sink.
+  setPhaseActivityListener((event) => {
+    activitySink?.(event);
+  });
   // Crea una entrevista de requerimientos nueva y devuelve la primera
   // pregunta (con el brief del proyecto como contexto si existe).
   ipcMain.handle("interview:create", async (_event, projectPath: string) => {
@@ -125,6 +160,26 @@ export function registerInterviewIpc(): void {
       throw new Error("interview:state requiere ledgerPath");
     }
     const ledger = loadLedger(ledgerPath);
+    // AUTO-REPARACIÓN (migraciones viejas de historias): el JSON standalone
+    // puede tener historias que la copia del ledger no (las migraciones
+    // previas solo escribían el standalone y la UI lee del ledger). Si el
+    // standalone ya tiene historias y el ledger no, se sincroniza — así las
+    // síntesis migradas antes de esta versión aparecen solas, sin re-migrar.
+    try {
+      if (ledger.synthesis?.data) {
+        const standalone = loadSynthesis(synthesisFilePath(ledgerPath));
+        if (
+          standalone &&
+          (standalone.historias_de_usuario?.length ?? 0) > 0 &&
+          (ledger.synthesis.data.historias_de_usuario?.length ?? 0) === 0
+        ) {
+          ledger.synthesis = { at: new Date().toISOString(), data: standalone };
+          saveLedger(ledgerPath, ledger);
+        }
+      }
+    } catch {
+      // Best-effort: la auto-reparación nunca rompe la lectura.
+    }
     return { ledger, lastQuestion: null, progress: interviewProgress(ledger) };
   });
 
@@ -192,12 +247,159 @@ export function registerInterviewIpc(): void {
   // Texto formateado de la síntesis activa (o fallback a la más reciente)
   // para inyectar INLINE en los prompts de orquestador. "" si el proyecto
   // no tiene ninguna síntesis: el prompt corre sin sección.
-  ipcMain.handle("interview:activeRequirementsText", (_event, projectPath: string) => {
-    if (typeof projectPath !== "string" || projectPath.length === 0) {
-      throw new Error("interview:activeRequirementsText requiere projectPath");
+  // `opts.includeStories` agrega la sección de historias de usuario (solo la
+  // usa PLANNING; RESOLVE/FIX/REVIEW/CONFLICT corren el formato compacto).
+  ipcMain.handle(
+    "interview:activeRequirementsText",
+    (_event, projectPath: string, opts?: { includeStories?: boolean }) => {
+      if (typeof projectPath !== "string" || projectPath.length === 0) {
+        throw new Error("interview:activeRequirementsText requiere projectPath");
+      }
+      return resolveRequirementsForPrompt(projectPath, opts)?.text ?? "";
+    },
+  );
+
+  // Migra una síntesis LEGACY (sin historias) derivando historias de sus RFs
+  // en UNA llamada. Reescribe el JSON solo tras validar el documento completo.
+  ipcMain.handle(
+    "interview:backfillStories",
+    async (_event, projectPath: string, synthesisPath: string) => {
+      if (typeof projectPath !== "string" || projectPath.length === 0) {
+        throw new Error("interview:backfillStories requiere projectPath");
+      }
+      if (typeof synthesisPath !== "string" || synthesisPath.length === 0) {
+        throw new Error("interview:backfillStories requiere synthesisPath");
+      }
+      return backfillStoriesForSynthesis(projectPath, synthesisPath);
+    },
+  );
+
+  // ── Curaduría de historias de usuario (sin llamadas al modelo) ──────────
+  // Las cuatro mutaciones son atómicas sobre la síntesis: validan el input
+  // (Zod), escriben el JSON standalone Y el ledger (ambos deben quedar
+  // iguales) y devuelven la síntesis actualizada para que la UI la aplique
+  // directo. Nunca corren el motor de IA.
+
+  const requireSynthesisPath = (synthesisPath: string, channel: string) => {
+    if (typeof synthesisPath !== "string" || synthesisPath.length === 0) {
+      throw new Error(`${channel} requiere synthesisPath`);
     }
-    return resolveRequirementsForPrompt(projectPath)?.text ?? "";
-  });
+  };
+
+  ipcMain.handle(
+    "interview:addStory",
+    (_event, synthesisPath: string, input: UserStoryInput) => {
+      requireSynthesisPath(synthesisPath, "interview:addStory");
+      return addUserStory(synthesisPath, input);
+    },
+  );
+
+  ipcMain.handle(
+    "interview:updateStory",
+    (_event, synthesisPath: string, storyId: string, input: UserStoryInput) => {
+      requireSynthesisPath(synthesisPath, "interview:updateStory");
+      if (typeof storyId !== "string" || storyId.length === 0) {
+        throw new Error("interview:updateStory requiere storyId");
+      }
+      return updateUserStory(synthesisPath, storyId, input);
+    },
+  );
+
+  ipcMain.handle(
+    "interview:deleteStory",
+    (_event, synthesisPath: string, storyId: string) => {
+      requireSynthesisPath(synthesisPath, "interview:deleteStory");
+      if (typeof storyId !== "string" || storyId.length === 0) {
+        throw new Error("interview:deleteStory requiere storyId");
+      }
+      return deleteUserStory(synthesisPath, storyId);
+    },
+  );
+
+  ipcMain.handle(
+    "interview:recoverStory",
+    (_event, synthesisPath: string, storyId: string) => {
+      requireSynthesisPath(synthesisPath, "interview:recoverStory");
+      if (typeof storyId !== "string" || storyId.length === 0) {
+        throw new Error("interview:recoverStory requiere storyId");
+      }
+      return recoverUserStory(synthesisPath, storyId);
+    },
+  );
+
+  // ── Curaduría de RF / ASR / restricciones / glosario (sin llamadas al
+  // modelo): un canal genérico por operación, con `kind` = "rf" | "asr" |
+  // "constraint" | "term". Para el glosario, `id` es el término.
+  const requireCurationArgs = (synthesisPath: string, kind: CurationKind, channel: string) => {
+    requireSynthesisPath(synthesisPath, channel);
+    if (kind !== "rf" && kind !== "asr" && kind !== "constraint" && kind !== "term") {
+      throw new Error(`${channel}: kind inválido`);
+    }
+  };
+
+  ipcMain.handle(
+    "interview:addCuration",
+    (_event, synthesisPath: string, kind: CurationKind, input: unknown) => {
+      requireCurationArgs(synthesisPath, kind, "interview:addCuration");
+      return addCuration(synthesisPath, kind, input);
+    },
+  );
+
+  ipcMain.handle(
+    "interview:updateCuration",
+    (_event, synthesisPath: string, kind: CurationKind, id: string, input: unknown) => {
+      requireCurationArgs(synthesisPath, kind, "interview:updateCuration");
+      if (typeof id !== "string" || id.length === 0) {
+        throw new Error("interview:updateCuration requiere id");
+      }
+      return updateCuration(synthesisPath, kind, id, input);
+    },
+  );
+
+  ipcMain.handle(
+    "interview:deleteCuration",
+    (_event, synthesisPath: string, kind: CurationKind, id: string) => {
+      requireCurationArgs(synthesisPath, kind, "interview:deleteCuration");
+      if (typeof id !== "string" || id.length === 0) {
+        throw new Error("interview:deleteCuration requiere id");
+      }
+      return deleteCuration(synthesisPath, kind, id);
+    },
+  );
+
+  ipcMain.handle(
+    "interview:recoverCuration",
+    (_event, synthesisPath: string, kind: CurationKind, id: string) => {
+      requireCurationArgs(synthesisPath, kind, "interview:recoverCuration");
+      if (typeof id !== "string" || id.length === 0) {
+        throw new Error("interview:recoverCuration requiere id");
+      }
+      return recoverCuration(synthesisPath, kind, id);
+    },
+  );
+
+  // Purga (eliminación definitiva de un elemento en recuperables).
+  ipcMain.handle(
+    "interview:purgeCuration",
+    (_event, synthesisPath: string, kind: CurationKind, id: string) => {
+      requireCurationArgs(synthesisPath, kind, "interview:purgeCuration");
+      if (typeof id !== "string" || id.length === 0) {
+        throw new Error("interview:purgeCuration requiere id");
+      }
+      return purgeCuration(synthesisPath, kind, id);
+    },
+  );
+
+  ipcMain.handle(
+    "interview:purgeStory",
+    (_event, synthesisPath: string, storyId: string) => {
+      requireSynthesisPath(synthesisPath, "interview:purgeStory");
+      if (typeof storyId !== "string" || storyId.length === 0) {
+        throw new Error("interview:purgeStory requiere storyId");
+      }
+      return purgeUserStory(synthesisPath, storyId);
+    },
+  );
 
   // Estado del contexto del proyecto (Fase 0): TODOS los briefs sintetizados
   // (para que la UI deje elegir) + cuál es el activo, si hay.

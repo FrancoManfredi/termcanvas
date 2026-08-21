@@ -50,7 +50,6 @@ export const useIssueStore = create<IssueStore>((set, get) => ({
     const next = new Map(issues);
     next.set(issue.issueNumber, issue);
     set({ issues: next, issueVersion: issueVersion + 1 });
-    console.log(`[issueStore] addIssue #${issue.issueNumber}, total=${next.size}, version=${issueVersion + 1}`);
     markDirty();
   },
 
@@ -61,7 +60,6 @@ export const useIssueStore = create<IssueStore>((set, get) => ({
     const next = new Map(issues);
     next.set(issueNumber, { ...existing, ...patch });
     set({ issues: next, issueVersion: issueVersion + 1 });
-    console.log(`[issueStore] updateIssue #${issueNumber}, version=${issueVersion + 1}`);
     markDirty();
   },
 
@@ -71,7 +69,6 @@ export const useIssueStore = create<IssueStore>((set, get) => ({
     const next = new Map(issues);
     next.delete(issueNumber);
     set({ issues: next, issueVersion: issueVersion + 1 });
-    console.log(`[issueStore] removeIssue #${issueNumber}, total=${next.size}, version=${issueVersion + 1}`);
     markDirty();
   },
 
@@ -112,7 +109,6 @@ export const useIssueStore = create<IssueStore>((set, get) => ({
   clearIssues: () => {
     const { issueVersion } = get();
     set({ issues: new Map(), issueVersion: issueVersion + 1 });
-    console.log(`[issueStore] clearIssues, version=${issueVersion + 1}`);
     markDirty();
   },
 
@@ -123,6 +119,5 @@ export const useIssueStore = create<IssueStore>((set, get) => ({
       next.set(issue.issueNumber, issue);
     }
     set({ issues: next, issueVersion: issueVersion + 1 });
-    console.log(`[issueStore] hydrateIssues count=${issues.length}, version=${issueVersion + 1}`);
   },
 }));

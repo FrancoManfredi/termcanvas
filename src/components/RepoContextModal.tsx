@@ -3,6 +3,7 @@ import { useRepoContextStore } from "../stores/repoContextStore";
 import { useNotificationStore } from "../stores/notificationStore";
 import { useBodyScrollLock } from "../hooks/useBodyScrollLock";
 import { JsonCodeBlock } from "./JsonCodeBlock";
+import { EffectiveModelChip } from "./ai/EffectiveModelChip";
 
 // Modal de contexto del repositorio — REDISEÑO (Figma: "Replicate Modal
 // Dialog Design"). Mismo store y motor que antes (fases idle/interview/
@@ -181,8 +182,11 @@ const [jsonExpanded, setJsonExpanded] = useState(false);
           <span className="font-semibold text-[var(--accent)]">
             Bloque {position.bloqueNumero}/{position.bloqueTotal} · {position.bloque.titulo}
           </span>
-          <span>
-            Pregunta {position.preguntaNumero} de {position.preguntaTotal} ({pct}%)
+          <span className="flex items-center gap-3">
+            <EffectiveModelChip phaseId="brief" />
+            <span>
+              Pregunta {position.preguntaNumero} de {position.preguntaTotal} ({pct}%)
+            </span>
           </span>
         </div>
 
@@ -254,6 +258,7 @@ const [jsonExpanded, setJsonExpanded] = useState(false);
       <div className="w-6 h-6 rounded-full border-2 border-[var(--border)] border-t-[var(--accent)] animate-spin" />
       <p className="text-xs text-[var(--text-primary)] font-medium">Sintetizando el contexto del proyecto…</p>
       <p className="text-[11px] text-[var(--text-muted)] max-w-xs">Analizando visión, usuarios y restricciones…</p>
+      <EffectiveModelChip phaseId="brief" />
     </div>
   );
 

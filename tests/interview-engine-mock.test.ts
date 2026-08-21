@@ -3,8 +3,10 @@
 // NADA corre contra un modelo real: se inyecta un cliente falso vía
 // setTestClient (seam del engine) que devuelve los JSON esperados. Esto
 // permite cubrir todos los flujos del motor sin gastar llamadas:
-//   - contrato del payload (model opencode-go/deepseek-v4-flash, SIN
-//     variant — el thinking rompe json_schema en este provider);
+//   - contrato del payload: turnos con opencode-go/hy3 SIN variant (el
+//     camino de siempre); síntesis y gap-check con opencode-go/
+//     deepseek-v4-flash (variant "max" solo en la síntesis final — la ventana
+//     1M aguanta el contexto completo de la entrevista);
 //   - reproducción del error reportado ("Generación de pregunta: error del
 //     modelo (APIError)");
 //   - reintentos por output fuera de contrato;
@@ -34,6 +36,8 @@ import {
   TOPICS,
   DEFAULT_PROVIDER_ID,
   DEFAULT_MODEL_ID,
+  SYNTHESIS_MODEL,
+  GAP_CHECK_MODEL,
   type InterviewLedger,
   type TurnResult,
   type QuestionWithJudgment,
@@ -49,6 +53,37 @@ import {
   listBriefInterviews,
 } from "../headless-runtime/interview/brief.ts";
 import { briefDocumentPath, type BriefDocument } from "../headless-runtime/interview/brief.ts";
+import { setCatalogClient } from "../electron/model-catalog.ts";
+
+// El gate de modelos (routing por fase) consulta el catálogo de opencode en
+// cada llamada del motor: mockeado UNA vez acá para que ningún test intente
+// levantar un server REAL (30s de timeout × reintentos × decenas de
+// llamadas = suite colgada). Fixture sano con los defaults que este archivo
+// asierte: opencode-go conectado con hy3 y deepseek-v4-flash (variant max).
+setCatalogClient({
+  provider: {
+    list: async () => ({
+      data: {
+        all: [
+          {
+            id: "opencode-go",
+            name: "OpenCode Go",
+            models: {
+              hy3: { status: "active", limit: { context: 128000 }, variants: {} },
+              "deepseek-v4-flash": {
+                status: "active",
+                limit: { context: 1000000 },
+                variants: { max: {} },
+              },
+            },
+          },
+        ],
+        default: { "opencode-go": "hy3" },
+        connected: ["opencode-go"],
+      },
+    }),
+  },
+});
 
 // ─── Helpers del mock ────────────────────────────────────────────────────
 
@@ -286,8 +321,9 @@ test("contrato del payload: opencode-go/hy3, SIN variant, json_schema", async ()
   assert.deepEqual(req.model, { providerID: "opencode-go", modelID: "hy3" });
   assert.equal(req.model.providerID, DEFAULT_PROVIDER_ID);
   assert.equal(req.model.modelID, DEFAULT_MODEL_ID);
-  // CLAVE: sin variante de thinking (rompe json_schema en deepseek-v4-flash).
-  assert.equal("variant" in req, false, "el prompt NO debe mandar variant");
+  // CLAVE: los turnos por pregunta van SIN variant (hy3 + json_schema, el
+  // camino que ya funcionaba). El thinking max queda reservado a la síntesis.
+  assert.equal("variant" in req, false, "el prompt del turno NO debe mandar variant");
   assert.equal(req.format.type, "json_schema");
   assert.ok(req.format.schema && typeof req.format.schema === "object");
   assert.deepEqual(req.tools, {});
@@ -436,7 +472,7 @@ test("gap-check (Fase 6A): hueco detectado reabre el tópico", async () => {
   const gaps = {
     gaps: [{ topic: "problema", reason: "Falta definir la medida de respuesta.", suggested_action: "reopen_topic" }],
   };
-  const { client } = makeMockClient([okPrompt(suficiente), okPrompt(gaps), okPrompt(QUESTION_VALIDA)]);
+  const { client, calls } = makeMockClient([okPrompt(suficiente), okPrompt(gaps), okPrompt(QUESTION_VALIDA)]);
   setTestClient(client);
   const { ledgerPath, ledger } = await startInterview(projectPath);
   // Un solo tópico (problema) ya cubierto → el scheduler se queda sin pendientes.
@@ -465,6 +501,13 @@ test("gap-check (Fase 6A): hueco detectado reabre el tópico", async () => {
   assert.equal(ledger.reopens[0].topic, "problema");
   assert.equal(turno.done, false);
   assert.equal(turno.topic, "problema");
+
+  // Contrato del gap-check: deepseek-v4-flash (ventana 1M) SIN variant.
+  const gapReq = calls.prompt[1];
+  assert.equal(gapReq.model.providerID, GAP_CHECK_MODEL.providerID);
+  assert.equal(gapReq.model.modelID, GAP_CHECK_MODEL.modelID);
+  assert.equal("variant" in gapReq, false, "gap-check sin thinking max");
+  assert.equal(gapReq.format.type, "json_schema");
 });
 
 test("doble validación ASR (Fase 6B): tópico arquitectónico cerrado con suficiente", async () => {
@@ -504,7 +547,7 @@ test("doble validación ASR (Fase 6B): tópico arquitectónico cerrado con sufic
 });
 
 test("síntesis final (Fase 6C): planilla completa guardada en ledger + JSON standalone", async () => {
-  const { client } = makeMockClient([okPrompt(SYNTHESIS_JSON)]);
+  const { client, calls } = makeMockClient([okPrompt(SYNTHESIS_JSON)]);
   setTestClient(client);
   const { ledgerPath } = await startInterview(projectPath);
 
@@ -523,6 +566,39 @@ test("síntesis final (Fase 6C): planilla completa guardada en ledger + JSON sta
   assert.ok(fs.existsSync(synthesisPath));
   const standalone = JSON.parse(fs.readFileSync(synthesisPath, "utf-8"));
   assert.deepEqual(standalone, synthesis);
+
+  // Contrato de la síntesis: deepseek-v4-flash (ventana 1M) + variant "max"
+  // (thinking máximo SOLO en la síntesis final, por decisión del dueño).
+  const req = calls.prompt[0];
+  assert.equal(req.model.providerID, SYNTHESIS_MODEL.providerID);
+  assert.equal(req.model.modelID, SYNTHESIS_MODEL.modelID);
+  assert.equal(req.variant, "max");
+  assert.equal(req.format.type, "json_schema");
+});
+
+test("overflow de contexto: reintento único en sesión nueva (regla del dueño)", async () => {
+  const { client, calls } = makeMockClient([apiErrorPrompt("ContextOverflowError"), okPrompt(SYNTHESIS_JSON)]);
+  setTestClient(client);
+  const { ledgerPath } = await startInterview(projectPath);
+
+  const { synthesis } = await synthesizeInterview(ledgerPath, "Cooperativa Verde");
+
+  assert.equal(synthesis.requerimientos_funcionales.length, 2);
+  // startInterview crea la sesión inicial + la recreada por overflow.
+  assert.equal(calls.create.length, 2);
+  assert.equal(calls.prompt.length, 2, "un solo reintento, no los 3× de transporte");
+  const ledger = JSON.parse(fs.readFileSync(ledgerPath, "utf-8")) as InterviewLedger;
+  assert.equal(ledger.session_id, "ses_mock_2", "el ledger queda apuntando a la sesión recreada");
+});
+
+test("overflow de contexto repetido: falla determinista (no reintenta dos veces)", async () => {
+  const { client, calls } = makeMockClient([apiErrorPrompt("ContextOverflowError"), apiErrorPrompt("ContextOverflowError"), okPrompt(SYNTHESIS_JSON)]);
+  setTestClient(client);
+  const { ledgerPath } = await startInterview(projectPath);
+
+  await assert.rejects(() => synthesizeInterview(ledgerPath, "Cooperativa Verde"), /ContextOverflowError/);
+  assert.equal(calls.create.length, 2, "una sola recreación, luego falla");
+  assert.equal(calls.prompt.length, 2, "no se gasta una tercera llamada en algo determinista");
 });
 
 test("resume: sin pendientes → done sin llamadas; con pendiente → misma pregunta sin regenerar", async () => {

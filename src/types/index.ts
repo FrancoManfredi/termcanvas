@@ -1,4 +1,5 @@
 import type { SceneDocument } from "./scene";
+import type { SecurityAuditResponse } from "./repoSecurity";
 import type {
   TelemetryEventPage,
   TelemetryProvider,
@@ -10,6 +11,16 @@ import type {
   RenderDiagnosticsLogInfo,
 } from "../../shared/render-diagnostics";
 import type { SessionHistoryChangedEvent } from "../../shared/sessions";
+import type {
+  CatalogResult,
+  ModelCatalog,
+  PhaseValidation,
+} from "../../shared/modelCatalog";
+import type {
+  ModelRef,
+  PhaseActivityEvent,
+  PhaseId,
+} from "../../shared/phaseModels";
 import type {
   Pin,
   PinLink,
@@ -26,6 +37,8 @@ import type {
   BriefDocument,
   BriefInterviewPosition,
   SynthesisResult,
+  StoryMutationResult,
+  CurationKind,
 } from "../../headless-runtime/interview/index.ts";
 
 export type { Pin, PinLink, PinStatus, CreatePinInput, UpdatePinInput };
@@ -215,6 +228,12 @@ export interface TerminalData {
   // diagnosis pipeline.
   headlessShell?: string;
   headlessArgs?: string[];
+  // Pin de modelo por fase (routing): el runtime lo convierte en flags del
+  // CLI al spawnear (opencode TUI: -m provider/model; --variant no existe
+  // en la TUI y se ignora). Lo setean las sesiones de planificación/
+  // diagnóstico; los terminales manuales nunca lo traen.
+  modelOverride?: string;
+  variantOverride?: string;
   // Captured when the review terminal is created, so the runtime can read
   // GitHub's reviewDecision from the PR before the worktree is deleted.
   reviewPrNumber?: number;
@@ -1020,6 +1039,21 @@ export interface TermCanvasAPI {
     unwatchAllDirs: () => Promise<void>;
     onDirChanged: (callback: (dirPath: string) => void) => () => void;
   };
+  models: {
+    // Catálogo de modelos de opencode + routing por fase. Los handlers viven
+    // en electron/model-catalog-ipc.ts (server efímero + cache TTL).
+    listAvailable: (force?: boolean) => Promise<CatalogResult<ModelCatalog>>;
+    validatePhase: (
+      phaseId: PhaseId,
+      overrides?: Partial<Record<PhaseId, ModelRef>> | null,
+    ) => Promise<CatalogResult<PhaseValidation>>;
+    invalidate: () => Promise<CatalogResult<{ invalidated: true }>>;
+    setPhaseOverrides: (
+      overrides: Partial<Record<PhaseId, ModelRef>> | null,
+    ) => Promise<CatalogResult<{ applied: number }>>;
+  };
+  /** Feed "IA actuando": eventos start/end de las llamadas del motor. */
+  onPhaseActivity: (callback: (event: PhaseActivityEvent) => void) => () => void;
   interview: {
     // Motor de entrevista de requerimientos (v4): corre en el proceso
     // principal (el renderer no puede correr node:fs + el SDK). El estado
@@ -1060,7 +1094,50 @@ export interface TermCanvasAPI {
       activePath: string | null;
     }>;
     setActiveRequirements: (projectPath: string, synthesisPath: string) => Promise<{ ok: boolean }>;
-    activeRequirementsText: (projectPath: string) => Promise<string>;
+    activeRequirementsText: (projectPath: string, opts?: { includeStories?: boolean }) => Promise<string>;
+    backfillStories: (
+      projectPath: string,
+      synthesisPath: string,
+    ) => Promise<
+      | { ok: true; synthesis: SynthesisResult }
+      | { ok: false; reason: "no_synthesis" | "already_migrated" | "generation_failed"; error: string }
+    >;
+    addStory: (
+      synthesisPath: string,
+      input: {
+        titulo?: string;
+        rol: string;
+        quiero: string;
+        para: string;
+        prioridad?: string;
+        criterios_de_aceptacion?: string[];
+      },
+    ) => Promise<StoryMutationResult>;
+    updateStory: (
+      synthesisPath: string,
+      storyId: string,
+      input: {
+        titulo?: string;
+        rol: string;
+        quiero: string;
+        para: string;
+        prioridad?: string;
+        criterios_de_aceptacion?: string[];
+      },
+    ) => Promise<StoryMutationResult>;
+    deleteStory: (synthesisPath: string, storyId: string) => Promise<StoryMutationResult>;
+    recoverStory: (synthesisPath: string, storyId: string) => Promise<StoryMutationResult>;
+    addCuration: (synthesisPath: string, kind: CurationKind, input: unknown) => Promise<StoryMutationResult>;
+    updateCuration: (
+      synthesisPath: string,
+      kind: CurationKind,
+      id: string,
+      input: unknown,
+    ) => Promise<StoryMutationResult>;
+    deleteCuration: (synthesisPath: string, kind: CurationKind, id: string) => Promise<StoryMutationResult>;
+    recoverCuration: (synthesisPath: string, kind: CurationKind, id: string) => Promise<StoryMutationResult>;
+    purgeCuration: (synthesisPath: string, kind: CurationKind, id: string) => Promise<StoryMutationResult>;
+    purgeStory: (synthesisPath: string, storyId: string) => Promise<StoryMutationResult>;
     briefCreate: (projectPath: string) => Promise<{
       ledgerPath: string;
       position: BriefInterviewPosition | null;
@@ -1379,6 +1456,7 @@ export interface TermCanvasAPI {
         }
       | { ok: false; error: string }
     >;
+    securityAudit: (cwd: string) => Promise<SecurityAuditResponse>;
   };
   agent: {
     start: (

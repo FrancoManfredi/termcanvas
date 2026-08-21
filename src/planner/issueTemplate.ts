@@ -1,4 +1,4 @@
-import type { IssueTemplateFields } from "../types/issuePlanning.ts";
+import type { AuditFinding, IssueTemplateFields } from "../types/issuePlanning.ts";
 
 // Compone el body de un issue con la estructura del formulario de bug
 // report de gentle-ai (bug_report.yml). La sesión de opencode rellena
@@ -17,12 +17,6 @@ export function buildIssueTemplateBody(
       : "1. (sin pasos provistos)";
 
   return [
-    "### 📋 How this works",
-    "",
-    "1. **Submit** this issue - it enters the review cycle queue",
-    "2. The **app** processes it; once a PR is opened, the automated review runs",
-    "3. The issue **closes automatically** when the PR that references it (\"Closes #N\") is merged",
-    "",
     "### Pre-flight Checklist",
     "",
     `- [x] I have searched [existing issues](${repoUrl}/issues) and this is not a duplicate`,
@@ -60,4 +54,18 @@ export function buildIssueTemplateBody(
     "",
     f.additionalContext?.trim() || "—",
   ].join("\n");
+}
+
+// Compone el body de un issue a partir de un finding de auditoría. ÚNICA
+// fuente de verdad para el paso finding → body, compartida por el planner
+// y la pantalla de diagnóstico: si el finding trae template (los planes
+// nuevos lo traen por contrato), el issue se crea con el formulario de bug
+// report completo; si no (planes viejos), cae a la description sola.
+export function buildFindingIssueBody(
+  finding: Pick<AuditFinding, "description" | "template">,
+  repoUrl: string,
+): string {
+  return finding.template
+    ? buildIssueTemplateBody(finding.description, finding.template, repoUrl)
+    : finding.description;
 }

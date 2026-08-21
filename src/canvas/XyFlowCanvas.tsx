@@ -1566,7 +1566,6 @@ function XyFlowCanvasInner() {
     const terminalNodes = buildCanvasFlowNodes(projects);
 
     const issues = useIssueStore.getState().getAllIssues();
-    console.log(`[projectedNodes] terminals=${terminalNodes.length}, issues=${issues.length}, issueVersion=${issueVersion}`);
     const issueNodes = issues.length > 0
       ? buildCanvasFlowIssueNodes(issues, { filter: issueVisibilityFilter })
       : [];

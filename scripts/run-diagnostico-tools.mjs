@@ -21,7 +21,7 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import os from "node:os";
 import https from "node:https";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -111,8 +111,21 @@ function quoteCmdArg(s) {
   return /[\s"&|<>^%!]/.test(str) ? `"${str.replace(/"/g, '\\"')}"` : str;
 }
 
-async function run(cmd, args, { cwd, timeoutMs = 240000, shell = false, ignoreExitCode = false } = {}) {
-  const base = { cwd, timeout: timeoutMs, killSignal: "SIGKILL", windowsHide: true, maxBuffer: 64 * 1024 * 1024, env: { ...process.env } };
+// Corre un proceso y devuelve un resultado ESTRUCTURADO. NUNCA tira por
+// fallos de ejecución (exit != 0, timeout, maxBuffer, spawn): todos quedan
+// en el resultado para que la herramienta decida cómo degradar. El output
+// capturado (completo o parcial) viaja siempre en stdout/stderr.
+//
+// Devuelve { ok, stdout, stderr, code, signal, timedOut, errorMessage }:
+//   - ok: la corrida salió con exit 0 (sin hallazgos señalizados).
+//   - code: exit code NUMÉRICO si el proceso corrió hasta salir (0 o != 0;
+//     las herramientas señalizan hallazgos con exit != 0); null si fue
+//     matado por timeout, desbordó el maxBuffer o falló el spawn.
+//   - timedOut: true si se cortó por timeout (el output es parcial).
+//   - signal: la señal que cortó el proceso (si aplica).
+//   - errorMessage: motivo legible cuando !ok.
+async function run(cmd, args, { cwd, timeoutMs = 240000, shell = false, maxBuffer = 64 * 1024 * 1024 } = {}) {
+  const base = { cwd, timeout: timeoutMs, killSignal: "SIGKILL", windowsHide: true, maxBuffer, env: { ...process.env } };
   const exec = async () => {
     if (shell) {
       const cmdline = [cmd, ...args].map(quoteCmdArg).join(" ");
@@ -122,15 +135,62 @@ async function run(cmd, args, { cwd, timeoutMs = 240000, shell = false, ignoreEx
   };
   try {
     const result = await exec();
-    return { stdout: result.stdout, stderr: result.stderr, code: result.code ?? 0 };
+    return { ok: true, stdout: result.stdout, stderr: result.stderr, code: result.code ?? 0, signal: null, timedOut: false, errorMessage: null };
   } catch (error) {
-    // Herramientas que señalizan hallazgos con exit != 0 (eslint, tsc,
-    // npm audit, knip, jscpd): el output importa aunque el exit falle.
-    if (ignoreExitCode && typeof error?.code === "number") {
-      return { stdout: error.stdout ?? "", stderr: error.stderr ?? "", code: error.code };
+    const stdout = error.stdout ?? "";
+    const stderr = error.stderr ?? "";
+    if (typeof error.code === "number") {
+      // Corrió y salió con exit != 0: el output es COMPLETO y las herramientas
+      // señalizan hallazgos con esto (eslint, tsc, npm audit, knip, jscpd...).
+      return { ok: false, stdout, stderr, code: error.code, signal: error.signal ?? null, timedOut: false, errorMessage: `exit ${error.code}` };
     }
-    throw error;
+    if (error.signal || error.killed) {
+      // Matado por timeout (SIGKILL) u otra señal: el output es parcial pero
+      // importa guardarlo para debug.
+      return { ok: false, stdout, stderr, code: null, signal: error.signal ?? null, timedOut: true, errorMessage: `proceso cortado (${error.signal ?? "kill"}) — output parcial` };
+    }
+    if (String(error.message).includes("maxBuffer") || String(stderr).includes("maxBuffer")) {
+      return { ok: false, stdout, stderr, code: null, signal: null, timedOut: false, errorMessage: `stdout excedió el maxBuffer (${fmtBytes(maxBuffer)}); output truncado` };
+    }
+    // Fallo de spawn (ENOENT, EACCES, comando no encontrado...).
+    return { ok: false, stdout, stderr, code: null, signal: null, timedOut: false, errorMessage: String(error.message || error) };
   }
+}
+
+// ¿El proceso corrió hasta salir? (exit numérico = output COMPLETO, aun != 0.)
+// false = matado por timeout, desbordó el buffer o falló el spawn.
+function exitedNormally(res) {
+  return typeof res.code === "number";
+}
+
+function safeJson(text) {
+  try {
+    return JSON.parse(String(text ?? ""));
+  } catch {
+    return null;
+  }
+}
+
+// Razón legible de por qué un área no se evaluó (para no_evaluada.error).
+function toolFailureReason(res, label) {
+  if (res.timedOut) return `${label} no terminó a tiempo (output parcial guardado en raw)`;
+  if (String(res.errorMessage ?? "").startsWith("exit")) {
+    const head = String(res.stderr || res.stdout || res.errorMessage).trim().split(/\r?\n/)[0];
+    return `${label} falló con ${res.errorMessage}${head ? `: ${head.slice(0, 140)}` : ""}`;
+  }
+  return `${label} no produjo salida válida: ${res.errorMessage ?? "JSON inválido o vacío"}`;
+}
+
+// Degrada un área a "no_evaluada" con motivo legible y guarda el output
+// parcial (si hay) para debug. Devuelve el retorno estándar de una tool sin
+// hallazgos. El pipeline NO debe reportar "error" por fallos de herramientas.
+async function degradeTool(ctx, res, label) {
+  ctx.record.status = "no_evaluada";
+  ctx.record.error = toolFailureReason(res, label);
+  if (res.stdout || res.stderr) {
+    await ctx.raw("output.partial", `${res.stdout}\n${res.stderr}`);
+  }
+  return { findings: [] };
 }
 
 // Corre una herramienta y captura hallazgos normalizados. Nunca aborta el
@@ -159,11 +219,20 @@ async function runTool(tool, fn) {
     record.lines_scanned = out?.lines ?? null;
     record.findings_count = findings.length;
     record.note = out?.note ?? record.note;
+    record.duration_ms = Date.now() - started;
     const scanned = record.files_scanned != null ? `, ${record.files_scanned} archivos` : "";
-    process.stdout.write(`[herramientas] ${label} — ok (${record.findings_count} hallazgo(s)${scanned})\n`);
+    if (record.status === "ok") {
+      process.stdout.write(`[herramientas] ${label} — ok (${record.findings_count} hallazgo(s)${scanned})\n`);
+    } else {
+      // no_evaluada (degradación honesta con motivo), no un "error" crudo.
+      process.stdout.write(`[herramientas] ${label} — ${record.status} (${record.findings_count} hallazgo(s)): ${record.error ?? ""}\n`);
+    }
     return { record, findings };
   } catch (error) {
+    // Un throw acá es un BUG del orquestador (no un fallo de la herramienta):
+    // las tools degradan a no_evaluada por sí solas y no tiran.
     record.status = "error";
+    record.duration_ms = Date.now() - started;
     record.error = error instanceof Error ? error.message : String(error);
     process.stdout.write(`[herramientas] ${label} — error: ${record.error}\n`);
     return { record, findings: [] };
@@ -284,11 +353,13 @@ async function githubTaggedRelease(repo, version) {
 
 async function extractZip(zipPath, dest) {
   // Windows: Expand-Archive maneja los .zip sin dependencias de Node.
-  await run("powershell", [
+  const res = await run("powershell", [
     "-NoProfile",
     "-Command",
     `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${dest}' -Force`,
   ]);
+  // El catch de ensureBinary convierte esto en área "no_evaluada".
+  if (!exitedNormally(res)) throw new Error(`Expand-Archive falló: ${res.errorMessage ?? res.stderr.trim()}`);
 }
 
 async function findExe(dir) {
@@ -357,9 +428,11 @@ async function eslintPkg(ctx, pkg) {
     ctx.record.error = "sin config de eslint en el paquete";
     return { findings: [] };
   }
-  const { stdout } = await run("npx", ["eslint", ".", "-f", "json"], { cwd: pkgDir, shell: true, ignoreExitCode: true });
-  await ctx.raw("report.json", stdout);
-  const results = JSON.parse(stdout);
+  const res = await run("npx", ["eslint", ".", "-f", "json"], { cwd: pkgDir, shell: true });
+  await ctx.raw("report.json", res.stdout);
+  if (!exitedNormally(res)) return degradeTool(ctx, res, "eslint");
+  const results = safeJson(res.stdout);
+  if (results === null) return degradeTool(ctx, res, "eslint");
   const findings = [];
   for (const file of results) {
     for (const m of file.messages) {
@@ -405,13 +478,14 @@ async function eslintPkg(ctx, pkg) {
 // y backend (tsconfig.json). El texto de TS se parsea con regex.
 async function tscPkg(ctx, pkg, tsconfig) {
   const pkgDir = path.join(REPO, pkg.dir);
-  const { stdout, stderr } = await run(
+  const res = await run(
     "npx",
     ["tsc", "--noEmit", "-p", tsconfig],
-    { cwd: pkgDir, shell: true, ignoreExitCode: true },
+    { cwd: pkgDir, shell: true },
   );
-  const text = `${stdout}\n${stderr}`;
+  const text = `${res.stdout}\n${res.stderr}`;
   await ctx.raw("output.txt", text);
+  if (!exitedNormally(res)) return degradeTool(ctx, res, "tsc");
   const findings = [];
   const lines = text.split(/\r?\n/);
   let current = null;
@@ -449,9 +523,11 @@ async function tscPkg(ctx, pkg, tsconfig) {
 // npm audit: CVEs conocidos de dependencias.
 async function npmAudit(ctx, pkg) {
   const pkgDir = path.join(REPO, pkg.dir);
-  const { stdout } = await run("npm", ["audit", "--json"], { cwd: pkgDir, shell: true, ignoreExitCode: true });
-  await ctx.raw("report.json", stdout);
-  const report = JSON.parse(stdout);
+  const res = await run("npm", ["audit", "--json"], { cwd: pkgDir, shell: true });
+  await ctx.raw("report.json", res.stdout);
+  if (!exitedNormally(res)) return degradeTool(ctx, res, "npm-audit");
+  const report = safeJson(res.stdout);
+  if (report === null) return degradeTool(ctx, res, "npm-audit");
   const findings = [];
   const vulns = report?.vulnerabilities ?? {};
   const sevMap = { info: "info", low: "info", moderate: "warning", high: "error", critical: "critical" };
@@ -461,7 +537,7 @@ async function npmAudit(ctx, pkg) {
     findings.push({
       tool: "npm-audit",
       package: pkg.label,
-      file: `${pkg}/package.json`,
+      file: `${pkg.label === "root" ? "" : pkg.dir + "/"}package.json`,
       line: null,
       severity: sevMap[v.severity] ?? "warning",
       rule: `${name} (${v.range ?? "?"})`,
@@ -474,9 +550,11 @@ async function npmAudit(ctx, pkg) {
 // knip: codigo muerto / exports sin usar.
 async function knipPkg(ctx, pkg) {
   const pkgDir = path.join(REPO, pkg.dir);
-  const { stdout } = await run("npx", ["--yes", "knip", "--reporter", "json", "--no-progress"], { cwd: pkgDir, shell: true, ignoreExitCode: true });
-  await ctx.raw("report.json", stdout);
-  const report = JSON.parse(stdout);
+  const res = await run("npx", ["--yes", "knip", "--reporter", "json", "--no-progress"], { cwd: pkgDir, shell: true });
+  await ctx.raw("report.json", res.stdout);
+  if (!exitedNormally(res)) return degradeTool(ctx, res, "knip");
+  const report = safeJson(res.stdout);
+  if (report === null) return degradeTool(ctx, res, "knip");
   const findings = [];
   // Formato actual de knip: {issues: [{file, exports[], types[], files[], ...}]}
   const issues = Array.isArray(report?.issues) ? report.issues : [];
@@ -512,7 +590,7 @@ async function jscpdPkg(ctx, pkg) {
   const pkgDir = path.join(REPO, pkg.dir);
   const outDir = path.join(os.tmpdir(), "termcanvas-jscpd", pkg.dir);
   await mkdir(outDir, { recursive: true });
-  await run(
+  const res = await run(
     "npx",
     [
       "--yes", "jscpd", ".",
@@ -525,8 +603,12 @@ async function jscpdPkg(ctx, pkg) {
       "--ignore",
       "**/node_modules/**,**/dist/**,**/build/**,**/coverage/**,**/.git/**,**/*.min.*,**/*.map,**/package-lock.json",
     ],
-    { cwd: pkgDir, shell: true, ignoreExitCode: true },
+    { cwd: pkgDir, shell: true },
   );
+  if (!exitedNormally(res)) {
+    await rm(outDir, { recursive: true, force: true }).catch(() => {});
+    return degradeTool(ctx, res, "jscpd");
+  }
   let report = {};
   try {
     report = JSON.parse(await readFile(path.join(outDir, "jscpd-report.json"), "utf8"));
@@ -566,11 +648,12 @@ async function jscpdPkg(ctx, pkg) {
 // está en PATH, el área queda "no evaluada" sin bloquear el pipeline.
 async function semgrep(ctx) {
   const outPath = path.join(RAW_DIR, "semgrep.json");
-  const { stdout, stderr } = await run(
+  const res = await run(
     "semgrep",
     ["scan", "--config", "p/security-audit", "--json", "--output", outPath, REPO],
-    { cwd: REPO, timeoutMs: 420000, ignoreExitCode: true },
+    { cwd: REPO, timeoutMs: 420000 },
   );
+  if (!exitedNormally(res)) return degradeTool(ctx, res, "semgrep");
   let report = {};
   try {
     report = JSON.parse(await readFile(outPath, "utf8"));
@@ -578,7 +661,7 @@ async function semgrep(ctx) {
     /* sin reporte: semgrep no corrió (no instalado o falló) */
   }
   // "Ran N rules" sale en el stdout/stderr del scan — el JSON no lo expone.
-  const rulesMatch = /Ran (\d+) rules?/.exec(`${stdout}\n${stderr}`);
+  const rulesMatch = /Ran (\d+) rules?/.exec(`${res.stdout}\n${res.stderr}`);
   const sevMap = { ERROR: "error", WARNING: "warning", INFO: "info" };
   const findings = (report.results ?? []).map((r) => ({
     tool: "semgrep",
@@ -609,18 +692,15 @@ async function depcruisePkg(ctx, pkg) {
   const configName = await exists(path.join(pkgDir, ".dependency-cruiser.cjs"))
     ? ".dependency-cruiser.cjs"
     : ".dependency-cruiser.js";
-  const { stdout } = await run(
+  const res = await run(
     "npx",
     ["--yes", "depcruise", "src", "--config", configName, "--output-type", "json"],
-    { cwd: pkgDir, shell: true, ignoreExitCode: true },
+    { cwd: pkgDir, shell: true },
   );
-  await ctx.raw("report.json", stdout);
-  let report = {};
-  try {
-    report = JSON.parse(stdout);
-  } catch {
-    /* sin reporte */
-  }
+  await ctx.raw("report.json", res.stdout);
+  if (!exitedNormally(res)) return degradeTool(ctx, res, "depcruise");
+  const report = safeJson(res.stdout);
+  if (report === null) return degradeTool(ctx, res, "depcruise");
   const findings = [];
   for (const m of report.modules ?? []) {
     const src = m.source ?? "?";
@@ -667,11 +747,12 @@ async function gitleaks(ctx) {
     return { findings: [] };
   }
   const outPath = path.join(RAW_DIR, "gitleaks.json");
-  await run(bin, [
+  const res = await run(bin, [
     "detect", "--source", REPO, "--no-banner",
     "--report-format", "json", "--report-path", outPath,
     "--exit-code", "0",
   ]);
+  if (!exitedNormally(res)) return degradeTool(ctx, res, "gitleaks");
   let report = [];
   try {
     report = JSON.parse(await readFile(outPath, "utf8"));
@@ -698,14 +779,11 @@ async function gitSizer(ctx) {
     ctx.record.error = "binario no disponible (no se pudo descargar en Windows nativo)";
     return { findings: [] };
   }
-  const { stdout } = await run(bin, ["--json", "--verbose"], { cwd: REPO });
-  await ctx.raw("report.json", stdout);
-  let report = {};
-  try {
-    report = JSON.parse(stdout);
-  } catch {
-    /* no crítico */
-  }
+  const res = await run(bin, ["--json", "--verbose"], { cwd: REPO });
+  await ctx.raw("report.json", res.stdout);
+  if (!exitedNormally(res)) return degradeTool(ctx, res, "git-sizer");
+  const report = safeJson(res.stdout);
+  if (report === null) return degradeTool(ctx, res, "git-sizer");
   // git-sizer mide blobs/árboles del historial: un blob gigante commiteado
   // por error es exactamente lo que esta herramienta existe para detectar.
   const findings = [];
@@ -770,19 +848,14 @@ async function buildPipeline() {
 // Usa el built-in de npm — no requiere instalar npm-check-updates.
 async function npmOutdated(ctx, pkg) {
   const pkgDir = path.join(REPO, pkg.dir);
-  const { stdout } = await run("npm", ["outdated", "--json"], {
+  const res = await run("npm", ["outdated", "--json"], {
     cwd: pkgDir,
     shell: true,
-    ignoreExitCode: true,
     timeoutMs: 180000,
   });
-  let data = null;
-  try {
-    const parsed = JSON.parse(stdout);
-    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) data = parsed;
-  } catch {
-    /* stdout vacio (0 desactualizadas) o error */
-  }
+  if (!exitedNormally(res)) return degradeTool(ctx, res, "npm-outdated");
+  const parsed = safeJson(res.stdout);
+  const data = parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
   const findings = [];
   for (const [name, v] of Object.entries(data ?? {})) {
     findings.push({
@@ -806,19 +879,14 @@ async function npmOutdated(ctx, pkg) {
 // info). Para un producto que se piensa vender/abrir, el copyleft infecta.
 async function licenseCheck(ctx, pkg) {
   const pkgDir = path.join(REPO, pkg.dir);
-  const { stdout } = await run("npx", ["--yes", "license-checker", "--json"], {
+  const res = await run("npx", ["--yes", "license-checker", "--json"], {
     cwd: pkgDir,
     shell: true,
-    ignoreExitCode: true,
     timeoutMs: 300000,
   });
-  let data = {};
-  try {
-    const parsed = JSON.parse(stdout);
-    if (parsed && typeof parsed === "object") data = parsed;
-  } catch {
-    /* sin reporte */
-  }
+  if (!exitedNormally(res)) return degradeTool(ctx, res, "license-checker");
+  const parsed = safeJson(res.stdout);
+  const data = parsed && typeof parsed === "object" ? parsed : {};
   const findings = [];
   for (const [name, info] of Object.entries(data)) {
     const lic = String(info?.licenses ?? "UNKNOWN");
@@ -861,18 +929,13 @@ async function zizmor(ctx) {
     ctx.record.error = "binario no disponible (no se pudo descargar en Windows nativo)";
     return { findings: [] };
   }
-  const { stdout } = await run(bin, ["--format", "json", "."], {
+  const res = await run(bin, ["--format", "json", "."], {
     cwd: REPO,
     timeoutMs: 180000,
-    ignoreExitCode: true,
   });
-  let items = [];
-  try {
-    const parsed = JSON.parse(stdout);
-    items = Array.isArray(parsed) ? parsed : [];
-  } catch {
-    /* sin reporte (sin workflows o formato distinto) */
-  }
+  if (!exitedNormally(res)) return degradeTool(ctx, res, "zizmor");
+  const parsed = safeJson(res.stdout);
+  const items = Array.isArray(parsed) ? parsed : [];
   const sevMap = { high: "error", medium: "warning", low: "info", informational: "info" };
   const findings = [];
   for (const f of items) {
@@ -1002,7 +1065,27 @@ async function main() {
   process.stdout.write(summary);
 }
 
-main().catch((error) => {
-  process.stderr.write(`\nError fatal del orquestador: ${error.stack ?? error}\n`);
-  process.exitCode = 1;
-});
+// Solo corre como script (la app lo invoca con `node run-diagnostico-tools.mjs`);
+// al importarlo (tests) no arranca el pipeline.
+const isMain =
+  process.argv[1] != null &&
+  import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isMain) {
+  main().catch((error) => {
+    process.stderr.write(`\nError fatal del orquestador: ${error.stack ?? error}\n`);
+    process.exitCode = 1;
+  });
+}
+
+// Expuestos para los tests (tests/run-diagnostico-tools.test.ts): run() es el
+// corazón de la robustez del pipeline (nunca tira por fallos de ejecución).
+export {
+  run,
+  exitedNormally,
+  safeJson,
+  toolFailureReason,
+  degradeTool,
+  dedupFindings,
+  runTool,
+};

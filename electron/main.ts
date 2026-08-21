@@ -53,7 +53,8 @@ import {
   enableHydraForProject,
 } from "./hydra-project.ts";
 import { buildLaunchSpec } from "./pty-launch.js";
-import { registerInterviewIpc, closeInterviewService } from "./interview-service";
+import { registerInterviewIpc, closeInterviewService, setInterviewActivitySink } from "./interview-service";
+import { registerModelCatalogIpc } from "./model-catalog-ipc";
 import {
   createDefaultComposerSubmitDeps,
   submitComposerRequest,
@@ -93,6 +94,7 @@ import type {
   ComposerSubmitRequest,
   ComposerSupportedTerminalType,
 } from "../src/types";
+import type { SecurityAuditResponse } from "../src/types/repoSecurity";
 import { buildPinComposerPayload } from "./pin-dispatch";
 import { getProjectDiff } from "./git-diff";
 import { searchFileContents, searchSessionContents } from "./search-handlers";
@@ -4845,6 +4847,39 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
     },
   );
 
+  // Auditoría de seguridad del repo: delega en
+  // scripts/configure-github-security.mjs --audit (resuelve owner/repo del
+  // remote, detecta visibilidad/permisos y el estado actual por feature).
+  ipcMain.handle(
+    "github:security-audit",
+    async (_event, cwd: string): Promise<SecurityAuditResponse> => {
+      const { execFile } = await import("child_process");
+      const { promisify } = await import("util");
+      const execFileAsync = promisify(execFile);
+      const execEnv: NodeJS.ProcessEnv = { ...process.env };
+      if (!execEnv.GH_TOKEN && process.env.GITHUB_TOKEN) {
+        execEnv.GH_TOKEN = process.env.GITHUB_TOKEN;
+      }
+      if (!execEnv.GITHUB_TOKEN && process.env.GH_TOKEN) {
+        execEnv.GITHUB_TOKEN = process.env.GH_TOKEN;
+      }
+      const orchestrator = path.join(__dirname, "..", "scripts", "configure-github-security.mjs");
+      try {
+        const { stdout } = await execFileAsync(
+          "node",
+          [orchestrator, "--audit", "--repo", cwd],
+          { timeout: 120_000, maxBuffer: 16 * 1024 * 1024, env: execEnv },
+        );
+        const parsed = JSON.parse(stdout) as SecurityAuditResponse;
+        return parsed;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[security-audit] error: ${message}`);
+        return { ok: false, error: message };
+      }
+    },
+  );
+
   ipcMain.handle(
     "pin:save-attachment",
     (
@@ -5114,8 +5149,14 @@ app.whenReady().then(async () => {
   });
   setupIpc();
   registerInterviewIpc();
+  // Catálogo de modelos + routing por fase (models:*).
+  registerModelCatalogIpc();
   await initAuth();
   createWindow();
+  // Feed "IA actuando": los eventos del motor viajan a la ventana.
+  setInterviewActivitySink((payload) =>
+    sendToWindow(mainWindow, "interview:activity", payload),
+  );
   if (mainWindow) setupAutoUpdater(mainWindow);
 
   onAuthStateChange((user) => {

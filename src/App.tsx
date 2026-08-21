@@ -12,6 +12,7 @@ import { initUpdaterListeners } from "./stores/updaterStore";
 import { ComposerBar } from "./components/ComposerBar";
 import { HandoffDragChip } from "./components/HandoffDragChip";
 import { usePreferencesStore, hydrateApiKey } from "./stores/preferencesStore";
+import { initPhaseModelSync } from "./stores/phaseModelSync";
 import { DrawingPanel } from "./toolbar/DrawingPanel";
 import { ShortcutHints } from "./components/ShortcutHints";
 import { DiscoveryCue } from "./components/DiscoveryCue";
@@ -279,6 +280,7 @@ export function App() {
   }, []);
   useEffect(() => {
     void hydrateApiKey();
+    initPhaseModelSync();
   }, []);
   useEffect(() => {
     if (!window.termcanvas?.sessions) return;

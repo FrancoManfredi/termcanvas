@@ -231,17 +231,6 @@ export function IssueNode({ data }: NodeProps<IssueFlowNode>) {
     relationCards.push({ number: num(si.number), title: str(si.title), url: str(si.url), label: "Sub-issue", icon: "subIssue", state: str(si.state, "OPEN") });
   }
 
-  console.log("[IssueNode]", `#${issueNumber}`, "parent:", !!parent, "blockedBy:", blockedByList.length, "blocking:", blockingList.length, "subIssues:", subIssues.length, "timeline:", timelineItems.length);
-  if (closedByPrs.length > 0) {
-    console.log("[IssueNode]", `#${issueNumber}`, "closedByPRs:", JSON.stringify(closedByPrs.map(p => ({ number: num(p.number), title: str(p.title), state: str(p.state) }))));
-  }
-  if (projectItems.length > 0) {
-    console.log("[IssueNode]", `#${issueNumber}`, "projectItems:", JSON.stringify(projectItems.map(pi => ({
-      project: (pi.project as Record<string,unknown>)?.title,
-      fields: nodes<Record<string, unknown>>(pi.fieldValues).map(fv => ({ name: (fv.field as Record<string,unknown>|undefined)?.name, keys: Object.keys(fv).filter(k => k !== "field"), type: fv.text !== undefined ? "text" : fv.number !== undefined ? "number" : fv.date !== undefined ? "date" : fv.name !== undefined ? "select" : fv.title !== undefined ? "iteration" : "unknown" }))
-    }))));
-  }
-
   return (
     <div className={`bg-[#0d1117] border border-[#30363d] rounded-md text-[14px] leading-snug overflow-hidden flex flex-col transition-all duration-300 ${minimized ? "is-minimized" : ""}`}
       style={{ width: 960, minHeight: minimized ? 0 : 400 }}>

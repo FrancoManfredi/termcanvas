@@ -25,6 +25,7 @@ import { useT } from "../i18n/useT";
 import { FONT_REGISTRY } from "../terminal/fontRegistry";
 import { loadFont } from "../terminal/fontLoader";
 import { useNotificationStore } from "../stores/notificationStore";
+import { PhaseModelsSection } from "./settings/PhaseModelsSection";
 import { useUpdaterStore } from "../stores/updaterStore";
 
 const platform = window.termcanvas?.app.platform ?? "darwin";
@@ -1453,6 +1454,8 @@ export function SettingsModal({ onClose }: Props) {
                     <Eyebrow>{t.settings_section_agent_cli}</Eyebrow>
                     <CliToolsList />
                   </div>
+
+                  <PhaseModelsSection />
                 </div>
               </section>
             )}

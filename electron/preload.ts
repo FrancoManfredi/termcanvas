@@ -4,8 +4,15 @@ import type {
   RenderDiagnosticsLogInfo,
 } from "../shared/render-diagnostics";
 import type { SessionHistoryChangedEvent } from "../shared/sessions";
+import type {
+  CatalogResult,
+  ModelCatalog,
+  PhaseValidation,
+} from "../shared/modelCatalog";
+import type { ModelRef, PhaseId } from "../shared/phaseModels";
 import type { TelemetryProvider } from "../shared/telemetry";
 import type { MergeProgressEvent } from "../src/types";
+import type { SecurityAuditResponse } from "../src/types/repoSecurity";
 import type {
   TurnResult,
   UserAnswerInput,
@@ -14,6 +21,9 @@ import type {
   InterviewSummary,
   BriefDocument,
   BriefInterviewPosition,
+  UserStoryInput,
+  StoryMutationResult,
+  CurationKind,
 } from "../headless-runtime/interview/index.ts";
 
 type SessionTelemetryProvider = Exclude<TelemetryProvider, "unknown">;
@@ -689,6 +699,37 @@ contextBridge.exposeInMainWorld("termcanvas", {
       return () => ipcRenderer.removeListener("memory:changed", listener);
     },
   },
+  models: {
+    listAvailable: (force?: boolean) =>
+      ipcRenderer.invoke("models:list-available", force) as Promise<
+        CatalogResult<ModelCatalog>
+      >,
+    validatePhase: (
+      phaseId: PhaseId,
+      overrides?: Partial<Record<PhaseId, ModelRef>> | null,
+    ) =>
+      ipcRenderer.invoke(
+        "models:validate-phase",
+        phaseId,
+        overrides,
+      ) as Promise<CatalogResult<PhaseValidation>>,
+    invalidate: () =>
+      ipcRenderer.invoke("models:invalidate") as Promise<
+        CatalogResult<{ invalidated: true }>
+      >,
+    setPhaseOverrides: (overrides: Partial<Record<PhaseId, ModelRef>> | null) =>
+      ipcRenderer.invoke(
+        "models:set-phase-overrides",
+        overrides,
+      ) as Promise<CatalogResult<{ applied: number }>>,
+  },
+  // Feed "IA actuando": eventos start/end de cada llamada del motor por fase.
+  onPhaseActivity: (callback: (event: unknown) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, payload: unknown) =>
+      callback(payload);
+    ipcRenderer.on("interview:activity", listener);
+    return () => ipcRenderer.removeListener("interview:activity", listener);
+  },
   interview: {
     create: (projectPath: string) =>
       ipcRenderer.invoke("interview:create", projectPath) as Promise<{
@@ -742,8 +783,35 @@ contextBridge.exposeInMainWorld("termcanvas", {
         projectPath,
         synthesisPath,
       ) as Promise<{ ok: boolean }>,
-    activeRequirementsText: (projectPath: string) =>
-      ipcRenderer.invoke("interview:activeRequirementsText", projectPath) as Promise<string>,
+    activeRequirementsText: (
+      projectPath: string,
+      opts?: { includeStories?: boolean },
+    ) => ipcRenderer.invoke("interview:activeRequirementsText", projectPath, opts) as Promise<string>,
+    backfillStories: (projectPath: string, synthesisPath: string) =>
+      ipcRenderer.invoke("interview:backfillStories", projectPath, synthesisPath) as Promise<
+        | { ok: true; synthesis: import("../headless-runtime/interview/schema.ts").SynthesisResult }
+        | { ok: false; reason: "no_synthesis" | "already_migrated" | "generation_failed"; error: string }
+      >,
+    addStory: (synthesisPath: string, input: UserStoryInput) =>
+      ipcRenderer.invoke("interview:addStory", synthesisPath, input) as Promise<StoryMutationResult>,
+    updateStory: (synthesisPath: string, storyId: string, input: UserStoryInput) =>
+      ipcRenderer.invoke("interview:updateStory", synthesisPath, storyId, input) as Promise<StoryMutationResult>,
+    deleteStory: (synthesisPath: string, storyId: string) =>
+      ipcRenderer.invoke("interview:deleteStory", synthesisPath, storyId) as Promise<StoryMutationResult>,
+    recoverStory: (synthesisPath: string, storyId: string) =>
+      ipcRenderer.invoke("interview:recoverStory", synthesisPath, storyId) as Promise<StoryMutationResult>,
+    addCuration: (synthesisPath: string, kind: CurationKind, input: unknown) =>
+      ipcRenderer.invoke("interview:addCuration", synthesisPath, kind, input) as Promise<StoryMutationResult>,
+    updateCuration: (synthesisPath: string, kind: CurationKind, id: string, input: unknown) =>
+      ipcRenderer.invoke("interview:updateCuration", synthesisPath, kind, id, input) as Promise<StoryMutationResult>,
+    deleteCuration: (synthesisPath: string, kind: CurationKind, id: string) =>
+      ipcRenderer.invoke("interview:deleteCuration", synthesisPath, kind, id) as Promise<StoryMutationResult>,
+    recoverCuration: (synthesisPath: string, kind: CurationKind, id: string) =>
+      ipcRenderer.invoke("interview:recoverCuration", synthesisPath, kind, id) as Promise<StoryMutationResult>,
+    purgeCuration: (synthesisPath: string, kind: CurationKind, id: string) =>
+      ipcRenderer.invoke("interview:purgeCuration", synthesisPath, kind, id) as Promise<StoryMutationResult>,
+    purgeStory: (synthesisPath: string, storyId: string) =>
+      ipcRenderer.invoke("interview:purgeStory", synthesisPath, storyId) as Promise<StoryMutationResult>,
     briefCreate: (projectPath: string) =>
       ipcRenderer.invoke("interview:briefCreate", projectPath) as Promise<{
         ledgerPath: string;
@@ -1110,6 +1178,8 @@ contextBridge.exposeInMainWorld("termcanvas", {
           }
         | { ok: false; error: string }
       >,
+    securityAudit: (cwd: string) =>
+      ipcRenderer.invoke("github:security-audit", cwd) as Promise<SecurityAuditResponse>,
   },
   agent: {
     start: (

@@ -11,6 +11,12 @@ import {
 } from "../planner/toolsSession";
 import { isAuditPlan, type AuditPlan } from "../types/issuePlanning.ts";
 import { parsePlanningPlan } from "../planner/parsePlanResult.ts";
+import {
+  assertPhaseModelAvailable,
+  getPhaseOutputTail,
+  resolvePhaseModelRef,
+  shouldRunPhaseInTui,
+} from "../planner/modelPin";
 
 // Registro de un diagnóstico completado (mode audit) para el historial.
 export interface DiagnosisRecord {
@@ -290,6 +296,22 @@ async function launchLlmPhase(options: {
     if (stopped) return;
     let handle: PlanningSessionHandle | null = null;
     try {
+      // Gate previo del pin CLI (solo en el lanzamiento fresco): si el
+      // modelo configurado no existe en el catálogo real, fallar acá.
+      if (!resumeSessionId) {
+        const blockReason = await assertPhaseModelAvailable("diagnosisLlm");
+        if (blockReason) {
+          useDiagnosisStore.setState({
+            phase: "idle",
+            sessionRuntime: null,
+            toolsDone: false,
+            toolsSummary: null,
+            error: `[diagnosisLlm] ${blockReason}`,
+          });
+          activeSession = null;
+          return;
+        }
+      }
       handle = await launchPlanningSession({
         mode: "audit",
         repoPath,
@@ -297,10 +319,13 @@ async function launchLlmPhase(options: {
         worktreeId,
         roadmapText: "",
         attachmentNames: [],
-        // TUI interactiva (no headless): el usuario ve la sesión de opencode
-        // y puede intervenir (errores de cuota, corridas que se cortan). El
-        // poller la cierra solo cuando el plan aparece.
-        headless: false,
+        // Pin por fase (routing): null = sin pin, default global del CLI.
+        model: resolvePhaseModelRef("diagnosisLlm"),
+        // Headless por defecto (`opencode run --model X --variant Y --auto`):
+        // es donde el pin es confiable; la TUI interactiva cae al último
+        // modelo usado ignorando el flag. Opt-in en Settings (Models per
+        // phase) para quien prefiera intervenir en vivo sabiendo ese riesgo.
+        headless: !shouldRunPhaseInTui(),
         toolFindingsText: pendingFindingsText,
         resumeSessionId,
         onResult: (result) => {
@@ -340,17 +365,25 @@ async function launchLlmPhase(options: {
           activeSession = null;
         },
         onError: (message) => {
+          // El tail del proceso va adjunto: cuando la sesión se corta "de la
+          // nada", las últimas líneas dicen por qué (cuota, crash, timeout).
+          const tail = handle ? getPhaseOutputTail(handle.terminalId) : "";
           useDiagnosisStore.setState({
             phase: "idle",
             sessionRuntime: null,
             toolsDone: false,
             toolsSummary: null,
-            error: message,
+            error: tail
+              ? `${message}\n\nÚltimas líneas del proceso:\n${tail}`
+              : message,
           });
           activeSession = null;
         },
         onExitedWithoutFile: (sessionId) => {
           if (stopped || flowCancelled) return;
+          // Tail ANTES de stop(): destroyTerminalRuntime saca el runtime del
+          // registro y el buffer del preview deja de existir.
+          const tail = handle ? getPhaseOutputTail(handle.terminalId) : "";
           // La corrida se cortó sin entregar el plan: mata el runtime
           // viejo y, si hay sesión para reanudar y queda reintento,
           // relanza resumido. Silencioso para el usuario.
@@ -367,9 +400,11 @@ async function launchLlmPhase(options: {
             sessionRuntime: null,
             toolsDone: false,
             toolsSummary: null,
-            error: sessionId
-              ? "El LLM terminó sin escribir el plan y el reintento tampoco lo escribió."
-              : "El LLM terminó sin escribir el plan y no se pudo reanudar la sesión.",
+            error:
+              (sessionId
+                ? "El LLM terminó sin escribir el plan y el reintento tampoco lo escribió."
+                : "El LLM terminó sin escribir el plan y no se pudo reanudar la sesión.") +
+              (tail ? `\n\nÚltimas líneas del proceso:\n${tail}` : ""),
           });
         },
       });

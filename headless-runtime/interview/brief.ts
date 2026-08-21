@@ -23,6 +23,7 @@ import {
   ensureInterviewLayout,
   contextDir,
   SYNTHESIS_TIMEOUT_MS,
+  phaseModelRef,
   type ModelUsage,
   type InterviewLedger,
 } from "./engine.ts";
@@ -459,6 +460,10 @@ Completá TODOS los campos.`;
     (v): v is BriefDocument => BriefDocumentSchema.safeParse(v).success,
     "Síntesis del brief",
     SYNTHESIS_TIMEOUT_MS,
+    // Única llamada del flujo del brief: rige la fase "brief" completa
+    // (default de turno hy3 — fiel a la conducta actual, NO el heavy).
+    phaseModelRef("brief"),
+    "brief",
   );
   const parsed = BriefDocumentSchema.safeParse(data);
   const brief = parsed.success ? parsed.data : (data as BriefDocument);

@@ -455,8 +455,9 @@ async function applyTurnResult(
 }
 
 // Genera la síntesis final si el ledger todavía no la tiene (1 llamada), y
-// pasa a la fase done con el ledger actualizado. Best-effort: si la llamada
-// falla, se muestra igual la pantalla final (sin la planilla).
+// pasa a la fase done con el ledger actualizado. Si la llamada falla, NO se
+// traga el error en silencio: se muestra la fase de error con el motivo real
+// (reabrir el modal → resume reintenta la síntesis).
 async function finishSynthesisIfNeeded(
   ledgerPath: string,
   set: (partial: Partial<InterviewStore>) => void,
@@ -467,9 +468,24 @@ async function finishSynthesisIfNeeded(
       await window.termcanvas.interview.finish(ledgerPath);
     }
     const { ledger: actualizado, progress } = await window.termcanvas.interview.state(ledgerPath);
-    set({ phase: "done", ledger: actualizado, progress });
-  } catch {
-    const { ledger, progress } = await window.termcanvas.interview.state(ledgerPath);
-    set({ phase: "done", ledger, progress });
+    set({ phase: "done", ledger: actualizado, progress, errorMessage: null });
+  } catch (err) {
+    const motivo = err instanceof Error ? err.message : String(err);
+    const { ledger, progress } = await window.termcanvas.interview.state(ledgerPath).catch(() => ({
+      ledger: null,
+      progress: null,
+    }));
+    useNotificationStore
+      .getState()
+      .notify(
+        "error",
+        "La síntesis de requerimientos no se pudo generar. Cerrá y reabrí el modal para reintentarla.",
+      );
+    set({
+      phase: "error",
+      ledger,
+      progress,
+      errorMessage: `La entrevista terminó pero la síntesis falló: ${motivo}`,
+    });
   }
 }

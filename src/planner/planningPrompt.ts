@@ -192,6 +192,11 @@ export function buildPlanningPrompt(input: PlanningPromptInput): string {
     ? [
         `## VEREDICTO DE REQUERIMIENTOS (OBLIGATORIO)`,
         `Evaluá CADA requerimiento funcional, ASR y restricción de la sección REQUERIMIENTOS RELEVADOS contra el código real del repositorio.`,
+        ...(input.requirementsText.includes("HISTORIAS DE USUARIO")
+          ? [
+              `Las historias de usuario de la sección son CONTEXTO DE PRODUCTO (el por qué detrás de los requerimientos): se usan para priorizar y redactar issues con narrativa, pero NO se evalúan como ítems de veredicto. El veredicto aplica solo a RFs, ASRs y restricciones.`,
+            ]
+          : []),
         `Escribí en "requisitos" un objeto por ítem: { "id": "<id>", "estado": "...", "justificacion": "..." } con estado en CUMPLE | NO_CUMPLE | PARCIAL | NO_VERIFICABLE.`,
         `- CUMPLE: el código implementa el requerimiento.`,
         `- NO_CUMPLE: el requerimiento no está implementado (citá evidencia file:line).`,

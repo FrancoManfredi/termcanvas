@@ -32,13 +32,18 @@ export async function resolveRepoContextText(
  * Resuelve el texto de la síntesis de requerimientos ACTIVA (o fallback a la
  * más reciente) vía IPC. Best-effort: sin bridge, sin síntesis o con error
  * devuelve "" y el prompt corre sin la sección de requerimientos.
+ *
+ * `opts.includeStories` agrega la sección de historias de usuario — solo lo
+ * usa PLANNING (los issues que redacta los leen humanos); los prompts de
+ * implementación/verificación corren el formato compacto (igual que hoy).
  */
 export async function resolveRequirementsText(
   repoPath: string | undefined,
+  opts?: { includeStories?: boolean },
 ): Promise<string> {
   if (!repoPath || repoPath.trim().length === 0) return "";
   try {
-    return await window.termcanvas?.interview?.activeRequirementsText(repoPath);
+    return await window.termcanvas?.interview?.activeRequirementsText(repoPath, opts);
   } catch {
     return "";
   }

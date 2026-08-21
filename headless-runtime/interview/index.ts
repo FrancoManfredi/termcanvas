@@ -4,4 +4,6 @@
 export * from "./engine.ts";
 export * from "./brief.ts";
 export * from "./requirements.ts";
-export type { BriefDocument } from "./schema.ts";
+export * from "./stories.ts";
+export * from "./curation.ts";
+export type { BriefDocument, UserStory, UserStoryInput } from "./schema.ts";
