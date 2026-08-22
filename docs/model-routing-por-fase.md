@@ -61,9 +61,11 @@ PhaseModelsSection              main process (engine gate)
 | `synthesis` | Sintesis de requerimientos (+ migracion de historias) | `opencode-go/deepseek-v4-flash` + variant `max` |
 | `gapCheck` | Gap-check final | `opencode-go/deepseek-v4-flash` |
 | `asrReview` | Revision ASR | `opencode-go/hy3` |
-| `plannerRoadmap` | Planificador roadmap | null = default global del CLI |
-| `plannerAudit` | Planificador audit | null = default global del CLI |
-| `diagnosisLlm` | Diagnostico Fase B (LLM, TUI) | null = default global del CLI |
+| `diagnosisLlm` | Diagnostico Fase B (LLM) | null = default global del CLI |
+
+> **Nota:** las fases `plannerRoadmap`/`plannerAudit` fueron removidas del
+> contrato — el flujo de auditoria de repositorio vive hoy en el Diagnostico
+> (`diagnosisLlm`). El planificador por roadmap es un mock sin IA.
 
 Los defaults reproducen EXACTAMENTE la conducta previa al routing: sin
 overrides configurados, nada cambia.

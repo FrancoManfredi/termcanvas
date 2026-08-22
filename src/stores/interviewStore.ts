@@ -95,6 +95,11 @@ interface InterviewStore {
   setFreeText: (text: string) => void;
   goBack: () => void;
   submitAnswer: () => Promise<void>;
+  /**
+   * Cancela la llamada al modelo en vuelo (generando preguntas / siguiente
+   * pregunta / síntesis) y vuelve a una vista estable sin pantalla de error.
+   */
+  cancelActiveOp: () => void;
 }
 
 // Contradicción pendiente que toca el tópico de la pregunta actual, si hay.
@@ -117,6 +122,14 @@ export function pendingContradictionFor(
   return pending
     ? { explanation: pending.reason, conflictingId: pending.conflicting_answer_id }
     : null;
+}
+
+// Marca de cancelación reciente: la promesa abortada rechaza DESPUÉS de que
+// cancelActiveOp restauró la vista estable; sin este guard, ese rechazo
+// tardío pisaría el estado con una pantalla de error roja.
+let lastCancelledAt = 0;
+function wasRecentlyCancelled(): boolean {
+  return Date.now() - lastCancelledAt < 2000;
 }
 
 export const useInterviewStore = create<InterviewStore>((set, get) => ({
@@ -294,6 +307,7 @@ export const useInterviewStore = create<InterviewStore>((set, get) => ({
       const created = await window.termcanvas.interview.create(repoPath);
       await applyTurnResult(created.firstQuestion, created.ledgerPath, set);
     } catch (err) {
+      if (wasRecentlyCancelled()) return;
       set({
         busy: false,
         phase: "error",
@@ -336,6 +350,7 @@ export const useInterviewStore = create<InterviewStore>((set, get) => ({
         canGoBack: false,
       });
     } catch (err) {
+      if (wasRecentlyCancelled()) return;
       set({
         busy: false,
         phase: "error",
@@ -371,6 +386,22 @@ export const useInterviewStore = create<InterviewStore>((set, get) => ({
     });
   },
 
+  cancelActiveOp: () => {
+    const { ledgerPath, busy, phase } = get();
+    if (!busy) return;
+    lastCancelledAt = Date.now();
+    // Fire-and-forget: el motor aborta el fetch y el handler en vuelo va a
+    // rechazar; el catch correspondiente ignora el rechazo si la
+    // cancelación es reciente.
+    if (ledgerPath) void window.termcanvas?.interview?.cancel?.(ledgerPath);
+    set({
+      busy: false,
+      phase: phase === "loading_next" ? "interview" : "pick",
+      errorMessage: null,
+    });
+    useNotificationStore.getState().notify("info", "Operación cancelada.");
+  },
+
   submitAnswer: async () => {
     const { ledgerPath, topic, question, selectedOptionId, freeText } = get();
     if (!ledgerPath || !topic || !question) return;
@@ -400,6 +431,7 @@ export const useInterviewStore = create<InterviewStore>((set, get) => ({
         currentHistory: get().history,
       });
     } catch (err) {
+      if (wasRecentlyCancelled()) return;
       set({
         busy: false,
         phase: "error",
@@ -470,6 +502,7 @@ async function finishSynthesisIfNeeded(
     const { ledger: actualizado, progress } = await window.termcanvas.interview.state(ledgerPath);
     set({ phase: "done", ledger: actualizado, progress, errorMessage: null });
   } catch (err) {
+    if (wasRecentlyCancelled()) return;
     const motivo = err instanceof Error ? err.message : String(err);
     const { ledger, progress } = await window.termcanvas.interview.state(ledgerPath).catch(() => ({
       ledger: null,

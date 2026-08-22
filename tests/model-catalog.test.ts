@@ -15,7 +15,8 @@ import {
   type CatalogClient,
   type ModelCatalog,
   type PhaseValidation,
-} from "../electron/model-catalog.ts";import type { PhaseId, ModelRef } from "../shared/phaseModels";
+} from "../electron/model-catalog.ts";
+import { PHASE_IDS, type PhaseId, type ModelRef } from "../shared/phaseModels";
 
 // ─── Fixture: respuesta cruda de provider.list ───────────────────────────
 
@@ -159,9 +160,9 @@ test("respuesta completamente vacía produce catálogo vacío sin lanzar", async
 
 // ─── Validación de fases ─────────────────────────────────────────────────
 
-test("fase CLI sin pin valida ok sin tocar el catálogo", async () => {
+test("fase sin pin valida ok sin tocar el catálogo", async () => {
   const catalog = await catalogWith(FIXTURE);
-  const result = validatePhaseAgainstCatalog("plannerRoadmap", catalog);
+  const result = validatePhaseAgainstCatalog("diagnosisLlm", catalog);
   assert.equal(result.ok, true);
   assert.equal(result.effective, null);
 });
@@ -233,20 +234,11 @@ test("variant sobre modelo sin variants declaradas pasa (no validable)", async (
 test("validateAllPhases devuelve solo las que fallan, con motivo", async () => {
   const catalog = await catalogWith(FIXTURE);
   const overrides: Partial<Record<PhaseId, ModelRef>> = {};
-  for (const phase of [
-    "brief",
-    "requirements",
-    "synthesis",
-    "gapCheck",
-    "asrReview",
-    "plannerRoadmap",
-    "plannerAudit",
-    "diagnosisLlm",
-  ] as PhaseId[]) {
+  for (const phase of PHASE_IDS) {
     overrides[phase] = { providerID: "fantasma", modelID: "nope" };
   }
   const failures: PhaseValidation[] = validateAllPhases(catalog, overrides);
-  assert.equal(failures.length, 8);
+  assert.equal(failures.length, PHASE_IDS.length);
   for (const failure of failures) {
     assert.equal(failure.ok, false);
     assert.ok(failure.reason && failure.reason.length > 0);

@@ -30,8 +30,6 @@ export const PHASE_IDS = [
   "synthesis",
   "gapCheck",
   "asrReview",
-  "plannerRoadmap",
-  "plannerAudit",
   "diagnosisLlm",
 ] as const;
 
@@ -60,8 +58,8 @@ export const DEFAULT_PHASE_MODELS: Record<PhaseId, ModelRef | null> = {
   },
   gapCheck: { providerID: DEFAULT_PROVIDER_ID, modelID: HEAVY_MODEL_ID },
   asrReview: { providerID: DEFAULT_PROVIDER_ID, modelID: DEFAULT_MODEL_ID },
-  plannerRoadmap: null,
-  plannerAudit: null,
+  // diagnosisLlm = flujo de Diagnóstico (Fase B, antes "planner audit").
+  // Sin pin por default: usa el modelo global del CLI del usuario.
   diagnosisLlm: null,
 };
 

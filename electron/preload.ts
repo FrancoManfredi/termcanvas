@@ -755,9 +755,10 @@ contextBridge.exposeInMainWorld("termcanvas", {
       ipcRenderer.invoke("interview:list", projectPath) as Promise<InterviewSummary[]>,
     delete: (ledgerPath: string) =>
       ipcRenderer.invoke("interview:delete", ledgerPath) as Promise<{ ok: boolean }>,
+    cancel: (ledgerPath: string) =>
+      ipcRenderer.invoke("interview:cancel", ledgerPath) as Promise<boolean>,
     briefStatus: (projectPath: string) =>
-      ipcRenderer.invoke("interview:briefStatus", projectPath) as Promise<{
-        briefs: { brief: BriefDocument; path: string; timestamp: number }[];
+      ipcRenderer.invoke("interview:briefStatus", projectPath) as Promise<{        briefs: { brief: BriefDocument; path: string; timestamp: number }[];
         activePath: string | null;
         inProgress: {
           ledgerPath: string;

@@ -1077,6 +1077,8 @@ export interface TermCanvasAPI {
     }>;
     list: (projectPath: string) => Promise<InterviewSummary[]>;
     delete: (ledgerPath: string) => Promise<{ ok: boolean }>;
+    /** Aborta la llamada al modelo en vuelo de esa entrevista/brief. */
+    cancel: (ledgerPath: string) => Promise<boolean>;
     briefStatus: (projectPath: string) => Promise<{
       briefs: { brief: BriefDocument; path: string; timestamp: number }[];
       activePath: string | null;

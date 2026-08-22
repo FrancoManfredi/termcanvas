@@ -281,7 +281,7 @@ test("preferences load valid pre-seeded phaseModels untouched", async () => {
   installLocalStorage(
     JSON.stringify({
       phaseModels: {
-        plannerRoadmap: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
+        requirements: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
       },
     }),
   );
@@ -289,7 +289,7 @@ test("preferences load valid pre-seeded phaseModels untouched", async () => {
     "phase-models-preseeded",
   );
   assert.deepEqual(usePreferencesStore.getState().phaseModels, {
-    plannerRoadmap: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
+    requirements: { providerID: "anthropic", modelID: "claude-sonnet-4-6" },
   });
 });
 

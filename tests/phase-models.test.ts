@@ -22,7 +22,7 @@ import {
 } from "../shared/phaseModels.ts";
 
 test("PHASE_IDS cubre las 8 fases del plan y no tiene duplicados", () => {
-  assert.equal(PHASE_IDS.length, 8);
+  assert.equal(PHASE_IDS.length, 6);
   assert.equal(new Set(PHASE_IDS).size, PHASE_IDS.length);
 });
 
@@ -54,14 +54,8 @@ test("defaults fieles a la conducta actual del motor (SDK)", () => {
   });
 });
 
-test("defaults de fases CLI: null = sin pin (usa default global de opencode)", () => {
-  for (const fase of [
-    "plannerRoadmap",
-    "plannerAudit",
-    "diagnosisLlm",
-  ] as PhaseId[]) {
-    assert.equal(DEFAULT_PHASE_MODELS[fase], null);
-  }
+test("default de diagnóstico: null = sin pin (usa default global de opencode)", () => {
+  assert.equal(DEFAULT_PHASE_MODELS.diagnosisLlm, null);
 });
 
 test("resolveModelForPhase: el override del usuario gana al default", () => {
@@ -77,8 +71,7 @@ test("resolveModelForPhase: sin overrides devuelve el default de la fase", () =>
   assert.deepEqual(resolveModelForPhase("gapCheck"), DEFAULT_PHASE_MODELS.gapCheck);
 });
 
-test("resolveModelForPhase: fases CLI sin override resuelven null", () => {
-  assert.equal(resolveModelForPhase("plannerRoadmap"), null);
+test("resolveModelForPhase: diagnóstico sin override resuelve null", () => {
   assert.equal(resolveModelForPhase("diagnosisLlm"), null);
 });
 

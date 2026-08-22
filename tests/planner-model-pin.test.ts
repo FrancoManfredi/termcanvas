@@ -88,8 +88,8 @@ test("tui: --model sin --variant (la TUI no acepta variant)", () => {
 test("resolución por defecto: fases CLI null, SDK su default", () => {
   assert.deepEqual(usePreferencesStore.getState().phaseModels, {});
 
-  assert.equal(resolvePhaseModelRef("plannerRoadmap"), null);
-  assert.equal(resolvePhaseModelRef("plannerAudit"), null);
+  assert.equal(resolvePhaseModelRef("diagnosisLlm"), null);
+  assert.equal(resolvePhaseModelRef("diagnosisLlm"), null);
   assert.equal(resolvePhaseModelRef("diagnosisLlm"), null);
   assert.deepEqual(resolvePhaseModelRef("requirements"), {
     providerID: "opencode-go",
@@ -97,23 +97,20 @@ test("resolución por defecto: fases CLI null, SDK su default", () => {
   });
 });
 
-test("el override de preferencias llega al pin de las fases CLI", () => {
-  usePreferencesStore.getState().setPhaseModel("plannerAudit", {
+test("el override de preferencias llega al pin de la fase CLI", () => {
+  usePreferencesStore.getState().setPhaseModel("diagnosisLlm", {
     providerID: "anthropic",
     modelID: "claude-sonnet-4-6",
   });
 
-  const auditRef = resolvePhaseModelRef("plannerAudit");
-  assert.deepEqual(auditRef, {
+  const diagnosisRef = resolvePhaseModelRef("diagnosisLlm");
+  assert.deepEqual(diagnosisRef, {
     providerID: "anthropic",
     modelID: "claude-sonnet-4-6",
   });
-  // Las demás fases CLI siguen sin pin.
-  assert.equal(resolvePhaseModelRef("plannerRoadmap"), null);
-  assert.equal(resolvePhaseModelRef("diagnosisLlm"), null);
 
   // Composición end-to-end: lo que iría en headlessArgs de opencode run.
-  assert.deepEqual(runModelFlagArgs(auditRef), [
+  assert.deepEqual(runModelFlagArgs(diagnosisRef), [
     "--model",
     "anthropic/claude-sonnet-4-6",
   ]);
@@ -148,25 +145,25 @@ test("phaseCliTui default false (headless garantiza el pin)", () => {
 // ─── Gate previo del pin CLI ─────────────────────────────────────────────
 
 test("gate: modelo válido no bloquea; inválido devuelve el motivo", async () => {
-  usePreferencesStore.getState().setPhaseModel("plannerAudit", {
+  usePreferencesStore.getState().setPhaseModel("diagnosisLlm", {
     providerID: "opencode-go",
     modelID: "hy3",
   });
 
-  const ok = await assertPhaseModelAvailable("plannerAudit", {
+  const ok = await assertPhaseModelAvailable("diagnosisLlm", {
     validatePhase: async () => ({
       ok: true,
-      data: { ok: true, phaseId: "plannerAudit", effective: null },
+      data: { ok: true, phaseId: "diagnosisLlm", effective: null },
     }),
   });
   assert.equal(ok, null);
 
-  const blocked = await assertPhaseModelAvailable("plannerAudit", {
+  const blocked = await assertPhaseModelAvailable("diagnosisLlm", {
     validatePhase: async () => ({
       ok: true,
       data: {
         ok: false,
-        phaseId: "plannerAudit",
+        phaseId: "diagnosisLlm",
         effective: null,
         reason: 'El proveedor "fantasma" no está disponible.',
       },
@@ -177,17 +174,17 @@ test("gate: modelo válido no bloquea; inválido devuelve el motivo", async () =
 
 test("gate: sin API o con catálogo caído NO bloquea (degrada best-effort)", async () => {
   // Sin API (undefined): deja pasar.
-  assert.equal(await assertPhaseModelAvailable("plannerAudit", undefined), null);
+  assert.equal(await assertPhaseModelAvailable("diagnosisLlm", undefined), null);
   // Endpoint en error: deja pasar.
   assert.equal(
-    await assertPhaseModelAvailable("plannerAudit", {
+    await assertPhaseModelAvailable("diagnosisLlm", {
       validatePhase: async () => ({ ok: false, error: "server caído" }),
     }),
     null,
   );
   // Excepción del canal: deja pasar.
   assert.equal(
-    await assertPhaseModelAvailable("plannerAudit", {
+    await assertPhaseModelAvailable("diagnosisLlm", {
       validatePhase: async () => {
         throw new Error("boom");
       },

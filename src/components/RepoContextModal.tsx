@@ -259,6 +259,13 @@ const [jsonExpanded, setJsonExpanded] = useState(false);
       <p className="text-xs text-[var(--text-primary)] font-medium">Sintetizando el contexto del proyecto…</p>
       <p className="text-[11px] text-[var(--text-muted)] max-w-xs">Analizando visión, usuarios y restricciones…</p>
       <EffectiveModelChip phaseId="brief" />
+      <button
+        type="button"
+        className="btn btn-ghost text-xs py-1.5 px-4 border border-[var(--border)] hover:border-[var(--red)] hover:text-[var(--red)]"
+        onClick={() => useRepoContextStore.getState().cancelBrief()}
+      >
+        Cancelar
+      </button>
     </div>
   );
 

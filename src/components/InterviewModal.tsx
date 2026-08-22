@@ -414,12 +414,22 @@ const handleCopy = async (text: string) => {
     title: string,
     subtitle: string,
     chipPhase?: PhaseId,
+    onCancel?: () => void,
   ) => (
     <div className="py-12 flex flex-col items-center justify-center gap-3 text-center">
       <div className="w-6 h-6 rounded-full border-2 border-[var(--border)] border-t-[var(--accent)] animate-spin" />
       <p className="text-xs text-[var(--text-primary)] font-medium">{title}</p>
       <p className="text-[11px] text-[var(--text-muted)] max-w-xs">{subtitle}</p>
       {chipPhase && <EffectiveModelChip phaseId={chipPhase} />}
+      {onCancel && (
+        <button
+          type="button"
+          className="btn btn-ghost text-xs py-1.5 px-4 border border-[var(--border)] hover:border-[var(--red)] hover:text-[var(--red)]"
+          onClick={onCancel}
+        >
+          Cancelar
+        </button>
+      )}
     </div>
   );
 
@@ -641,12 +651,12 @@ const handleCopy = async (text: string) => {
     const phaseContent =
       phase === "pick" ? renderPickPhase()
       : phase === "generating_questions"
-        ? renderLoadingScreen("Generando las preguntas…", "Preparando la sesión de entrevista y cargando el contexto…", "requirements")
+        ? renderLoadingScreen("Generando las preguntas…", "Preparando la sesión de entrevista y cargando el contexto…", "requirements", () => useInterviewStore.getState().cancelActiveOp())
         : phase === "loading_next"
-          ? renderLoadingScreen("Cargando siguiente pregunta…", "Procesando tu respuesta y formulando la pregunta correspondiente…", "requirements")
+          ? renderLoadingScreen("Cargando siguiente pregunta…", "Procesando tu respuesta y formulando la pregunta correspondiente…", "requirements", () => useInterviewStore.getState().cancelActiveOp())
           : phase === "interview" ? renderInterviewPhase()
           : phase === "synthesizing"
-            ? renderLoadingScreen("Generando resultados…", "Sintetizando la planilla de requerimientos (RFs, ASRs, restricciones, glosario)…", "synthesis")
+            ? renderLoadingScreen("Generando resultados…", "Sintetizando la planilla de requerimientos (RFs, ASRs, restricciones, glosario)…", "synthesis", () => useInterviewStore.getState().cancelActiveOp())
             : phase === "done" ? renderDone()
             : phase === "error" ? renderError()
             : null;

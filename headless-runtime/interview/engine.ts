@@ -149,6 +149,35 @@ function emitActivity(event: PhaseActivityEvent): void {
   }
 }
 
+// ─── Cancelación de llamadas en vuelo ────────────────────────────────────
+// El servicio (interview-service) resuelve ledgerPath→session_id y llama
+// cancelInterviewSession para abortar el fetch del modelo. La cancelación
+// NO consume reintentos: se detecta antes de cada intento y justo después
+// de cada await, y sale como InterviewCancelledError.
+
+export class InterviewCancelledError extends Error {
+  constructor() {
+    super("Operación cancelada por el usuario");
+    this.name = "InterviewCancelledError";
+  }
+}
+
+const activeBySession = new Map<string, AbortController>();
+// Sesiones marcadas como canceladas ANTES de que la llamada arranque (el
+// servicio puede cancelar cuando todavía no hay controller registrado).
+const abortedSessions = new Set<string>();
+
+/**
+ * Aborta la llamada en vuelo de una sesión o la marca como cancelada si
+ * todavía no arrancó. La marca vive solo hasta que la operación se asienta.
+ */
+export function cancelInterviewSession(sessionId: string): boolean {
+  abortedSessions.add(sessionId);
+  const controller = activeBySession.get(sessionId);
+  controller?.abort(new InterviewCancelledError());
+  return controller !== undefined;
+}
+
 /** Modelo efectivo de una fase: override del usuario > default del motor. */
 export function phaseModelRef(phaseId: PhaseId): ModelRef {
   const override = phaseModelOverrides[phaseId];
@@ -1001,7 +1030,27 @@ export async function promptStructuredInner<T>(
   // el reintento tras recrear es ÚNICO (si vuelve a desbordar, es un error
   // determinista del contexto inline y no se reintenta de nuevo).
   let recreadaPorOverflow = false;
+  // Cancelación cooperativa: el servicio puede abortar este controller vía
+  // cancelInterviewSession(session_id). El abort NO consume reintentos —
+  // sale inmediato como InterviewCancelledError.
+  const controller = new AbortController();
+  activeBySession.set(ledger.session_id, controller);
+  const callSignal = AbortSignal.any([
+    controller.signal,
+    AbortSignal.timeout(timeoutMs),
+  ]);
+  const ensureNotCancelled = (): void => {
+    if (
+      controller.signal.aborted ||
+      abortedSessions.has(ledger.session_id)
+    ) {
+      throw new InterviewCancelledError();
+    }
+  };
+  try {
+    ensureNotCancelled();
   for (let attempt = 0; attempt <= MAX_STRUCTURED_RETRIES; attempt++) {
+    ensureNotCancelled();
     const respuesta = await client.session.prompt(
       {
         sessionID: ledger.session_id,
@@ -1014,8 +1063,9 @@ export async function promptStructuredInner<T>(
         parts: [{ type: "text", text }],
         format: { type: "json_schema", schema },
       },
-      { signal: AbortSignal.timeout(timeoutMs) },
+      { signal: callSignal },
     );
+    ensureNotCancelled();
     if (respuesta.error || !respuesta.data) {
       // Error de API/timeout: transitorio — se reintenta igual que un
       // output fuera de contrato. Solo se rinde tras agotar los intentos.
@@ -1085,6 +1135,10 @@ export async function promptStructuredInner<T>(
     console.warn(`[interview] ${context}: output fuera de contrato (intento ${attempt + 1}/${MAX_STRUCTURED_RETRIES + 1}); reintentando`);
   }
   throw new Error(`${context} fuera de contrato tras ${MAX_STRUCTURED_RETRIES + 1} intentos: ${JSON.stringify(lastRaw)}`);
+  } finally {
+    activeBySession.delete(ledger.session_id);
+    abortedSessions.delete(ledger.session_id);
+  }
 }
 
 /**

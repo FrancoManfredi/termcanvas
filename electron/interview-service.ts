@@ -18,6 +18,7 @@
 import { ipcMain } from "electron";
 import path from "node:path";
 import {
+  cancelInterviewSession,
   setPhaseActivityListener,
   startInterview,
   askQuestion,
@@ -515,6 +516,28 @@ export function registerInterviewIpc(): void {
       return { ok: true };
     },
   );
+
+  // Cancela la llamada al modelo en vuelo de una entrevista (requerimientos
+  // o brief): resuelve session_id del ledger y aborta el fetch en el motor.
+  ipcMain.handle("interview:cancel", (_event, ledgerPath: string) => {
+    if (typeof ledgerPath !== "string" || ledgerPath.length === 0) {
+      return false;
+    }
+    let sessionId: string | undefined;
+    try {
+      sessionId = loadLedger(ledgerPath).session_id;
+    } catch {
+      sessionId = undefined;
+    }
+    if (!sessionId) {
+      try {
+        sessionId = loadBriefLedger(ledgerPath).session_id;
+      } catch {
+        sessionId = undefined;
+      }
+    }
+    return sessionId ? cancelInterviewSession(sessionId) : false;
+  });
 }
 
 // Cierra el servidor de opencode levantado por el motor (si lo levantó este

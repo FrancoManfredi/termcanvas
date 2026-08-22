@@ -11,7 +11,6 @@ import {
   TURN_COMPLETE_SUMMARY_DEBOUNCE_MS,
 } from "../../shared/lifecycleThresholds";
 
-const IS_DEV = Boolean((import.meta as { env?: { DEV?: boolean } }).env?.DEV);
 
 type SummaryCli = "claude" | "codex";
 
@@ -80,10 +79,6 @@ export function requestSummary(
   if (useSummaryFlightStore.getState().ids.has(liveTerminal.id)) return;
 
   addInFlight(liveTerminal.id);
-  if (IS_DEV)
-    console.log(
-      `[SummaryScheduler] requesting summary for ${liveTerminal.id.slice(0, 8)} (${liveTerminal.type})`,
-    );
 
   const locale = useLocaleStore.getState().locale;
   const requestedSessionId = liveTerminal.sessionId;
@@ -100,28 +95,16 @@ export function requestSummary(
     .then((result) => {
       const currentLocation = findTerminalLocationById(liveTerminal.id);
       if (!currentLocation) {
-        if (IS_DEV)
-          console.log(
-            `[SummaryScheduler] ignored result for removed terminal ${liveTerminal.id.slice(0, 8)}`,
-          );
         return;
       }
       const currentLiveTerminal = resolveTerminalWithRuntimeState(
         currentLocation.terminal,
       );
       if (currentLiveTerminal.sessionId !== requestedSessionId) {
-        if (IS_DEV)
-          console.log(
-            `[SummaryScheduler] ignored stale result for ${liveTerminal.id.slice(0, 8)} (requested=${requestedSessionId}, current=${currentLiveTerminal.sessionId ?? "none"})`,
-          );
         return;
       }
 
       if (result.ok && result.summary) {
-        if (IS_DEV)
-          console.log(
-            `[SummaryScheduler] success for ${liveTerminal.id.slice(0, 8)}: "${result.summary}"`,
-          );
         updateTerminalCustomTitleInScene(
           currentLocation.projectId,
           currentLocation.worktreeId,

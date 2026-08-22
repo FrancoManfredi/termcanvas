@@ -34,6 +34,14 @@ export type BriefRetryOp =
   | { kind: "submit"; respuesta: string }
   | { kind: "synthesize"; ledgerPath: string };
 
+// Marca de cancelación reciente (mismo patrón que interviewStore): el
+// rechazo tardío de la promesa abortada no debe pisar la vista estable con
+// una pantalla de error.
+let lastBriefCancelledAt = 0;
+function wasBriefRecentlyCancelled(): boolean {
+  return Date.now() - lastBriefCancelledAt < 2000;
+}
+
 interface RepoContextStore {
   open: boolean;
   repoPath: string | null;
@@ -89,6 +97,8 @@ interface RepoContextStore {
   useDoneAsContext: () => Promise<void>;
   // Reintenta la última operación fallida (botón "Reintentar" del modal).
   retryBrief: () => Promise<void>;
+  /** Cancela la llamada en vuelo (síntesis) y vuelve a la vista estable. */
+  cancelBrief: () => void;
 }
 
 export const useRepoContextStore = create<RepoContextStore>((set, get) => ({
@@ -268,6 +278,7 @@ export const useRepoContextStore = create<RepoContextStore>((set, get) => ({
         canGoBackBrief: false,
       });
     } catch (err) {
+      if (wasBriefRecentlyCancelled()) return;
       set({
         briefBusy: false,
         briefPhase: "error",
@@ -313,6 +324,7 @@ export const useRepoContextStore = create<RepoContextStore>((set, get) => ({
         canGoBackBrief: true,
       });
     } catch (err) {
+      if (wasBriefRecentlyCancelled()) return;
       set({
         briefBusy: false,
         briefPhase: "error",
@@ -320,6 +332,21 @@ export const useRepoContextStore = create<RepoContextStore>((set, get) => ({
         briefLastOp: { kind: "submit", respuesta },
       });
     }
+  },
+
+  cancelBrief: () => {
+    const { briefBusy, briefLedgerPath } = get();
+    if (!briefBusy) return;
+    lastBriefCancelledAt = Date.now();
+    if (briefLedgerPath) {
+      void window.termcanvas?.interview?.cancel?.(briefLedgerPath);
+    }
+    set({
+      briefBusy: false,
+      briefPhase: "idle",
+      briefError: null,
+    });
+    useNotificationStore.getState().notify("info", "Operación cancelada.");
   },
 
   retryBrief: async () => {
@@ -397,6 +424,7 @@ async function synthesizeBriefDoc(
     set({ briefPhase: "done", briefDone: { brief, briefPath }, briefBusy: false, briefLastOp: null });
     void useRepoContextStore.getState().refresh();
   } catch (err) {
+    if (wasBriefRecentlyCancelled()) return;
     set({
       briefBusy: false,
       briefPhase: "error",

@@ -16,6 +16,8 @@ import {
   setTestClient,
   setPhaseModelOverrides,
   setPhaseActivityListener,
+  cancelInterviewSession,
+  InterviewCancelledError,
   phaseModelRef,
   ModelUnavailableError,
   DEFAULT_PROVIDER_ID,
@@ -163,17 +165,11 @@ test("phaseModelRef sin overrides devuelve los defaults por fase", () => {
   });
 });
 
-test("phaseModelRef: fases CLI (default null) caen al turno del motor", () => {
-  for (const fase of [
-    "plannerRoadmap",
-    "plannerAudit",
-    "diagnosisLlm",
-  ] as PhaseId[]) {
-    assert.deepEqual(phaseModelRef(fase), {
-      providerID: "opencode-go",
-      modelID: "hy3",
-    });
-  }
+test("phaseModelRef: diagnóstico (default null) cae al turno del motor", () => {
+  assert.deepEqual(phaseModelRef("diagnosisLlm"), {
+    providerID: "opencode-go",
+    modelID: "hy3",
+  });
 });
 
 test("phaseModelRef: el override del usuario gana", () => {
@@ -365,4 +361,125 @@ test("feed: error de la llamada emite end con el mensaje", async () => {
   assert.equal(events.length, 2);
   assert.equal(events[1].kind, "end");
   assert.match(events[1].error ?? "", /falló|kaboom/);
+});
+
+test("feed: error de la llamada emite end con el mensaje", async () => {
+  const failing: import("@opencode-ai/sdk/v2").OpencodeClient = {
+    session: {
+      create: async () => ({ data: { id: "s1" }, error: null }),
+      prompt: async () => ({ error: { message: "kaboom" } }),
+    },
+  } as unknown as typeof failing;
+  setTestClient(failing);
+
+  const events: import("../../shared/phaseModels.ts").PhaseActivityEvent[] = [];
+  setPhaseActivityListener((event) => events.push(event));
+  try {
+    await assert.rejects(() =>
+      promptStructured(
+        LEDGER,
+        {},
+        "texto",
+        (v): v is { ok: boolean } => true,
+        "Test feed",
+        1000,
+        phaseModelRef("requirements"),
+        "requirements",
+      ),
+    );
+  } finally {
+    setPhaseActivityListener(null);
+  }
+
+  assert.equal(events.length, 2);
+  assert.equal(events[1].kind, "end");
+  assert.match(events[1].error ?? "", /falló|kaboom/);
+});
+
+// ─── Cancelación ─────────────────────────────────────────────────────────
+
+test("cancelar ANTES de la llamada: rechazo inmediato sin reintentos", async () => {
+  let calls = 0;
+  const counting = {
+    session: {
+      create: async () => ({ data: { id: "s1" }, error: null }),
+      prompt: async () => {
+        calls++;
+        return {
+          data: {
+            info: { error: null, structured: { ok: true }, tokens: {} },
+          },
+          error: null,
+        };
+      },
+    },
+  } as unknown as typeof counting;
+  setTestClient(counting);
+  cancelInterviewSession(LEDGER.session_id); // marca la sesión como abortada
+
+  await assert.rejects(
+    () =>
+      promptStructured(
+        LEDGER,
+        {},
+        "texto",
+        (v): v is { ok: boolean } => true,
+        "Test cancel pre",
+        1000,
+        undefined,
+        "requirements",
+      ),
+    InterviewCancelledError,
+  );
+  // El chequeo previo al intento corta ANTES de tocar el cliente.
+  assert.equal(calls, 0);
+
+  // La marca de cancelación vive solo durante la operación: la próxima
+  // llamada de la misma sesión arranca limpia.
+  const retryClient = makeEngineMock();
+  setTestClient(retryClient.client);
+  await llamarDirecto(retryClient.prompts, "requirements");
+  assert.equal(retryClient.prompts.length, 1);
+});
+
+test("cancelar DURANTE la llamada: el rechazo no se reintenta", async () => {
+  let calls = 0;
+  let release: (() => void) | null = null;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const slowClient = {
+    session: {
+      create: async () => ({ data: { id: "s1" }, error: null }),
+      prompt: async () => {
+        calls++;
+        await gate;
+        return {
+          data: { info: { error: null, structured: { ok: true }, tokens: {} } },
+          error: null,
+        };
+      },
+    },
+  };
+  setTestClient(slowClient as unknown as import("@opencode-ai/sdk/v2").OpencodeClient);
+
+  const pending = promptStructured(
+    LEDGER,
+    {},
+    "texto",
+    (v): v is { ok: boolean } => true,
+    "Test cancel mid",
+    60_000,
+    undefined,
+    "requirements",
+  );
+
+  // Espera a que la llamada esté registrada y cancela.
+  await new Promise((r) => setTimeout(r, 10));
+  assert.equal(cancelInterviewSession(LEDGER.session_id), true);
+  release?.();
+
+  await assert.rejects(() => pending, InterviewCancelledError);
+  // UN solo intento: la cancelación NO se trata como error transitorio.
+  assert.equal(calls, 1);
 });

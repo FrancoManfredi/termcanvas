@@ -1,4 +1,6 @@
-const IS_DEV = Boolean((import.meta as { env?: { DEV?: boolean } }).env?.DEV);
+// Medición de rutas de render del renderer. Los logs de consola se
+// retiraron (ruido en dev): la función conserva su contrato — devuelve los
+// milisegundos medidos por si un caller quiere reaccionar.
 
 interface PerfOptions {
   details?: Record<string, unknown>;
@@ -10,17 +12,9 @@ export function logSlowRendererPath(
   startedAt: number,
   options: PerfOptions = {},
 ): number {
-  const durationMs = performance.now() - startedAt;
-  const thresholdMs = options.thresholdMs ?? 16;
-
-  if (IS_DEV && durationMs >= thresholdMs) {
-    console.log(`[Perf] ${label}`, {
-      ms: Number(durationMs.toFixed(1)),
-      ...options.details,
-    });
-  }
-
-  return durationMs;
+  void label;
+  void options;
+  return performance.now() - startedAt;
 }
 
 export function measureRendererSync<T>(
