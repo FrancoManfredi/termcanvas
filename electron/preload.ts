@@ -632,6 +632,18 @@ contextBridge.exposeInMainWorld("termcanvas", {
     setTitle: (title: string) =>
       ipcRenderer.invoke("workspace:set-title", title) as Promise<void>,
   },
+  contextSync: {
+    status: (repoPath: string) =>
+      ipcRenderer.invoke("context-sync:status", repoPath),
+    init: (repoPath: string) =>
+      ipcRenderer.invoke("context-sync:init", repoPath),
+    pull: (repoPath: string) =>
+      ipcRenderer.invoke("context-sync:pull", repoPath),
+    push: (repoPath: string) =>
+      ipcRenderer.invoke("context-sync:push", repoPath),
+    sync: (repoPath: string) =>
+      ipcRenderer.invoke("context-sync:sync", repoPath),
+  },
   fs: {
     listDir: (dirPath: string) =>
       ipcRenderer.invoke("fs:list-dir", dirPath) as Promise<
@@ -641,8 +653,7 @@ contextBridge.exposeInMainWorld("termcanvas", {
       ipcRenderer.invoke("fs:list-all-files", dirPath) as Promise<{
         type: "git" | "dir";
         paths: string[];
-      }>,
-    listIgnoredFiles: (dirPath: string) =>
+      }>,    listIgnoredFiles: (dirPath: string) =>
       ipcRenderer.invoke("fs:list-ignored-files", dirPath) as Promise<
         string[]
       >,

@@ -192,6 +192,7 @@ import { AgentService, type AgentConfig } from "./agent-service";
 import { SessionScanner } from "./session-scanner.ts";
 import { mergeAndDedupeSessions } from "./session-list.ts";
 import { buildPinRenderHtml } from "./pin-render-utils";
+import { registerContextSyncIpc } from "./context-sync-ipc";
 import type { RenderDiagnosticEventInput } from "../shared/render-diagnostics";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -5148,6 +5149,7 @@ app.whenReady().then(async () => {
     },
   });
   setupIpc();
+  registerContextSyncIpc();
   registerInterviewIpc();
   // Catálogo de modelos + routing por fase (models:*).
   registerModelCatalogIpc();

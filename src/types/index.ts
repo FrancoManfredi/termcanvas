@@ -1,6 +1,12 @@
 import type { SceneDocument } from "./scene";
 import type { SecurityAuditResponse } from "./repoSecurity";
 import type {
+  InitResult as ContextSyncInit,
+  PullResult as ContextSyncPull,
+  PushResult as ContextSyncPush,
+  StatusResult as ContextSyncStatus,
+} from "../../cli/context-sync/operations.ts";
+import type {
   TelemetryEventPage,
   TelemetryProvider,
   TerminalTelemetrySnapshot,
@@ -599,12 +605,35 @@ export type AgentStreamEvent =
       num_turns?: number;
     };
 
+export type IpcEnvelope<T> =
+  | { ok: true; result: T }
+  | { ok: false; error: string };
+
+export type {
+  ContextSyncInit,
+  ContextSyncPull,
+  ContextSyncPush,
+  ContextSyncStatus,
+};
+
 export interface TermCanvasAPI {
   // Rutas del lado de la app (proceso principal): scriptsDir es donde viven
   // los scripts de soporte (ej. run-diagnostico-tools.mjs del pipeline de
   // herramientas deterministas del Diagnóstico).
   paths: {
     scriptsDir: string;
+  };
+  // Sincronización del contexto (.agents) vía el sidecar privado
+  // termcanvas-context. Misma lógica que `termcanvas context ...` en el CLI.
+  contextSync: {
+    status: (repoPath: string) => Promise<IpcEnvelope<ContextSyncStatus>>;
+    init: (repoPath: string) => Promise<IpcEnvelope<ContextSyncInit>>;
+    pull: (repoPath: string) => Promise<IpcEnvelope<ContextSyncPull>>;
+    push: (repoPath: string) => Promise<IpcEnvelope<ContextSyncPush>>;
+    /** Pull + push en un click; push se omite si el pull falla. */
+    sync: (
+      repoPath: string,
+    ) => Promise<IpcEnvelope<{ pulled: ContextSyncPull; pushed: ContextSyncPush }>>;
   };
   terminal: {
     create: (options: {

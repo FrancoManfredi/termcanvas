@@ -3,6 +3,13 @@ import https from "https";
 import fs from "fs";
 import path from "path";
 import { resolveTermCanvasPortFile } from "../shared/termcanvas-instance";
+import {
+  contextInit,
+  contextPull,
+  contextPush,
+  contextStatus,
+  realDeps,
+} from "./context-sync/operations.ts";
 
 const CONNECTION_TIMEOUT_MS = 10_000;
 const MAX_RETRIES = 3;
@@ -849,12 +856,84 @@ async function main() {
           "  pin rm <id> [--repo <path>]",
         );
       }
+    } else if (group === "context") {
+      // Sincronización de contexto (.agents) vía el sidecar privado
+      // termcanvas-context. Standalone: corre git/gh directo, no requiere
+      // TermCanvas abierto.
+      const ctxOptionalFlag = (flag: string): string | undefined => {
+        const idx = rest.indexOf(flag);
+        return idx >= 0 && idx + 1 < rest.length ? rest[idx + 1] : undefined;
+      };
+      const ctxResolveRepo = (): string => {
+        const explicit = ctxOptionalFlag("--repo");
+        return path.resolve(explicit ?? process.cwd());
+      };
+      const deps = realDeps();
+
+      if (command === "init") {
+        const result = await contextInit(ctxResolveRepo(), deps);
+        if (jsonFlag) console.log(JSON.stringify(result, null, 2));
+        else {
+          console.log(`Sidecar: ${result.slug} (${result.remote})`);
+          console.log(`Clone local: ${result.repoDir}`);
+          if (result.gitignoreUpdated) {
+            console.log("Se agregó .agents/ al .gitignore del proyecto.");
+          }
+        }
+      } else if (command === "push") {
+        const result = await contextPush(ctxResolveRepo(), deps);
+        if (jsonFlag) console.log(JSON.stringify(result, null, 2));
+        else if (!result.changed) console.log("Sin cambios para sincronizar.");
+        else
+          console.log(
+            `Pusheado: ${result.copiedCount} archivo(s) copiado(s), ${result.deletedCount} eliminado(s).`,
+          );
+      } else if (command === "pull") {
+        const result = await contextPull(ctxResolveRepo(), deps);
+        if (jsonFlag) {
+          console.log(JSON.stringify(result, null, 2));
+          return;
+        }
+        if (!result.pulled) {
+          console.log("El sidecar todavía no tiene contexto para este proyecto.");
+          return;
+        }
+        console.log(`Traído: ${result.addedKeys.length} archivo(s) nuevo(s).`);
+        for (const conflict of result.conflicts) {
+          console.log(
+            `CONFLICTO: ${conflict.key}\n  versión remota guardada en: ${conflict.incomingPath}\n  la local quedó intacta — resolvé a mano y pusheá.`,
+          );
+        }
+        if (result.onlyLocalCount > 0) {
+          console.log(
+            `${result.onlyLocalCount} archivo(s) solo locales (no se tocan con pull).`,
+          );
+        }
+      } else if (command === "status") {
+        const result = await contextStatus(ctxResolveRepo(), deps);
+        if (jsonFlag) {
+          console.log(JSON.stringify(result, null, 2));
+          return;
+        }
+        console.log(`slug:       ${result.slug ?? "?"}`);
+        console.log(`sidecar:    ${result.initialized ? "clonado" : "sin inicializar (corré termcanvas context init)"}`);
+        console.log(`unpushed:   ${result.unpushedCommits} commit(s)`);
+        console.log(`behind:     ${result.behindRemote} commit(s)`);
+        console.log(`uncommitted (sidecar): ${result.uncommittedFiles} archivo(s)`);
+        console.log(`solo local:   ${result.onlyLocal.length}`);
+        console.log(`solo remoto:  ${result.onlyRemote.length}`);
+        console.log(`cambiados:    ${result.changed.length}`);
+      } else {
+        console.log(
+          "Usage: termcanvas context <init|push|pull|status> [--repo <path>]",
+        );
+      }
     } else if (group === "state") {
       const state = await request("GET", "/state");
       console.log(JSON.stringify(state, null, 2));
     } else {
       console.log(
-        "Usage: termcanvas <project|workflow|worktree|terminal|telemetry|pin|diff|state> <command> [args]",
+        "Usage: termcanvas <project|workflow|worktree|terminal|telemetry|pin|context|diff|state> <command> [args]",
       );
       console.log("");
       console.log("Commands:");
@@ -968,6 +1047,18 @@ async function main() {
       );
       console.log(
         "  pin rm <id>                                Delete a pin",
+      );
+      console.log(
+        "  context init [--repo <p>]                  Init context sync (private sidecar repo)",
+      );
+      console.log(
+        "  context push [--repo <p>]                  Push local .agents to the sidecar",
+      );
+      console.log(
+        "  context pull [--repo <p>]                  Pull sidecar context into .agents",
+      );
+      console.log(
+        "  context status [--repo <p>]                Compare local .agents vs sidecar",
       );
       console.log(
         "  state                                       Full canvas state",
