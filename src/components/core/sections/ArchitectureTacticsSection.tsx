@@ -1,0 +1,634 @@
+// Sección POST ENTREVISTAS → Tácticas de Arquitectura (ASR → ADR).
+//
+// Mismo patrón interactivo que la entrevista y la migración legacy: opciones
+// con argumentación visible + siempre disponible el texto libre, estado local
+// explícito idle/running/done/error por el CTA global y POR ASR (un fallo
+// nunca es silencioso y el reintento es quirúrgico). La decisión final es
+// SIEMPRE humana: el análisis propone candidatas con UNA recomendada, el
+// arquitecto confirma.
+//
+// Flujo: analizar (N llamadas paralelas + consolidación de conflictos) →
+// elegir candidata o escribir decisión propia (con validación no bloqueante)
+// → confirmar → ADR markdown en <repo>/.agents/architecture/decisions/ +
+// manifiesto decisiones-activo.json. Re-analizar un ASR con ADR activo crea
+// uno nuevo y supersede al anterior (nunca se edita in-place).
+
+import { useCallback, useEffect, useState } from "react";
+import { createPortal } from "react-dom";
+import { useCoreModal } from "../context";
+import { NoSynthesis, SearchHeader, SynthLoading } from "../sectionChrome";
+import { resolveActiveWorktree } from "../../../planner/planningSession";
+import { useNotificationStore } from "../../../stores/notificationStore";
+import { AlertIcon, CheckIcon } from "../shared";
+import type {
+  ConflictoTacticas,
+  ConfirmTacticDecisionInput,
+  TacticsAnalysisOutput,
+  TacticStatusEntry,
+} from "../../../../headless-runtime/interview/tactics";
+
+// Traduce los errores del motor a mensajes accionables para el usuario
+// (mismo criterio que friendlyMigrationError).
+function friendlyTacticsError(raw: string): string {
+  if (/no se pudo arrancar el server|no se pudo crear la sesión|error de llamada|API/i.test(raw)) {
+    return "El motor de IA no está disponible. Verificá la configuración de opencode e intentá de nuevo.";
+  }
+  if (/no cumplió el schema|fuera de contrato|no validó el contrato/i.test(raw)) {
+    return "El modelo no devolvió un formato válido. Reintentá (puede ser transitorio).";
+  }
+  if (/tiempo de espera|timeout|excedió el tiempo/i.test(raw)) {
+    return "El análisis superó el tiempo de espera. Reintentá.";
+  }
+  return raw || "No se pudieron analizar las tácticas.";
+}
+
+interface AdvertenciaLibre {
+  asrId: string;
+  advertencia: string;
+  yStatement: string;
+  textoLibre: string;
+}
+
+export function ArchitectureTacticsSection() {
+  const { synthesis, synthesisPath, synthLoading } = useCoreModal();
+  const hasSynthesis = synthesis !== null;
+
+  // ── Estado del análisis ────────────────────────────────────────────────
+  const [run, setRun] = useState<{ phase: "idle" | "running" | "done" | "error"; error?: string }>({
+    phase: "idle",
+  });
+  const [status, setStatus] = useState<TacticStatusEntry[]>([]);
+  const [analisis, setAnalisis] = useState<Record<string, TacticsAnalysisOutput>>({});
+  const [erroresAnalisis, setErroresAnalisis] = useState<Record<string, string>>({});
+  const [conflictos, setConflictos] = useState<ConflictoTacticas[] | null>(null);
+  const [conflictosError, setConflictosError] = useState<string | null>(null);
+
+  // ── Estado de la decisión por tarjeta ──────────────────────────────────
+  const [seleccion, setSeleccion] = useState<Record<string, number | "libre">>({});
+  const [textoLibre, setTextoLibre] = useState<Record<string, string>>({});
+  const [confirmando, setConfirmando] = useState<string | null>(null);
+  const [advertencia, setAdvertencia] = useState<AdvertenciaLibre | null>(null);
+
+  const genuinos = status.filter((a) => a.es_asr_genuino);
+
+  const loadStatus = useCallback(async () => {
+    if (!synthesisPath) return;
+    try {
+      const active = resolveActiveWorktree();
+      if (!active) return;
+      const res = await window.termcanvas.interview.tacticsStatus(active.path, synthesisPath);
+      setStatus(res.asrs);
+    } catch {
+      // Best-effort: sin status la sección muestra los datos del análisis local.
+    }
+  }, [synthesisPath]);
+
+  // Al cambiar de síntesis activa se limpia TODO el estado efímero: otro
+  // proyecto/entrevista no puede heredar selecciones ni conflictos.
+  useEffect(() => {
+    void loadStatus();
+    setRun({ phase: "idle" });
+    setAnalisis({});
+    setErroresAnalisis({});
+    setConflictos(null);
+    setConflictosError(null);
+    setSeleccion({});
+    setTextoLibre({});
+    setAdvertencia(null);
+  }, [synthesisPath, loadStatus]);
+
+  const conflictsFor = useCallback(
+    (asrId: string): ConflictoTacticas[] =>
+      (conflictos ?? []).filter((c) => c.asr_a === asrId || c.asr_b === asrId),
+    [conflictos],
+  );
+
+  const aplicarConsolidacion = (
+    c:
+      | { ok: true; skipped: true }
+      | { ok: true; skipped: false; data: { conflictos: ConflictoTacticas[] } }
+      | { ok: false; error: string },
+  ) => {
+    if (!c.ok) {
+      setConflictos(null);
+      setConflictosError(c.error);
+      return;
+    }
+    setConflictosError(null);
+    setConflictos(c.skipped ? [] : c.data.conflictos);
+  };
+
+  const runAnalysis = async () => {
+    const active = resolveActiveWorktree();
+    if (!active || !synthesisPath) {
+      setRun({ phase: "error", error: "No hay una síntesis activa para analizar." });
+      return;
+    }
+    setRun({ phase: "running" });
+    try {
+      const res = await window.termcanvas.interview.analyzeTactics(active.path, synthesisPath);
+      if (!res.ok) {
+        setRun({ phase: "error", error: friendlyTacticsError(res.error) });
+        return;
+      }
+      const okAnalisis: Record<string, TacticsAnalysisOutput> = {};
+      const errores: Record<string, string> = {};
+      for (const [asrId, r] of Object.entries(res.resultados)) {
+        if (r.ok) okAnalisis[asrId] = r.data;
+        else errores[asrId] = friendlyTacticsError(r.error);
+      }
+      setAnalisis((prev) => ({ ...prev, ...okAnalisis }));
+      setErroresAnalisis(errores);
+      aplicarConsolidacion(res.consolidacion);
+      setRun({ phase: "done" });
+    } catch (err) {
+      setRun({ phase: "error", error: friendlyTacticsError(err instanceof Error ? err.message : String(err)) });
+    }
+  };
+
+  // Reintento quirúrgico: SOLO el ASR que falló (las llamadas exitosas no se
+  // repiten ni se paga otra vez la consolidación).
+  const retryOne = async (asrId: string) => {
+    const active = resolveActiveWorktree();
+    if (!active || !synthesisPath) return;
+    setErroresAnalisis((e) => {
+      const next = { ...e };
+      delete next[asrId];
+      return next;
+    });
+    try {
+      const res = await window.termcanvas.interview.analyzeOneTactic(active.path, synthesisPath, asrId);
+      if (res.ok) {
+        setAnalisis((prev) => ({ ...prev, [asrId]: res.data }));
+      } else {
+        setErroresAnalisis((e) => ({ ...e, [asrId]: friendlyTacticsError(res.error) }));
+      }
+    } catch (err) {
+      setErroresAnalisis((e) => ({
+        ...e,
+        [asrId]: friendlyTacticsError(err instanceof Error ? err.message : String(err)),
+      }));
+    }
+  };
+
+  const retryConsolidacion = async () => {
+    const active = resolveActiveWorktree();
+    if (!active || !synthesisPath) return;
+    const recomendadas = Object.entries(analisis)
+      .map(([asrId, data]) => {
+        const atributo = status.find((s) => s.asrId === asrId)?.atributo ?? "";
+        const candidata = data.candidatas.find((c) => c.es_recomendada);
+        return candidata ? { asrId, atributo, candidata } : null;
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null);
+    setConflictosError(null);
+    try {
+      const res = await window.termcanvas.interview.consolidateTactics(active.path, recomendadas);
+      aplicarConsolidacion(res);
+    } catch (err) {
+      setConflictosError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const confirmarConPayload = async (
+    entry: TacticStatusEntry,
+    payload: ConfirmTacticDecisionInput,
+  ) => {
+    const active = resolveActiveWorktree();
+    if (!active) {
+      useNotificationStore.getState().notify("error", "No hay un proyecto activo.");
+      return false;
+    }
+    setConfirmando(entry.asrId);
+    try {
+      const res = await window.termcanvas.interview.confirmTacticDecision(active.path, payload);
+      if (!res.ok) {
+        if (res.reason === "needs_confirmation") {
+          setAdvertencia({
+            asrId: entry.asrId,
+            advertencia: res.error,
+            yStatement: "",
+            textoLibre: (textoLibre[entry.asrId] ?? "").trim(),
+          });
+          return false;
+        }
+        useNotificationStore.getState().notify("error", res.error);
+        return false;
+      }
+      await loadStatus();
+      setSeleccion((s) => {
+        const next = { ...s };
+        delete next[entry.asrId];
+        return next;
+      });
+      setTextoLibre((t) => {
+        const next = { ...t };
+        delete next[entry.asrId];
+        return next;
+      });
+      return true;
+    } catch (err) {
+      useNotificationStore.getState().notify(
+        "error",
+        err instanceof Error ? err.message : String(err),
+      );
+      return false;
+    } finally {
+      setConfirmando(null);
+    }
+  };
+
+  const confirmar = async (entry: TacticStatusEntry) => {
+    if (!synthesisPath) return;
+    const analysis = analisis[entry.asrId];
+    if (!analysis) return;
+    const sel = seleccion[entry.asrId];
+    if (sel === undefined) return;
+
+    if (sel === "libre") {
+      const texto = (textoLibre[entry.asrId] ?? "").trim();
+      if (!texto) return;
+      const active = resolveActiveWorktree();
+      if (!active) {
+        useNotificationStore.getState().notify("error", "No hay un proyecto activo.");
+        return;
+      }
+      setConfirmando(entry.asrId);
+      try {
+        const v = await window.termcanvas.interview.validateTacticText(
+          active.path,
+          synthesisPath,
+          entry.asrId,
+          texto,
+        );
+        if (!v.ok) {
+          useNotificationStore.getState().notify("error", v.error);
+          return;
+        }
+        if (v.data.aparta_de_restriccion) {
+          setAdvertencia({
+            asrId: entry.asrId,
+            advertencia: v.data.advertencia ?? "La decisión parece apartarse de una restricción global.",
+            yStatement: v.data.y_statement,
+            textoLibre: texto,
+          });
+          return;
+        }
+        await confirmarConPayload(entry, {
+          synthesisPath,
+          asrId: entry.asrId,
+          tipo: "libre",
+          analysis,
+          textoLibre: texto,
+          yStatementLibre: v.data.y_statement,
+          conflictosInvolucrados: conflictsFor(entry.asrId),
+          conflictosAceptados: conflictsFor(entry.asrId).length > 0,
+        });
+      } finally {
+        setConfirmando(null);
+      }
+      return;
+    }
+
+    await confirmarConPayload(entry, {
+      synthesisPath,
+      asrId: entry.asrId,
+      tipo: "candidata",
+      analysis,
+      candidataIndex: sel,
+      conflictosInvolucrados: conflictsFor(entry.asrId),
+      // Confirmar con conflicto visible = aceptación consciente: el ADR lo
+      // registra en Consecuencias, no solo en el header.
+      conflictosAceptados: conflictsFor(entry.asrId).length > 0,
+    });
+  };
+
+  const confirmarAdvertencia = async () => {
+    if (!advertencia || !synthesisPath) return;
+    const entry = genuinos.find((g) => g.asrId === advertencia.asrId);
+    const analysis = analisis[advertencia.asrId];
+    if (!entry || !analysis) {
+      setAdvertencia(null);
+      return;
+    }
+    const ok = await confirmarConPayload(entry, {
+      synthesisPath,
+      asrId: advertencia.asrId,
+      tipo: "libre",
+      analysis,
+      textoLibre: advertencia.textoLibre,
+      ...(advertencia.yStatement.trim() ? { yStatementLibre: advertencia.yStatement } : {}),
+      advertenciaConfirmada: true,
+      conflictosInvolucrados: conflictsFor(advertencia.asrId),
+      conflictosAceptados: conflictsFor(advertencia.asrId).length > 0,
+    });
+    if (ok) setAdvertencia(null);
+  };
+
+  // ── Render ─────────────────────────────────────────────────────────────
+
+  if (synthLoading) return <SynthLoading />;
+  if (!hasSynthesis) return <NoSynthesis />;
+
+  const hayAnalisisPendienteDeCTA = run.phase === "idle" && Object.keys(analisis).length === 0;
+
+  return (
+    <>
+      <div className="space-y-4">
+        <SearchHeader
+          label="Tácticas de arquitectura por ASR"
+          count={`${genuinos.length} ASR genuinos`}
+          placeholder=""
+          actions={
+            <button
+              type="button"
+              className="btn btn-primary min-h-[30px] px-3 text-xs font-semibold"
+              onClick={() => void runAnalysis()}
+              disabled={run.phase === "running" || genuinos.length === 0}
+              title={
+                genuinos.length === 0
+                  ? "No hay restricciones arquitectónicas genuinas en este proyecto todavía"
+                  : undefined
+              }
+            >
+              {run.phase === "running"
+                ? "Analizando…"
+                : hayAnalisisPendienteDeCTA
+                  ? "Analizar tácticas de arquitectura"
+                  : "Re-analizar tácticas"}
+            </button>
+          }
+        />
+
+        {/* Sin ASR genuinos: aviso explícito (el botón queda deshabilitado). */}
+        {genuinos.length === 0 && (
+          <p className="text-[11px] text-[var(--text-muted)] leading-relaxed">
+            No hay restricciones arquitectónicas genuinas en este proyecto todavía — las preferencias
+            de UX no requieren esta disciplina. Marcá un ASR como genuino en su sección para habilitar
+            el análisis.
+          </p>
+        )}
+
+        {/* Fallo global del análisis: banner visible con reintento (nunca silencioso). */}
+        {run.phase === "error" && (
+          <div className="w-full p-3 rounded-md bg-[var(--red-soft)] border border-red-500/30 text-[11px] text-[var(--text-primary)] space-y-2">
+            <div className="flex items-start gap-2">
+              <AlertIcon />
+              <p className="leading-snug">{run.error}</p>
+            </div>
+            <button type="button" className="btn btn-ghost text-xs py-1 min-h-[32px]" onClick={() => void runAnalysis()}>
+              Reintentar
+            </button>
+          </div>
+        )}
+
+        {run.phase === "running" && (
+          <div className="flex items-center gap-2.5 text-xs text-[var(--text-muted)]">
+            <div className="w-4 h-4 rounded-full border-2 border-[var(--border)] border-t-[var(--accent)] animate-spin" />
+            <span>Analizando tácticas por cada ASR genuino… (una llamada por ASR, luego consolidación)</span>
+          </div>
+        )}
+
+        {/* Fallo de la consolidación: las candidatas siguen usables, pero el aviso de conflicto no está disponible. */}
+        {conflictosError && (
+          <div className="w-full p-3 rounded-md bg-[var(--red-soft)] border border-red-500/30 text-[11px] text-[var(--text-primary)] space-y-2">
+            <div className="flex items-start gap-2">
+              <AlertIcon />
+              <p className="leading-snug">
+                No se pudo ejecutar la detección de conflictos entre tácticas recomendadas:{" "}
+                {friendlyTacticsError(conflictosError)}
+              </p>
+            </div>
+            <button type="button" className="btn btn-ghost text-xs py-1 min-h-[32px]" onClick={() => void retryConsolidacion()}>
+              Reintentar consolidación
+            </button>
+          </div>
+        )}
+
+        {/* Conflictos detectados (ATAM tradeoff point): alerta NO bloqueante. */}
+        {conflictos !== null && conflictos.length > 0 && (
+          <div className="p-3 rounded-md bg-[var(--amber-soft)] border border-amber-500/30 space-y-1.5">
+            <p className="text-[11px] font-semibold text-[var(--amber)]">
+              {conflictos.length} conflicto{conflictos.length === 1 ? "" : "s"} entre tácticas recomendadas
+            </p>
+            {conflictos.map((c, i) => (
+              <p key={i} className="text-[11px] text-[var(--text-secondary)] leading-relaxed">
+                <span className="font-mono font-semibold">
+                  {c.asr_a}/{c.tactica_a} ↔ {c.asr_b}/{c.tactica_b}
+                </span>{" "}
+                — {c.explicacion}
+              </p>
+            ))}
+            <p className="text-[10px] text-[var(--text-muted)] leading-relaxed">
+              Podés confirmar igual si el trade-off vale la pena — quedará registrado como riesgo
+              aceptado en las Consecuencias del ADR.
+            </p>
+          </div>
+        )}
+
+        {/* Tarjetas: una por ASR genuino. */}
+        <div className="space-y-3">
+          {genuinos.map((entry) => {
+            const analysis = analisis[entry.asrId];
+            const errorAsr = erroresAnalisis[entry.asrId]?.trim();
+            const sel = seleccion[entry.asrId];
+            const enConflicto = conflictsFor(entry.asrId);
+            return (
+              <div key={entry.asrId} className="p-3.5 rounded-md border border-[var(--border)] bg-[var(--bg)] space-y-3 text-xs">
+                <div className="flex items-center justify-between gap-2 flex-wrap border-b border-[var(--border)] pb-2">
+                  <div className="flex items-center gap-1.5 min-w-0">
+                    <span className="font-mono text-[10.5px] font-semibold text-[var(--text-muted)] bg-[var(--surface)] px-2 py-0.5 rounded border border-[var(--border)]">
+                      {entry.asrId}
+                    </span>
+                    <span className="text-[11px] font-semibold text-[var(--text-primary)] truncate">{entry.atributo}</span>
+                    {analysis && (
+                      <span className="text-[9.5px] font-semibold px-2 py-0.5 rounded-full border bg-[var(--accent-soft)] text-[var(--accent)] border-[var(--border)] shrink-0">
+                        {analysis.categoria_atributo}
+                      </span>
+                    )}
+                  </div>
+                  {entry.adrActivo && (
+                    <span
+                      className="text-[9.5px] font-semibold px-2 py-0.5 rounded-full border bg-emerald-500/15 text-emerald-400 border-emerald-500/20 shrink-0"
+                      title={`${entry.adrActivo.adr} — ${entry.adrActivo.yStatement}`}
+                    >
+                      {entry.adrActivo.adr} · decisión activa
+                    </span>
+                  )}
+                </div>
+
+                {enConflicto.length > 0 && (
+                  <p className="text-[10.5px] text-[var(--amber)] leading-relaxed">
+                    En tensión con otra táctica recomendada ({enConflicto.map((c) => (c.asr_a === entry.asrId ? c.asr_b : c.asr_a)).join(", ")}) — ver detalle arriba.
+                  </p>
+                )}
+
+                {entry.adrActivo && (
+                  <blockquote className="p-2 rounded border-l-2 border-emerald-500/40 bg-[var(--surface)] text-[11px] text-[var(--text-secondary)] italic leading-relaxed">
+                    {entry.adrActivo.yStatement}
+                  </blockquote>
+                )}
+
+                {!analysis && !errorAsr && (
+                  <p className="text-[11px] text-[var(--text-muted)]">
+                    {run.phase === "running" ? "Analizando…" : "Sin análisis todavía."}
+                  </p>
+                )}
+
+                {errorAsr && (
+                  <div className="w-full p-2.5 rounded-md bg-[var(--red-soft)] border border-red-500/30 text-[11px] text-[var(--text-primary)] space-y-2">
+                    <div className="flex items-start gap-2">
+                      <AlertIcon />
+                      <p className="leading-snug">{errorAsr}</p>
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-ghost text-xs py-1 min-h-[28px]"
+                      onClick={() => void retryOne(entry.asrId)}
+                    >
+                      Reintentar {entry.asrId}
+                    </button>
+                  </div>
+                )}
+
+                {analysis &&
+                  analysis.candidatas.map((c, i) => {
+                    const elegida = sel === i;
+                    return (
+                      <button
+                        key={i}
+                        type="button"
+                        onClick={() => setSeleccion((s) => ({ ...s, [entry.asrId]: i }))}
+                        className={`w-full text-left p-2.5 rounded-md border transition-all cursor-pointer focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:outline-none space-y-1.5 ${
+                          elegida
+                            ? "border-[var(--accent)] ring-1 ring-[var(--accent)] bg-[var(--surface)]"
+                            : "border-[var(--border)] hover:border-[var(--text-faint)] bg-transparent"
+                        }`}
+                      >
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className={`w-3 h-3 rounded-full border shrink-0 ${elegida ? "border-[var(--accent)] bg-[var(--accent)]" : "border-[var(--text-faint)]"}`} />
+                          <span className="text-[11.5px] font-semibold text-[var(--text-primary)]">{c.nombre_tactica}</span>
+                          {c.es_recomendada && (
+                            <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-400 border border-emerald-500/20">
+                              Recomendada
+                            </span>
+                          )}
+                          {c.es_unica_viable && (
+                            <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-[var(--accent-soft)] text-[var(--accent)] border border-[var(--border)]">
+                              Única viable
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-[10.5px] text-[var(--text-muted)] italic">{c.proposito}</p>
+                        <p className="text-[11px] text-[var(--text-secondary)] leading-relaxed">{c.argumentacion}</p>
+                        <p className="text-[11px] text-[var(--text-secondary)] leading-relaxed">
+                          <span className="font-semibold">Trade-offs: </span>
+                          {c.trade_offs_para_este_proyecto}
+                        </p>
+                        <p className="text-[11px] text-[var(--text-secondary)] leading-relaxed">
+                          <span className="font-semibold">Objetivo de negocio: </span>
+                          {c.conexion_con_objetivo_de_negocio}
+                        </p>
+                        {!c.cumple_totalmente_la_restriccion && (c.que_se_sacrifica ?? "").trim() && (
+                          <p className="text-[10.5px] text-[var(--amber)] leading-relaxed">
+                            No cubre totalmente la restricción — sacrifica: {c.que_se_sacrifica}
+                          </p>
+                        )}
+                      </button>
+                    );
+                  })}
+
+                {analysis && (
+                  <div className="space-y-2 pt-1">
+                    <button
+                      type="button"
+                      className={`text-[10.5px] underline decoration-dotted cursor-pointer ${
+                        sel === "libre" ? "text-[var(--accent)]" : "text-[var(--text-muted)] hover:text-[var(--text-primary)]"
+                      }`}
+                      onClick={() =>
+                        setSeleccion((s) => {
+                          const next = { ...s };
+                          if (s[entry.asrId] === "libre") delete next[entry.asrId];
+                          else next[entry.asrId] = "libre";
+                          return next;
+                        })
+                      }
+                    >
+                      {sel === "libre" ? "← volver a las candidatas" : "Ninguna me cierra — escribir decisión propia"}
+                    </button>
+                    {sel === "libre" && (
+                      <textarea
+                        rows={3}
+                        className="textarea-minimal text-xs py-1.5 w-full"
+                        placeholder="Tu decisión de arquitectura para este ASR…"
+                        value={textoLibre[entry.asrId] ?? ""}
+                        onChange={(e) => setTextoLibre((t) => ({ ...t, [entry.asrId]: e.target.value }))}
+                      />
+                    )}
+                    <div className="flex items-center justify-end gap-2">
+                      {sel !== undefined && sel !== "libre" && <CheckIcon />}
+                      <button
+                        type="button"
+                        className="btn btn-primary text-xs py-1 px-3 min-h-[32px] font-semibold"
+                        disabled={sel === undefined || confirmando === entry.asrId || (sel === "libre" && !(textoLibre[entry.asrId] ?? "").trim())}
+                        onClick={() => void confirmar(entry)}
+                      >
+                        {confirmando === entry.asrId
+                          ? "Escribiendo ADR…"
+                          : entry.adrActivo
+                            ? `Confirmar decisión (supersede ${entry.adrActivo.adr})`
+                            : "Confirmar decisión"}
+                      </button>
+                    </div>
+                    {entry.adrActivo && (
+                      <p className="text-[10px] text-[var(--text-muted)] text-right">
+                        Re-confirmar crea un ADR nuevo; el anterior queda marcado como superseded (nunca se edita).
+                      </p>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Overlay: advertencia de decisión propia vs restricciones (no bloqueante). */}
+      {advertencia &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-[1000] flex items-center justify-center bg-[var(--scrim)] p-4"
+            onClick={() => setAdvertencia(null)}
+          >
+            <div
+              className="w-[460px] max-w-[92vw] rounded-lg border border-[var(--border)] bg-[var(--surface)] p-4 shadow-xl space-y-3"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3 className="text-xs font-semibold text-[var(--amber)] flex items-center gap-2">
+                <AlertIcon />
+                Tu decisión parece apartarse de una restricción
+              </h3>
+              <p className="text-[11px] text-[var(--text-primary)] leading-relaxed">{advertencia.advertencia}</p>
+              <p className="text-[10.5px] text-[var(--text-muted)] leading-relaxed">
+                Podés confirmar igual — seguís siendo la autoridad final. Quedará registrado en el ADR.
+              </p>
+              <div className="flex justify-end gap-2 pt-1">
+                <button type="button" className="btn btn-ghost text-xs py-1 min-h-[32px]" onClick={() => setAdvertencia(null)}>
+                  Volver
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary text-xs py-1 min-h-[32px] font-semibold"
+                  disabled={confirmando === advertencia.asrId}
+                  onClick={() => void confirmarAdvertencia()}
+                >
+                  {confirmando === advertencia.asrId ? "Escribiendo ADR…" : "Es intencional — confirmar"}
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body,
+        )}
+    </>
+  );
+}

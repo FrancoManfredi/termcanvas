@@ -17,6 +17,7 @@ import {
   PlannerIcon,
   QualityIcon,
   RequirementsIcon,
+  TacticsIcon,
   UserStoryIcon,
   type CoreSubcategory,
   type SectionGroup,
@@ -26,6 +27,7 @@ import { RequirementsInterviewSection } from "./sections/RequirementsInterviewSe
 import { UserStoriesSection } from "./sections/UserStoriesSection";
 import { FunctionalRequirementsSection } from "./sections/FunctionalRequirementsSection";
 import { QualityAttributesSection } from "./sections/QualityAttributesSection";
+import { ArchitectureTacticsSection } from "./sections/ArchitectureTacticsSection";
 import { ConstraintsSection } from "./sections/ConstraintsSection";
 import { GlossarySection } from "./sections/GlossarySection";
 import { PlanningDiagnosisSection } from "./sections/PlanningDiagnosisSection";
@@ -97,6 +99,18 @@ export const SECTION_REGISTRY: SectionDef[] = [
     label: "Atributos de Calidad (ASR)",
     badge: countOf((s) => s.atributos_de_calidad_y_asrs?.length ?? 0),
     Component: QualityAttributesSection,
+  },
+  {
+    // El badge cuenta los ASR GENUINOS: son los únicos que disparan el
+    // análisis de tácticas (las preferencias UX no requieren la disciplina).
+    id: "architecture_tactics",
+    group: "post",
+    icon: TacticsIcon,
+    label: "Tácticas de Arquitectura",
+    badge: countOf(
+      (s) => (s.atributos_de_calidad_y_asrs ?? []).filter((q) => q.es_asr_genuino).length,
+    ),
+    Component: ArchitectureTacticsSection,
   },
   {
     id: "constraints",

@@ -15,7 +15,7 @@ import {
 } from "../src/components/core/registry.tsx";
 import type { SynthesisResult } from "../headless-runtime/interview/index.ts";
 
-test("SECTION_REGISTRY cubre exactamente las 10 subcategorías sin duplicados", () => {
+test("SECTION_REGISTRY cubre exactamente las 11 subcategorías sin duplicados", () => {
   const ids = SECTION_REGISTRY.map((def) => def.id);
   const uniqueIds = new Set(ids);
   assert.equal(uniqueIds.size, ids.length, "ids duplicados en el registro");
@@ -26,6 +26,7 @@ test("SECTION_REGISTRY cubre exactamente las 10 subcategorías sin duplicados", 
     "user_stories",
     "functional_requirements",
     "quality_attributes",
+    "architecture_tactics",
     "constraints",
     "glossary",
     "planning_diagnosis",
@@ -84,7 +85,7 @@ test("badges estáticos y derivados de síntesis devuelven strings", () => {
   const synthesis = {
     historias_de_usuario: [{}, {}, {}],
     requerimientos_funcionales: [{}],
-    atributos_de_calidad_y_asrs: [{}, {}],
+    atributos_de_calidad_y_asrs: [{ es_asr_genuino: true }, { es_asr_genuino: false }],
     restricciones_globales: [],
     glosario_de_terminos: { termino_a: "def", termino_b: "def" },
   } as unknown as SynthesisResult;
@@ -93,6 +94,9 @@ test("badges estáticos y derivados de síntesis devuelven strings", () => {
   assert.equal(byId("user_stories"), "3");
   assert.equal(byId("functional_requirements"), "1");
   assert.equal(byId("quality_attributes"), "2");
+  // El badge de tácticas cuenta SOLO los ASR genuinos (los únicos que
+  // disparan el análisis).
+  assert.equal(byId("architecture_tactics"), "1");
   assert.equal(byId("constraints"), "0");
   assert.equal(byId("glossary"), "2");
 
