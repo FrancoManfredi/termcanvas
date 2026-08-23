@@ -1,4 +1,4 @@
-import { buildRepoContextSection, buildRequirementsSection } from "../utils/repoContext";
+import { buildRepoContextSection, buildRequirementsSection, buildArchitectureDecisionsSection } from "../utils/repoContext";
 
 export type IssueResolvePromptMode = "new" | "resume";
 
@@ -14,6 +14,9 @@ interface IssueResolvePromptInput {
   // glosario) formateado por el motor. Se inyecta inline por
   // buildRequirementsSection; el agente no lee ningún archivo.
   requirementsText?: string;
+  // Decisiones de arquitectura activas (ADRs del manifiesto). Inline por
+  // buildArchitectureDecisionsSection, tras REQUERIMIENTOS RELEVADOS.
+  decisionsText?: string;
 }
 
 function issueBody(body: string | undefined): string {
@@ -88,6 +91,7 @@ export function buildIssueResolvePrompt(
     "",
     ...buildRepoContextSection(input.repoContextText),
     ...buildRequirementsSection(input.requirementsText),
+    ...buildArchitectureDecisionsSection(input.decisionsText),
     ...buildSharedSuffix(input),
   ];
   return sections.join("\n");

@@ -1,7 +1,7 @@
 import type { TerminalType } from "../types";
 import type { IssueNodeData } from "../stores/issueStore";
 import { buildIssueReviewPrompt } from "./issueReviewPrompt";
-import { resolveRepoContextText, resolveRequirementsText } from "../utils/repoContext";
+import { resolveRepoContextText, resolveRequirementsText, resolveArchitectureDecisionsText } from "../utils/repoContext";
 
 interface ReviewTarget {
   projectId: string;
@@ -338,6 +338,7 @@ async function reviewOnePr(
 
   const repoContextText = await resolveRepoContextText(project.path);
   const requirementsText = await resolveRequirementsText(project.path);
+  const decisionsText = await resolveArchitectureDecisionsText(project.path);
 
   const terminal = createTerminal({
     projectId: target.projectId,
@@ -354,6 +355,7 @@ async function reviewOnePr(
       reviewTemplateFilePath,
       repoContextText,
       requirementsText,
+      decisionsText,
     }),
     autoApprove: true,
     // Cascade multiple reviews diagonally so their tiles do not stack

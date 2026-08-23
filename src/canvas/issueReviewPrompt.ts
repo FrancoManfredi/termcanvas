@@ -1,4 +1,4 @@
-import { buildRepoContextSection, buildRequirementsSection } from "../utils/repoContext";
+import { buildRepoContextSection, buildRequirementsSection, buildArchitectureDecisionsSection } from "../utils/repoContext";
 
 export interface IssueReviewPromptInput {
   issueNumber: number;
@@ -22,6 +22,9 @@ export interface IssueReviewPromptInput {
   // glosario) formateado por el motor. Se inyecta inline por
   // buildRequirementsSection; el agente no lee ningún archivo.
   requirementsText?: string;
+  // Decisiones de arquitectura activas (ADRs del manifiesto). Inline por
+  // buildArchitectureDecisionsSection, tras REQUERIMIENTOS RELEVADOS.
+  decisionsText?: string;
 }
 
 // Strict body-rule: the issue body is NEVER inlined in the prompt (it can be
@@ -107,6 +110,7 @@ export function buildIssueReviewPrompt(
     "",
     ...buildRepoContextSection(input.repoContextText),
     ...buildRequirementsSection(input.requirementsText),
+    ...buildArchitectureDecisionsSection(input.decisionsText),
     "",
     `## CONTEXTO`,
     `Estás en un worktree aislado con el código de la solución ya commiteado en la rama (podés verlo con git log). Ejecutá \`gh pr view ${input.prNumber}\` y \`gh pr diff ${input.prNumber}\` para ver la solución completa en contexto (cambios, archivos, tests). Si falta algo del diff local (ej: la rama no está actualizada con el PR), avisá en tu reporte final en vez de inventar contenido.`,

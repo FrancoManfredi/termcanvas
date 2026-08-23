@@ -65,6 +65,26 @@ test("buildPlanningPrompt: las historias de usuario son contexto, no ítems de v
   assert.doesNotMatch(compact, /NO se evalúan como ítems de veredicto/);
 });
 
+test("buildPlanningPrompt: las decisiones ADR activas viajan al planner tras los requerimientos", () => {
+  const without = buildPlanningPrompt(BASE);
+  assert.doesNotMatch(without, /DECISIONES DE ARQUITECTURA YA TOMADAS/);
+
+  const withAdrs = buildPlanningPrompt({
+    ...BASE,
+    requirementsText: "## REQUERIMIENTOS RELEVADOS\n### RF-001 …",
+    decisionsText:
+      "DECISIONES DE ARQUITECTURA YA TOMADAS (ADRs activos):\n\n- **ADR-001** (ASR-001): En el contexto de Rendimiento, decidimos Cache.\n\nInstrucciones OBLIGATORIAS sobre estas decisiones:\n- LEÉ el archivo completo del ADR antes de continuar.",
+  });
+  assert.match(withAdrs, /DECISIONES DE ARQUITECTURA YA TOMADAS/);
+  assert.match(withAdrs, /\*\*ADR-001\*\* \(ASR-001\)/);
+  // El planner no debe proponer issues que contradigan una decisión aceptada.
+  assert.match(withAdrs, /LEÉ el archivo completo del ADR antes de continuar/);
+
+  const reqPos = withAdrs.indexOf("## REQUERIMIENTOS RELEVADOS");
+  const decPos = withAdrs.indexOf("DECISIONES DE ARQUITECTURA YA TOMADAS");
+  assert.ok(decPos > reqPos, "la sección de decisiones va inmediatamente después de requerimientos");
+});
+
 test("parsePlanningPlan: parsea requisitos tolerante (estados válidos, descarta inválidos)", () => {
   const parsed = parsePlanningPlan(
     JSON.stringify({

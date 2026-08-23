@@ -1,4 +1,4 @@
-import { buildRepoContextSection, buildRequirementsSection } from "../utils/repoContext";
+import { buildRepoContextSection, buildRequirementsSection, buildArchitectureDecisionsSection } from "../utils/repoContext";
 
 export interface IssueFixPromptInput {
   issueNumber: number;
@@ -18,6 +18,10 @@ export interface IssueFixPromptInput {
   // glosario) formateado por el motor. Se inyecta inline por
   // buildRequirementsSection; el agente no lee ningún archivo.
   requirementsText?: string;
+  // Decisiones de arquitectura activas (ADRs del manifiesto) formateadas por
+  // el motor. Se inyecta inline por buildArchitectureDecisionsSection,
+  // inmediatamente después de REQUERIMIENTOS RELEVADOS.
+  decisionsText?: string;
 }
 
 function issueBody(body: string | undefined): string {
@@ -52,6 +56,7 @@ export function buildIssueFixPrompt(input: IssueFixPromptInput): string {
     "",
     ...buildRepoContextSection(input.repoContextText),
     ...buildRequirementsSection(input.requirementsText),
+    ...buildArchitectureDecisionsSection(input.decisionsText),
     ...injected,
     "",
     `## CONTEXTO DEL PR`,

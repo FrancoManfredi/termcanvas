@@ -73,6 +73,26 @@ export function buildRepoContextSection(
 }
 
 /**
+ * Resuelve el texto de las DECISIONES DE ARQUITECTURA activas (ADRs del
+ * manifiesto decisiones-activo.json) vía IPC. Best-effort: sin bridge, sin
+ * ADRs o con error devuelve "" y el prompt corre sin la sección.
+ *
+ * El texto lo arma el MOTOR desde el manifiesto (y_statement por decisión +
+ * instrucciones obligatorias + advertencia sobre ADRs reemplazados): nunca
+ * se parsean los markdown en tiempo real.
+ */
+export async function resolveArchitectureDecisionsText(
+  repoPath: string | undefined,
+): Promise<string> {
+  if (!repoPath || repoPath.trim().length === 0) return "";
+  try {
+    return await window.termcanvas?.interview?.activeDecisionsText(repoPath);
+  } catch {
+    return "";
+  }
+}
+
+/**
  * Sección "REQUERIMIENTOS RELEVADOS" para los prompts de orquestador.
  *
  * El texto de la síntesis de requerimientos activa (RFs, ASRs, restricciones,
@@ -94,5 +114,28 @@ export function buildRequirementsSection(
     text,
     "",
     'Mencioná en tu resumen final la línea exacta "Síntesis de requerimientos usada: <archivo>" que figura arriba (con su fecha).',
+  ];
+}
+
+/**
+ * Sección de decisiones de arquitectura ya tomadas (ADRs activos), inmediata
+ * después de REQUERIMIENTOS RELEVADOS: es la extensión natural del mismo
+ * bloque obligatorio. El y_statement viaja SIEMPRE (una línea, barato) con
+ * instrucción explícita de leer el archivo completo ante cualquier duda —
+ * "¿esto alcanza?" nunca queda al criterio del modelo sin ver el contenido.
+ *
+ * Devuelve un array vacío cuando no hay decisiones; el prompt corre igual que
+ * antes (compatibilidad total con proyectos sin ADRs).
+ */
+export function buildArchitectureDecisionsSection(
+  decisionsText: string | undefined,
+): string[] {
+  const text = (decisionsText ?? "").trim();
+  if (text.length === 0) return [];
+  return [
+    "",
+    text,
+    "",
+    'Mencioná en tu resumen final qué ADRs activos consultaste (o "Ningún ADR aplicable a este trabajo").',
   ];
 }

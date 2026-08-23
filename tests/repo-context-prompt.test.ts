@@ -23,6 +23,17 @@ RESTRICCIONES GLOBALES:
 GLOSARIO:
 - Netbook: Dispositivo del Plan Ceibal.`;
 
+// Bloque que arma formatDecisionsForPrompt desde decisiones-activo.json
+// (mismo shape que viaja por IPC interview:activeDecisionsText).
+const DECISIONS_TEXT = `DECISIONES DE ARQUITECTURA YA TOMADAS (ADRs activos):
+
+- **ADR-001** (ASR-001): En el contexto de Rendimiento (ASR-001), decidimos optar por Cache, aceptando memoria extra.
+  Detalle completo: .agents/architecture/decisions/ADR-001-asr-001-rendimiento.md
+
+Instrucciones OBLIGATORIAS sobre estas decisiones:
+- Cada línea resume UNA decisión completa. Si tu implementación podría interactuar con matices no cubiertos por el resumen (restricciones colaterales, consecuencias aceptadas, riesgos ya identificados), LEÉ el archivo completo del ADR antes de continuar — no asumas que el resumen alcanza.
+- NO propongas una táctica alternativa sin justificar explícitamente por qué la ya decidida no aplica a este caso puntual.`;
+
 const builders: Array<{ name: string; build: () => string }> = [
   {
     name: "resolve",
@@ -34,6 +45,7 @@ const builders: Array<{ name: string; build: () => string }> = [
           body: "Body",
           repoContextText: REPO_CONTEXT_TEXT,
           requirementsText: REQUIREMENTS_TEXT,
+          decisionsText: DECISIONS_TEXT,
         },
         "new",
       ),
@@ -49,6 +61,7 @@ const builders: Array<{ name: string; build: () => string }> = [
         branch: "issue-1",
         repoContextText: REPO_CONTEXT_TEXT,
         requirementsText: REQUIREMENTS_TEXT,
+        decisionsText: DECISIONS_TEXT,
       }),
   },
   {
@@ -61,6 +74,7 @@ const builders: Array<{ name: string; build: () => string }> = [
         branch: "issue-1",
         repoContextText: REPO_CONTEXT_TEXT,
         requirementsText: REQUIREMENTS_TEXT,
+        decisionsText: DECISIONS_TEXT,
       }),
   },
   {
@@ -73,6 +87,7 @@ const builders: Array<{ name: string; build: () => string }> = [
         branch: "issue-1",
         repoContextText: REPO_CONTEXT_TEXT,
         requirementsText: REQUIREMENTS_TEXT,
+        decisionsText: DECISIONS_TEXT,
       }),
   },
 ];
@@ -270,4 +285,84 @@ test("whitespace-only requirements text is treated as absent", () => {
     !prompt.includes("REQUERIMIENTOS RELEVADOS"),
     "whitespace-only requirements must not emit the section",
   );
+});
+
+// ─── Sección DECISIONES DE ARQUITECTURA (ADRs activos) ────────────────────
+
+test("all orchestrator prompts inject the ADR decisions block with the read-the-full-file instruction", () => {
+  for (const { name, build } of builders) {
+    const prompt = build();
+    assert.ok(
+      prompt.includes("DECISIONES DE ARQUITECTURA YA TOMADAS"),
+      `${name} prompt must include the architecture decisions block`,
+    );
+    assert.ok(
+      prompt.includes("**ADR-001** (ASR-001): En el contexto de Rendimiento"),
+      `${name} prompt must inline the y_statement of each active ADR`,
+    );
+    assert.ok(
+      prompt.includes("LEÉ el archivo completo del ADR antes de continuar"),
+      `${name} prompt must explicitly order reading the full ADR — '¿esto alcanza?' is never left to the model without seeing it`,
+    );
+    assert.ok(
+      prompt.includes("NO propongas una táctica alternativa sin justificar"),
+      `${name} prompt must forbid silently proposing alternative tactics`,
+    );
+  }
+});
+
+test("decisions block sits right after the requirements section and before the task", () => {
+  const taskSectionByBuilder: Record<string, string> = {
+    resolve: "## ALCANCE",
+    fix: "## ALCANCE",
+    review: "## LECTURA OBLIGATORIA DEL ISSUE",
+    conflict: "## ARCHIVOS EN CONFLICTO",
+  };
+  for (const { name, build } of builders) {
+    const prompt = build();
+    const reqPos = prompt.indexOf("## REQUERIMIENTOS RELEVADOS");
+    const decPos = prompt.indexOf("DECISIONES DE ARQUITECTURA YA TOMADAS");
+    const taskPos = prompt.indexOf(taskSectionByBuilder[name]);
+    assert.ok(
+      reqPos > -1 && decPos > reqPos && taskPos > decPos,
+      `${name} prompt must order: requirements < decisions < task`,
+    );
+  }
+});
+
+test("without decisions text no ADR block is emitted (projects without ADRs keep identical prompts)", () => {
+  const without = {
+    resolve: buildIssueResolvePrompt(
+      { issueNumber: 1, title: "Issue title", body: "Body", requirementsText: REQUIREMENTS_TEXT },
+      "new",
+    ),
+    fix: buildIssueFixPrompt({
+      issueNumber: 1,
+      title: "Issue title",
+      body: "Body",
+      prNumber: 12,
+      branch: "issue-1",
+      requirementsText: REQUIREMENTS_TEXT,
+    }),
+    review: buildIssueReviewPrompt({
+      issueNumber: 1,
+      title: "Issue title",
+      prNumber: 12,
+      branch: "issue-1",
+      requirementsText: REQUIREMENTS_TEXT,
+    }),
+    conflict: buildResolveConflictPrompt({
+      issueNumber: 1,
+      title: "Issue title",
+      prNumber: 12,
+      branch: "issue-1",
+      requirementsText: REQUIREMENTS_TEXT,
+    }),
+  };
+  for (const [name, prompt] of Object.entries(without)) {
+    assert.ok(
+      !prompt.includes("DECISIONES DE ARQUITECTURA YA TOMADAS"),
+      `${name} prompt must not emit the decisions block without ADR text`,
+    );
+  }
 });

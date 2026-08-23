@@ -1,5 +1,5 @@
 import type { PlannerMode } from "../types/issuePlanning.ts";
-import { buildRepoContextSection, buildRequirementsSection } from "../utils/repoContext";
+import { buildRepoContextSection, buildRequirementsSection, buildArchitectureDecisionsSection } from "../utils/repoContext";
 
 export interface PlanningPromptInput {
   mode: PlannerMode;
@@ -11,6 +11,10 @@ export interface PlanningPromptInput {
   // glosario) formateado por el motor. Se inyecta inline por
   // buildRequirementsSection; el agente no lee ningún archivo.
   requirementsText?: string;
+  // Decisiones de arquitectura activas (ADRs del manifiesto). Inline por
+  // buildArchitectureDecisionsSection, tras REQUERIMIENTOS RELEVADOS: el
+  // planner no debe proponer issues que contradigan una decisión aceptada.
+  decisionsText?: string;
   roadmapText?: string;
   attachmentNames?: string[];
   outputPath: string;
@@ -236,6 +240,7 @@ export function buildPlanningPrompt(input: PlanningPromptInput): string {
   return [
     ...contextSection,
     ...buildRequirementsSection(input.requirementsText),
+    ...buildArchitectureDecisionsSection(input.decisionsText),
     "",
     ...roadmapSection,
     ...auditFusionSection,

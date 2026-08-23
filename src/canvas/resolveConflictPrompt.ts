@@ -1,4 +1,4 @@
-import { buildRepoContextSection, buildRequirementsSection } from "../utils/repoContext";
+import { buildRepoContextSection, buildRequirementsSection, buildArchitectureDecisionsSection } from "../utils/repoContext";
 
 export interface ResolveConflictPromptInput {
   issueNumber: number;
@@ -19,6 +19,9 @@ export interface ResolveConflictPromptInput {
   // glosario) formateado por el motor. Se inyecta inline por
   // buildRequirementsSection; el agente no lee ningún archivo.
   requirementsText?: string;
+  // Decisiones de arquitectura activas (ADRs del manifiesto). Inline por
+  // buildArchitectureDecisionsSection, tras REQUERIMIENTOS RELEVADOS.
+  decisionsText?: string;
 }
 
 /**
@@ -46,6 +49,7 @@ export function buildResolveConflictPrompt(
     "",
     ...buildRepoContextSection(input.repoContextText),
     ...buildRequirementsSection(input.requirementsText),
+    ...buildArchitectureDecisionsSection(input.decisionsText),
     "",
     `## ARCHIVOS EN CONFLICTO`,
     injectedFiles,

@@ -1,6 +1,6 @@
 import type { PlannerMode, PlanningResult } from "../types/issuePlanning.ts";
 import { buildPlanningPrompt, planningOutputPath } from "./planningPrompt.ts";
-import { resolveRepoContextText, resolveRequirementsText } from "../utils/repoContext.ts";
+import { resolveRepoContextText, resolveRequirementsText, resolveArchitectureDecisionsText } from "../utils/repoContext.ts";
 import { parsePlanningPlan, describePlanError } from "./parsePlanResult.ts";
 import { createTerminal, useProjectStore } from "../stores/projectStore.ts";
 import {
@@ -316,6 +316,9 @@ export async function launchPlanningSession(
   const requirementsText = await resolveRequirementsText(options.repoPath, {
     includeStories: true,
   });
+  // Las decisiones ADR activas también viajan al planner: un issue que
+  // contradiga una decisión aceptada se propaga río abajo a todos los RESOLVE.
+  const decisionsText = await resolveArchitectureDecisionsText(options.repoPath);
   // Momento de arranque: el poller lo usa para identificar la sesión de
   // opencode de ESTA corrida (findOpenCode) y poder reintentarla resumida.
   const startedAt = new Date().toISOString();
@@ -327,6 +330,7 @@ export async function launchPlanningSession(
         mode: options.mode,
         repoContextText,
         requirementsText,
+        decisionsText,
         roadmapText: options.roadmapText,
         attachmentNames: options.attachmentNames,
         outputPath,

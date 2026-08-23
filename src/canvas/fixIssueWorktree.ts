@@ -2,7 +2,7 @@ import type { TerminalType } from "../types";
 import type { IssueNodeData } from "../stores/issueStore";
 import type { LinkedPr } from "../stores/issueReviewStore";
 import { buildIssueFixPrompt } from "./issueFixPrompt";
-import { resolveRepoContextText, resolveRequirementsText } from "../utils/repoContext";
+import { resolveRepoContextText, resolveRequirementsText, resolveArchitectureDecisionsText } from "../utils/repoContext";
 
 interface ProjectWorktreeForLookup {
   id: string;
@@ -182,6 +182,7 @@ export async function fixIssueWorktree(
 
   const repoContextText = await resolveRepoContextText(project.path);
   const requirementsText = await resolveRequirementsText(project.path);
+  const decisionsText = await resolveArchitectureDecisionsText(project.path);
 
   const terminal = createTerminal({
     projectId,
@@ -197,6 +198,7 @@ export async function fixIssueWorktree(
       reviewContext,
       repoContextText,
       requirementsText,
+      decisionsText,
     }),
     autoApprove: true,
     position,

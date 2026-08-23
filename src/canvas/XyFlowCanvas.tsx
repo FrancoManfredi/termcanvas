@@ -44,7 +44,7 @@ import {
 } from "./reviewVerdict";
 import { overrideGateForIssue } from "./issueGate";
 import { buildIssueResolvePrompt } from "./issueResolvePrompt";
-import { resolveRepoContextText, resolveRequirementsText } from "../utils/repoContext";
+import { resolveRepoContextText, resolveRequirementsText, resolveArchitectureDecisionsText } from "../utils/repoContext";
 import { reuseTerminalForIssue } from "../actions/terminalSceneActions";
 import { useTerminalRuntimeStateStore } from "../stores/terminalRuntimeStateStore";
 import { useIssueStore, type IssueNodeData } from "../stores/issueStore";
@@ -908,12 +908,14 @@ function XyFlowCanvasInner() {
         .projects.find((p) => p.id === target.projectId);
       const repoContextText = await resolveRepoContextText(project?.path);
       const requirementsText = await resolveRequirementsText(project?.path);
+      const decisionsText = await resolveArchitectureDecisionsText(project?.path);
       const promptInput = {
         issueNumber: issue.issueNumber,
         title: issue.title,
         body: issue.body,
         repoContextText,
         requirementsText,
+        decisionsText,
       };
       const initialPrompt = buildIssueResolvePrompt(promptInput, "new");
       let resumePrompt = buildIssueResolvePrompt(promptInput, "resume");
