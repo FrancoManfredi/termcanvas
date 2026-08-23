@@ -799,10 +799,68 @@ contextBridge.exposeInMainWorld("termcanvas", {
       projectPath: string,
       opts?: { includeStories?: boolean },
     ) => ipcRenderer.invoke("interview:activeRequirementsText", projectPath, opts) as Promise<string>,
+    activeDecisionsText: (projectPath: string) =>
+      ipcRenderer.invoke("interview:activeDecisionsText", projectPath) as Promise<string>,
     backfillStories: (projectPath: string, synthesisPath: string) =>
       ipcRenderer.invoke("interview:backfillStories", projectPath, synthesisPath) as Promise<
         | { ok: true; synthesis: import("../headless-runtime/interview/schema.ts").SynthesisResult }
         | { ok: false; reason: "no_synthesis" | "already_migrated" | "generation_failed"; error: string }
+      >,
+    tacticsStatus: (projectPath: string, synthesisPath: string) =>
+      ipcRenderer.invoke("interview:tacticsStatus", projectPath, synthesisPath) as Promise<{
+        asrs: import("../headless-runtime/interview/tactics.ts").TacticStatusEntry[];
+      }>,
+    analyzeTactics: (projectPath: string, synthesisPath: string) =>
+      ipcRenderer.invoke("interview:analyzeTactics", projectPath, synthesisPath) as Promise<
+        | {
+            ok: true;
+            resultados: Record<
+              string,
+              | { ok: true; data: import("../headless-runtime/interview/tactics.ts").TacticsAnalysisOutput }
+              | { ok: false; error: string }
+            >;
+            consolidacion:
+              | { ok: true; skipped: true }
+              | { ok: true; skipped: false; data: import("../headless-runtime/interview/tactics.ts").TacticsConsolidationOutput }
+              | { ok: false; error: string };
+          }
+        | { ok: false; reason: "no_synthesis" | "no_genuine_asrs"; error: string }
+      >,
+    validateTacticText: (projectPath: string, synthesisPath: string, asrId: string, textoLibre: string) =>
+      ipcRenderer.invoke(
+        "interview:validateTacticText",
+        projectPath,
+        synthesisPath,
+        asrId,
+        textoLibre,
+      ) as Promise<
+        | { ok: true; data: import("../headless-runtime/interview/tactics.ts").DecisionValidationOutput }
+        | { ok: false; error: string }
+      >,
+    confirmTacticDecision: (
+      projectPath: string,
+      input: import("../headless-runtime/interview/tactics.ts").ConfirmTacticDecisionInput,
+    ) =>
+      ipcRenderer.invoke("interview:confirmTacticDecision", projectPath, input) as Promise<
+        import("../headless-runtime/interview/tactics.ts").ConfirmTacticDecisionResult
+      >,
+    analyzeOneTactic: (projectPath: string, synthesisPath: string, asrId: string) =>
+      ipcRenderer.invoke("interview:analyzeOneTactic", projectPath, synthesisPath, asrId) as Promise<
+        | { ok: true; data: import("../headless-runtime/interview/tactics.ts").TacticsAnalysisOutput }
+        | { ok: false; error: string }
+      >,
+    consolidateTactics: (
+      projectPath: string,
+      recomendadas: Array<{
+        asrId: string;
+        atributo: string;
+        candidata: import("../headless-runtime/interview/tactics.ts").TacticaCandidata;
+      }>,
+    ) =>
+      ipcRenderer.invoke("interview:consolidateTactics", projectPath, recomendadas) as Promise<
+        | { ok: true; skipped: true }
+        | { ok: true; skipped: false; data: import("../headless-runtime/interview/tactics.ts").TacticsConsolidationOutput }
+        | { ok: false; error: string }
       >,
     addStory: (synthesisPath: string, input: UserStoryInput) =>
       ipcRenderer.invoke("interview:addStory", synthesisPath, input) as Promise<StoryMutationResult>,

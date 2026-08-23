@@ -50,6 +50,14 @@ import {
   backfillStoriesForSynthesis,
   loadSynthesis,
   synthesisFilePath,
+  analyzeTacticForAsr,
+  consolidateTactics,
+  validateFreeTextDecision,
+  confirmTacticDecision,
+  tacticsStatusForSynthesis,
+  formatDecisionsForPrompt,
+  type ConfirmTacticDecisionInput,
+  type TacticaCandidata,
   addUserStory,
   updateUserStory,
   deleteUserStory,
@@ -65,6 +73,7 @@ import {
   type TurnResult,
   type UserAnswerInput,
 } from "../headless-runtime/interview/index.ts";
+import { TacticaCandidataSchema } from "../headless-runtime/interview/schema.ts";
 
 // El contexto para el motor: el brief ACTIVO del proyecto (elegido por el
 // dueño en el modal de contexto), o el más reciente si no hay selección.
@@ -260,6 +269,17 @@ export function registerInterviewIpc(): void {
     },
   );
 
+  // Decisiones de arquitectura activas (ADRs) formateadas para inyección
+  // INLINE en RESOLVE/FIX/REVIEW/CONFLICT/PLANNING: lee el MANIFIESTO
+  // decisiones-activo.json, nunca parsea metadata de los markdown. "" si no
+  // hay ADRs activos: el prompt corre sin sección.
+  ipcMain.handle("interview:activeDecisionsText", (_event, projectPath: string) => {
+    if (typeof projectPath !== "string" || projectPath.length === 0) {
+      throw new Error("interview:activeDecisionsText requiere projectPath");
+    }
+    return formatDecisionsForPrompt(projectPath);
+  });
+
   // Migra una síntesis LEGACY (sin historias) derivando historias de sus RFs
   // en UNA llamada. Reescribe el JSON solo tras validar el documento completo.
   ipcMain.handle(
@@ -272,6 +292,171 @@ export function registerInterviewIpc(): void {
         throw new Error("interview:backfillStories requiere synthesisPath");
       }
       return backfillStoriesForSynthesis(projectPath, synthesisPath);
+    },
+  );
+
+  // ── Tácticas de arquitectura por ASR → ADR ──────────────────────────────
+  // Estado (qué ASR genuinos tienen ADR activo), análisis en paralelo con
+  // consolidación final, validación de texto libre y confirmación. Todo el
+  // orchestration vive acá en el proceso main: UNA sola ida del renderer.
+
+  ipcMain.handle(
+    "interview:tacticsStatus",
+    (_event, projectPath: string, synthesisPath: string) => {
+      if (typeof projectPath !== "string" || projectPath.length === 0) {
+        throw new Error("interview:tacticsStatus requiere projectPath");
+      }
+      if (typeof synthesisPath !== "string" || synthesisPath.length === 0) {
+        throw new Error("interview:tacticsStatus requiere synthesisPath");
+      }
+      return tacticsStatusForSynthesis(projectPath, synthesisPath);
+    },
+  );
+
+  // Lanza UNA llamada angosta POR cada ASR genuino en paralelo (sesión
+  // efímera propia por llamada) y DESPUÉS la consolidación con visión
+  // completa de las recomendadas. El resultado es POR ASR para que un fallo
+  // de uno no tire los demás y el reintento sea quirúrgico.
+  ipcMain.handle(
+    "interview:analyzeTactics",
+    async (_event, projectPath: string, synthesisPath: string) => {
+      if (typeof projectPath !== "string" || projectPath.length === 0) {
+        throw new Error("interview:analyzeTactics requiere projectPath");
+      }
+      if (typeof synthesisPath !== "string" || synthesisPath.length === 0) {
+        throw new Error("interview:analyzeTactics requiere synthesisPath");
+      }
+      const synthesis = loadSynthesis(synthesisPath);
+      if (!synthesis) {
+        return { ok: false as const, reason: "no_synthesis" as const, error: "La síntesis no existe o no es válida." };
+      }
+      const genuinos = (synthesis.atributos_de_calidad_y_asrs ?? []).filter((a) => a.es_asr_genuino === true);
+      if (genuinos.length === 0) {
+        return {
+          ok: false as const,
+          reason: "no_genuine_asrs" as const,
+          error: "No hay restricciones arquitectónicas genuinas en esta síntesis.",
+        };
+      }
+      const pares = await Promise.all(
+        genuinos.map(async (a) => [a.id, await analyzeTacticForAsr(projectPath, synthesis, a)] as const),
+      );
+      const resultados = Object.fromEntries(pares);
+      // La consolidación solo ve las recomendadas de los análisis exitosos:
+      // un ASR que falló no aporta recomendada, y no bloquea a los demás.
+      const recomendadas = genuinos.flatMap((a) => {
+        const r = resultados[a.id];
+        if (!r.ok) return [];
+        const rec = r.data.candidatas.find((c) => c.es_recomendada);
+        return rec ? [{ asrId: a.id, atributo: a.atributo, candidata: rec }] : [];
+      });
+      const consolidacion = await consolidateTactics(projectPath, recomendadas);
+      const consolidacionPayload = consolidacion.ok
+        ? consolidacion.skipped
+          ? { ok: true as const, skipped: true as const }
+          : { ok: true as const, skipped: false as const, data: consolidacion.data }
+        : { ok: false as const, error: consolidacion.error };
+      return { ok: true as const, resultados, consolidacion: consolidacionPayload };
+    },
+  );
+
+  // Reintento quirúrgico de UN solo ASR (los fallos no obligan a repetir las
+  // llamadas que ya salieron bien — cada una es una sesión efímera aparte).
+  ipcMain.handle(
+    "interview:analyzeOneTactic",
+    async (_event, projectPath: string, synthesisPath: string, asrId: string) => {
+      if (typeof projectPath !== "string" || projectPath.length === 0) {
+        throw new Error("interview:analyzeOneTactic requiere projectPath");
+      }
+      if (typeof synthesisPath !== "string" || synthesisPath.length === 0) {
+        throw new Error("interview:analyzeOneTactic requiere synthesisPath");
+      }
+      if (typeof asrId !== "string" || asrId.length === 0) {
+        throw new Error("interview:analyzeOneTactic requiere asrId");
+      }
+      const synthesis = loadSynthesis(synthesisPath);
+      if (!synthesis) {
+        return { ok: false as const, error: "La síntesis no existe o no es válida." };
+      }
+      const asr = (synthesis.atributos_de_calidad_y_asrs ?? []).find((a) => a.id === asrId);
+      if (!asr) {
+        return { ok: false as const, error: `El ASR ${asrId} no existe en esta síntesis.` };
+      }
+      return analyzeTacticForAsr(projectPath, synthesis, asr);
+    },
+  );
+
+  // Reintento de SOLO la consolidación (las candidatas ya están en el
+  // renderer; se re-envían acá en vez de re-analizar todos los ASR).
+  ipcMain.handle(
+    "interview:consolidateTactics",
+    (
+      _event,
+      projectPath: string,
+      recomendadas: Array<{ asrId: string; atributo: string; candidata: unknown }>,
+    ) => {
+      if (typeof projectPath !== "string" || projectPath.length === 0) {
+        throw new Error("interview:consolidateTactics requiere projectPath");
+      }
+      if (!Array.isArray(recomendadas)) {
+        throw new Error("interview:consolidateTactics requiere la lista de recomendadas");
+      }
+      // Las candidatas vienen del propio análisis previo del renderer: se
+      // re-validan contra el schema antes de entrar al prompt.
+      const validas = recomendadas.filter(
+        (r) =>
+          r &&
+          typeof r === "object" &&
+          typeof (r as { asrId?: unknown }).asrId === "string" &&
+          TacticaCandidataSchema.safeParse((r as { candidata?: unknown }).candidata).success,
+      ) as Array<{ asrId: string; atributo: string; candidata: TacticaCandidata }>;
+      return consolidateTactics(projectPath, validas);
+    },
+  );
+
+  // Validación NO bloqueante de una decisión en texto libre contra las
+  // restricciones globales; devuelve advertencia + Y-statement sin escribir
+  // nada (el usuario sigue siendo la autoridad final).
+  ipcMain.handle(
+    "interview:validateTacticText",
+    async (_event, projectPath: string, synthesisPath: string, asrId: string, textoLibre: string) => {
+      if (typeof projectPath !== "string" || projectPath.length === 0) {
+        throw new Error("interview:validateTacticText requiere projectPath");
+      }
+      if (typeof synthesisPath !== "string" || synthesisPath.length === 0) {
+        throw new Error("interview:validateTacticText requiere synthesisPath");
+      }
+      if (typeof asrId !== "string" || asrId.length === 0) {
+        throw new Error("interview:validateTacticText requiere asrId");
+      }
+      if (typeof textoLibre !== "string" || textoLibre.trim().length === 0) {
+        throw new Error("interview:validateTacticText requiere textoLibre");
+      }
+      const synthesis = loadSynthesis(synthesisPath);
+      if (!synthesis) {
+        return { ok: false as const, error: "La síntesis no existe o no es válida." };
+      }
+      const asr = (synthesis.atributos_de_calidad_y_asrs ?? []).find((a) => a.id === asrId);
+      if (!asr) {
+        return { ok: false as const, error: `El ASR ${asrId} no existe en esta síntesis.` };
+      }
+      return validateFreeTextDecision(projectPath, synthesis, asr, textoLibre.trim());
+    },
+  );
+
+  // Confirma una decisión (candidata elegida o texto libre ya validado):
+  // escribe el ADR markdown, supersedea el anterior si había y actualiza el
+  // manifiesto decisiones-activo.json atómicamente.
+  ipcMain.handle(
+    "interview:confirmTacticDecision",
+    async (_event, projectPath: string, input: ConfirmTacticDecisionInput) => {
+      if (typeof projectPath !== "string" || projectPath.length === 0) {
+        throw new Error("interview:confirmTacticDecision requiere projectPath");
+      }
+      if (!input || typeof input !== "object") {
+        throw new Error("interview:confirmTacticDecision requiere el payload de la decisión");
+      }
+      return confirmTacticDecision(projectPath, input);
     },
   );
 

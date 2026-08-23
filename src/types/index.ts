@@ -46,6 +46,15 @@ import type {
   StoryMutationResult,
   CurationKind,
 } from "../../headless-runtime/interview/index.ts";
+import type {
+  TacticStatusEntry,
+  TacticsAnalysisOutput,
+  TacticsConsolidationOutput,
+  DecisionValidationOutput,
+  ConfirmTacticDecisionInput,
+  ConfirmTacticDecisionResult,
+  TacticaCandidata,
+} from "../../headless-runtime/interview/tactics.ts";
 
 export type { Pin, PinLink, PinStatus, CreatePinInput, UpdatePinInput };
 export type { BriefInterviewPosition } from "../../headless-runtime/interview/index.ts";
@@ -1126,12 +1135,68 @@ export interface TermCanvasAPI {
     }>;
     setActiveRequirements: (projectPath: string, synthesisPath: string) => Promise<{ ok: boolean }>;
     activeRequirementsText: (projectPath: string, opts?: { includeStories?: boolean }) => Promise<string>;
+    activeDecisionsText: (projectPath: string) => Promise<string>;
     backfillStories: (
       projectPath: string,
       synthesisPath: string,
     ) => Promise<
       | { ok: true; synthesis: SynthesisResult }
       | { ok: false; reason: "no_synthesis" | "already_migrated" | "generation_failed"; error: string }
+    >;
+    tacticsStatus: (
+      projectPath: string,
+      synthesisPath: string,
+    ) => Promise<{ asrs: TacticStatusEntry[] }>;
+    analyzeTactics: (
+      projectPath: string,
+      synthesisPath: string,
+    ) => Promise<
+      | {
+          ok: true;
+          resultados: Record<
+            string,
+            | { ok: true; data: TacticsAnalysisOutput }
+            | { ok: false; error: string }
+          >;
+          consolidacion:
+            | { ok: true; skipped: true }
+            | { ok: true; skipped: false; data: TacticsConsolidationOutput }
+            | { ok: false; error: string };
+        }
+      | { ok: false; reason: "no_synthesis" | "no_genuine_asrs"; error: string }
+    >;
+    validateTacticText: (
+      projectPath: string,
+      synthesisPath: string,
+      asrId: string,
+      textoLibre: string,
+    ) => Promise<
+      | { ok: true; data: DecisionValidationOutput }
+      | { ok: false; error: string }
+    >;
+    confirmTacticDecision: (
+      projectPath: string,
+      input: ConfirmTacticDecisionInput,
+    ) => Promise<ConfirmTacticDecisionResult>;
+    analyzeOneTactic: (
+      projectPath: string,
+      synthesisPath: string,
+      asrId: string,
+    ) => Promise<
+      | { ok: true; data: TacticsAnalysisOutput }
+      | { ok: false; error: string }
+    >;
+    consolidateTactics: (
+      projectPath: string,
+      recomendadas: Array<{
+        asrId: string;
+        atributo: string;
+        candidata: TacticaCandidata;
+      }>,
+    ) => Promise<
+      | { ok: true; skipped: true }
+      | { ok: true; skipped: false; data: TacticsConsolidationOutput }
+      | { ok: false; error: string }
     >;
     addStory: (
       synthesisPath: string,
