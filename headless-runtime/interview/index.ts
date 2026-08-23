@@ -6,4 +6,5 @@ export * from "./brief.ts";
 export * from "./requirements.ts";
 export * from "./stories.ts";
 export * from "./curation.ts";
+export * from "./tactics.ts";
 export type { BriefDocument, UserStory, UserStoryInput } from "./schema.ts";

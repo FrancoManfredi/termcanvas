@@ -453,6 +453,7 @@ export const en = {
   phase_synthesis: "Requirements synthesis",
   phase_gap_check: "Final gap-check",
   phase_asr_review: "ASR review",
+  phase_tactics: "Architecture tactics (ASR)",
   phase_planner_roadmap: "Planner (roadmap)",
   phase_planner_audit: "Planner (audit)",
   phase_diagnosis_llm: "Diagnosis (LLM)",

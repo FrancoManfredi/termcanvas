@@ -30,6 +30,7 @@ export const PHASE_IDS = [
   "synthesis",
   "gapCheck",
   "asrReview",
+  "tactics",
   "diagnosisLlm",
 ] as const;
 
@@ -58,6 +59,10 @@ export const DEFAULT_PHASE_MODELS: Record<PhaseId, ModelRef | null> = {
   },
   gapCheck: { providerID: DEFAULT_PROVIDER_ID, modelID: HEAVY_MODEL_ID },
   asrReview: { providerID: DEFAULT_PROVIDER_ID, modelID: DEFAULT_MODEL_ID },
+  // Tácticas de arquitectura por ASR (candidatas, consolidación, validación
+  // de texto libre): llamadas angostas con json_schema — mismo camino rápido
+  // que los turnos del motor. Sin variant de thinking.
+  tactics: { providerID: DEFAULT_PROVIDER_ID, modelID: DEFAULT_MODEL_ID },
   // diagnosisLlm = flujo de Diagnóstico (Fase B, antes "planner audit").
   // Sin pin por default: usa el modelo global del CLI del usuario.
   diagnosisLlm: null,

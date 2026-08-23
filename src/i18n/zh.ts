@@ -443,6 +443,7 @@ export const zh = {
   phase_synthesis: "需求综合",
   phase_gap_check: "最终缺口检查",
   phase_asr_review: "ASR 审查",
+  phase_tactics: "架构战术（ASR）",
   phase_planner_roadmap: "规划器（路线图）",
   phase_planner_audit: "规划器（审计）",
   phase_diagnosis_llm: "诊断（LLM）",

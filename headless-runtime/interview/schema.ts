@@ -388,3 +388,133 @@ export const BackfillStoriesOutputSchema = z.object({
 export type BackfillStoriesOutput = z.infer<typeof BackfillStoriesOutputSchema>;
 
 export const BACKFILL_STORIES_SCHEMA = z.toJSONSchema(BackfillStoriesOutputSchema);
+
+// ─── Tácticas de arquitectura por ASR → ADR ──────────────────────────────
+// Un análisis POR ASR genuino (llamadas angostas separadas, mismo principio
+// de responsabilidad única del motor): candidatas de tácticas con
+// argumentación completa y UNA recomendada — la decisión final es siempre
+// humana. La consolidación (conflictos entre recomendadas de ASRs distintos)
+// y la validación de texto libre son llamadas aparte.
+//
+// NOTA de robustez: igual que el resto — el server 1.18.18 no aplica los
+// "required" ni los min/maxItems; los invariantes REALES (una sola
+// recomendada, conexión de negocio en el 100%, sacrificio declarado) se
+// validan en el predicate del caller (tactics.ts) para disparar reintento.
+// La consistencia de es_unica_viable con la longitud del array se SANITIZA
+// después de validar (ruido barato de reparar, no merece una re-llamada).
+
+export const CATEGORIAS_TACTICAS = [
+  "disponibilidad",
+  "rendimiento",
+  "seguridad",
+  "eficiencia_energetica",
+  "modificabilidad",
+  "despliegue",
+] as const;
+
+export const TacticaCandidataSchema = z.object({
+  nombre_tactica: z.string().min(1).catch("(sin tactica)").describe("Nombre de la táctica del catálogo (ej: Ping/Echo, Rollback, Cache, Autenticación)"),
+  proposito: z
+    .string()
+    .catch("(sin proposito)")
+    .describe("Subgrupo del catálogo al que pertenece: detección de fallas, recuperación, resistir ataques, detectar intrusiones, diferir binding time…"),
+  argumentacion: z
+    .string()
+    .catch("(sin argumentacion)")
+    .describe("Por qué esta táctica aplicaría a ESTE escenario específico — no una definición genérica de libro"),
+  trade_offs_para_este_proyecto: z
+    .string()
+    .catch("(sin trade-offs)")
+    .describe("Trade-offs CONCRETOS considerando las restricciones_globales reales (presupuesto, stack, tiempo) — no trade-offs abstractos"),
+  conexion_con_objetivo_de_negocio: z
+    .string()
+    .catch("(sin conexion)")
+    .describe("OBLIGATORIO en TODAS las candidatas (también en las descartadas): cómo esta táctica apoya la misión/visión/propuesta de valor del brief_contexto — nunca una justificación puramente técnica. Ej: 'permite time-to-market rápido del MVP sin comprometer estabilidad', no solo 'reduce latencia'"),
+  cumple_totalmente_la_restriccion: z
+    .boolean()
+    .catch(true)
+    .describe("false si esta candidata NO satisface completamente el ASR dentro del stack/presupuesto obligatorio — en ese caso, que_se_sacrifica es obligatorio"),
+  que_se_sacrifica: z
+    .string()
+    .nullable()
+    .catch(null)
+    .describe("Obligatorio si cumple_totalmente_la_restriccion=false: qué parte del ASR queda sin cubrir dentro de las restricciones dadas. NUNCA proponer cambiar una restricción obligatoria (stack, presupuesto) para resolverlo — solo declarar el sacrificio"),
+  es_recomendada: z.boolean().catch(false).describe("Exactamente UNA candidata por análisis lleva es_recomendada=true; el resto false"),
+  es_unica_viable: z
+    .boolean()
+    .catch(false)
+    .describe("true SOLO si es la ÚNICA candidata del array y no hay alternativas genuinas a comparar dadas las restricciones — nunca inventar alternativas débiles para llenar"),
+});
+
+export type TacticaCandidata = z.infer<typeof TacticaCandidataSchema>;
+
+export const TacticsAnalysisOutputSchema = z.object({
+  asr_id: z.string().min(1).catch("(sin asr)").describe("id del ASR analizado (mismo id de entrada)"),
+  categoria_atributo: z
+    .union([z.enum(CATEGORIAS_TACTICAS), z.string().min(1)])
+    .catch("(sin categoria)")
+    .describe(`Categoría del atributo según el catálogo de tácticas: ${CATEGORIAS_TACTICAS.join(" | ")}. Si el atributo del ASR no entra en ninguna, escribilo tal cual`),
+  candidatas: z.array(TacticaCandidataSchema).default([]),
+  justificacion_de_la_recomendada: z
+    .string()
+    .catch("(sin justificacion)")
+    .describe("Por qué la recomendada es la mejor opción DADAS las restricciones reales del proyecto, no en abstracto"),
+  y_statement: z
+    .string()
+    .min(1)
+    .catch("(sin y-statement)")
+    .describe("Resumen de UNA línea formato Y-statement para la RECOMENDADA: 'En el contexto de <ASR>, decidimos optar por <táctica> para lograr <beneficio>, aceptando <trade-off principal>'. Si el arquitecto elige otra candidata o escribe su propia decisión, este campo se regenera después en base a lo confirmado"),
+});
+
+export type TacticsAnalysisOutput = z.infer<typeof TacticsAnalysisOutputSchema>;
+
+// Output de la consolidación final (UNA llamada con visión completa después
+// de las paralelas): conflictos entre tácticas recomendadas de ASRs
+// distintos — lo que ATAM llama "tradeoff point": dos decisiones
+// individualmente correctas que se degradan mutuamente combinadas.
+export const ConflictoTacticasSchema = z.object({
+  asr_a: z.string().min(1).catch("(sin asr)").describe("id del primer ASR en tensión"),
+  tactica_a: z.string().min(1).catch("(sin tactica)").describe("nombre de la táctica recomendada del primer ASR"),
+  asr_b: z.string().min(1).catch("(sin asr)").describe("id del segundo ASR en tensión"),
+  tactica_b: z.string().min(1).catch("(sin tactica)").describe("nombre de la táctica recomendada del segundo ASR"),
+  explicacion: z
+    .string()
+    .catch("(sin explicacion)")
+    .describe("Por qué se degradan mutuamente combinadas y qué decisión concreta enfrenta el arquitecto. Ej: 'el cifrado constante en tránsito degrada la ganancia de latencia del cache — decidir si el cache guarda datos ya descifrados en memoria confiable, o aceptar la degradación'"),
+});
+
+export type ConflictoTacticas = z.infer<typeof ConflictoTacticasSchema>;
+
+export const TacticsConsolidationOutputSchema = z.object({
+  conflictos: z.array(ConflictoTacticasSchema).default([]),
+});
+
+export type TacticsConsolidationOutput = z.infer<typeof TacticsConsolidationOutputSchema>;
+
+// Validación de una decisión en texto libre (no bloqueante: se avisa, no se
+// impide — mismo principio que la detección de contradicciones del motor).
+// En la misma pasada genera el Y-statement de la decisión del arquitecto
+// (para texto libre no hay campos estructurados de donde armarlo
+// determinísticamente).
+export const DecisionValidationOutputSchema = z.object({
+  aparta_de_restriccion: z
+    .boolean()
+    .catch(false)
+    .describe("true si la decisión propuesta CHOCA con alguna restricción_global (stack obligatorio, presupuesto, tiempo)"),
+  advertencia: z
+    .string()
+    .nullable()
+    .catch(null)
+    .describe("Si aparta_de_restriccion=true: qué restricción choca y cómo (texto para mostrarle al arquitecto ANTES de escribir el ADR). El usuario sigue siendo la autoridad final: puede confirmar igual. null si no hay choque"),
+  y_statement: z
+    .string()
+    .min(1)
+    .catch("(sin y-statement)")
+    .describe("Y-statement de UNA línea para la decisión escrita por el arquitecto: 'En el contexto de <ASR>, decidimos <decisión> para lograr <beneficio>, aceptando <trade-off principal>'"),
+});
+
+export type DecisionValidationOutput = z.infer<typeof DecisionValidationOutputSchema>;
+
+export const TACTICS_ANALYSIS_SCHEMA = z.toJSONSchema(TacticsAnalysisOutputSchema);
+export const TACTICS_CONSOLIDATION_SCHEMA = z.toJSONSchema(TacticsConsolidationOutputSchema);
+export const DECISION_VALIDATION_SCHEMA = z.toJSONSchema(DecisionValidationOutputSchema);

@@ -21,8 +21,8 @@ import {
   type PhaseId,
 } from "../shared/phaseModels.ts";
 
-test("PHASE_IDS cubre las 8 fases del plan y no tiene duplicados", () => {
-  assert.equal(PHASE_IDS.length, 6);
+test("PHASE_IDS cubre las 7 fases del plan y no tiene duplicados", () => {
+  assert.equal(PHASE_IDS.length, 7);
   assert.equal(new Set(PHASE_IDS).size, PHASE_IDS.length);
 });
 
@@ -36,7 +36,7 @@ test("isPhaseId acepta solo claves del contrato", () => {
 
 test("defaults fieles a la conducta actual del motor (SDK)", () => {
   // Turnos: opencode-go/hy3 sin variant.
-  for (const fase of ["brief", "requirements", "asrReview"] as PhaseId[]) {
+  for (const fase of ["brief", "requirements", "asrReview", "tactics"] as PhaseId[]) {
     const ref = DEFAULT_PHASE_MODELS[fase];
     assert.deepEqual(ref, { providerID: DEFAULT_PROVIDER_ID, modelID: DEFAULT_MODEL_ID });
     assert.equal(ref?.variant, undefined);
