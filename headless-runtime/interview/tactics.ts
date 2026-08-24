@@ -27,6 +27,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import {
   ensureClient,
   promptStructured,
@@ -292,6 +293,69 @@ function isValidDecisionValidation(value: unknown): value is DecisionValidationO
   return true;
 }
 
+// ─── Blindaje: watchdog + sesión efímera acotada ─────────────────────────
+// session.create del SDK NO tiene timeout propio: con un server trabado que
+// abre puerto pero no responde, la llamada queda colgada para siempre. Dos
+// capas duras INDEPENDIENTES de los reintentos internos del motor (que hoy
+// pueden estirar ~18 min por ASR en el peor caso):
+//   - carrera de 60s sobre session.create;
+//   - watchdog TOTAL por llamada al modelo.
+
+const SESSION_CREATE_TIMEOUT_MS = 60_000;
+export const TACTICA_WATCHDOG_MS_DEFAULT = 8 * 60 * 1000;
+let tacticaWatchdogMs = TACTICA_WATCHDOG_MS_DEFAULT;
+
+/** Seam para tests: achicar el watchdog sin esperar minutos reales. */
+export function setTacticaWatchdogMs(ms: number): void {
+  tacticaWatchdogMs = ms;
+}
+
+function conWatchdog<T>(promesa: Promise<T>, etiqueta: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const vencimiento = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            `${etiqueta}: excedió el tiempo total (${Math.round(tacticaWatchdogMs / 60000)} min). Reintentá.`,
+          ),
+        ),
+      tacticaWatchdogMs,
+    );
+  });
+  return Promise.race([promesa, vencimiento]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+async function crearSesionEfimera(
+  client: OpencodeClient,
+  title: string,
+  directory: string,
+): Promise<{ id: string }> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const res = await Promise.race([
+      client.session.create({ title, directory }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () =>
+            reject(
+              new Error(`No se pudo crear la sesión "${title}": tiempo de espera excedido.`),
+            ),
+          SESSION_CREATE_TIMEOUT_MS,
+        );
+      }),
+    ]);
+    if (res.error || !res.data) {
+      throw new Error(JSON.stringify(res.error));
+    }
+    return res.data;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 // ─── Llamada 1: análisis por ASR (con catálogo de la categoría) ──────────
 
 export type TacticAnalysisResult =
@@ -336,34 +400,40 @@ export async function analyzeTacticForAsr(
   const briefText = contexto ? formatBriefForPrompt(contexto.brief) : "(sin brief de contexto)";
   const prompt = buildAnalysisPrompt(synthesis, asr, briefText, catalogo);
   // Trazabilidad pedida por el dueño: el prompt completo de cada ASR queda
-  // en la consola del proceso main (terminal donde corre electron).
+  // en la consola del proceso main (terminal donde corre electron — NUNCA en
+  // DevTools del renderer).
   console.log(`[tácticas ${asr.id}] prompt (${prompt.length} chars):\n${prompt}`);
 
   // Sesión efímera REAL por llamada: NO se pasa session_id vacío (el SDK
   // armaría "/session//message" y el server respondería HTML — ver nota en
   // requirements.ts). Se libera en finally, best-effort.
-  const client = await ensureClient();
-  const sesion = await client.session.create({
-    title: `Tácticas de arquitectura ${asr.id}`,
-    directory: projectPath,
-  });
-  if (sesion.error || !sesion.data) {
-    return {
-      ok: false,
-      error: `No se pudo crear la sesión de análisis (${asr.id}): ${JSON.stringify(sesion.error)}`,
-    };
-  }
-  const fakeLedger = { session_id: sesion.data.id, project_path: projectPath } as unknown as InterviewLedger;
+  console.log(`[tácticas ${asr.id}] llamando al modelo…`);
+  let client: OpencodeClient;
+  let sesionId: string;
   try {
-    const res = await promptStructured(
-      fakeLedger,
-      TACTICS_ANALYSIS_SCHEMA,
-      prompt,
-      crearPredicateTacticas(catalogo.headings),
+    client = await ensureClient();
+    sesionId = (
+      await crearSesionEfimera(client, `Tácticas de arquitectura ${asr.id}`, projectPath)
+    ).id;
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(`[tácticas ${asr.id}] terminó con error (sesión): ${msg}`);
+    return { ok: false, error: msg };
+  }
+  const fakeLedger = { session_id: sesionId, project_path: projectPath } as unknown as InterviewLedger;
+  try {
+    const res = await conWatchdog(
+      promptStructured(
+        fakeLedger,
+        TACTICS_ANALYSIS_SCHEMA,
+        prompt,
+        crearPredicateTacticas(catalogo.headings),
+        `Tácticas ${asr.id}`,
+        SYNTHESIS_TIMEOUT_MS,
+        undefined,
+        "tactics",
+      ),
       `Tácticas ${asr.id}`,
-      SYNTHESIS_TIMEOUT_MS,
-      undefined,
-      "tactics",
     );
     // asr_id y categoria_atributo los fija el MOTOR con los datos de entrada
     // (transcripción fiel): el eco del modelo no manda.
@@ -372,6 +442,7 @@ export async function analyzeTacticForAsr(
       asr_id: asr.id,
       categoria_atributo: catalogo.categoria,
     });
+    console.log(`[tácticas ${asr.id}] terminó ok`);
     return {
       ok: true,
       data,
@@ -379,7 +450,9 @@ export async function analyzeTacticForAsr(
       categoriaConfiada: mapeo.confiado,
     };
   } catch (err) {
-    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(`[tácticas ${asr.id}] terminó con error: ${msg}`);
+    return { ok: false, error: msg };
   } finally {
     try {
       await client.session.delete({ sessionID: fakeLedger.session_id });
@@ -405,32 +478,38 @@ export async function consolidateTactics(
   if (recomendadas.length < 2) return { ok: true, skipped: true };
 
   const prompt = buildConsolidationPrompt(recomendadas);
-  const client = await ensureClient();
-  const sesion = await client.session.create({
-    title: "Consolidación de tácticas (conflictos)",
-    directory: projectPath,
-  });
-  if (sesion.error || !sesion.data) {
-    return {
-      ok: false,
-      error: `No se pudo crear la sesión de consolidación: ${JSON.stringify(sesion.error)}`,
-    };
-  }
-  const fakeLedger = { session_id: sesion.data.id, project_path: projectPath } as unknown as InterviewLedger;
+  console.log(`[tácticas] consolidación llamando al modelo (${recomendadas.length} recomendadas)…`);
+  let client: OpencodeClient;
+  let sesionId: string;
   try {
-    const res = await promptStructured(
-      fakeLedger,
-      TACTICS_CONSOLIDATION_SCHEMA,
-      prompt,
-      isValidConsolidation,
-      "Consolidación de tácticas",
-      SYNTHESIS_TIMEOUT_MS,
-      undefined,
-      "tactics",
-    );
-    return { ok: true, skipped: false, data: res.data };
+    client = await ensureClient();
+    sesionId = (
+      await crearSesionEfimera(client, "Consolidación de tácticas (conflictos)", projectPath)
+    ).id;
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+  const fakeLedger = { session_id: sesionId, project_path: projectPath } as unknown as InterviewLedger;
+  try {
+    const res = await conWatchdog(
+      promptStructured(
+        fakeLedger,
+        TACTICS_CONSOLIDATION_SCHEMA,
+        prompt,
+        isValidConsolidation,
+        "Consolidación de tácticas",
+        SYNTHESIS_TIMEOUT_MS,
+        undefined,
+        "tactics",
+      ),
+      "Consolidación de tácticas",
+    );
+    console.log("[tácticas] consolidación terminó ok");
+    return { ok: true, skipped: false, data: res.data };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.log(`[tácticas] consolidación terminó con error: ${msg}`);
+    return { ok: false, error: msg };
   } finally {
     try {
       await client.session.delete({ sessionID: fakeLedger.session_id });
@@ -453,28 +532,30 @@ export async function validateFreeTextDecision(
   textoLibre: string,
 ): Promise<FreeTextValidationResult> {
   const prompt = buildValidationPrompt(synthesis, asr, textoLibre);
-  const client = await ensureClient();
-  const sesion = await client.session.create({
-    title: `Validación de decisión propia (${asr.id})`,
-    directory: projectPath,
-  });
-  if (sesion.error || !sesion.data) {
-    return {
-      ok: false,
-      error: `No se pudo crear la sesión de validación: ${JSON.stringify(sesion.error)}`,
-    };
-  }
-  const fakeLedger = { session_id: sesion.data.id, project_path: projectPath } as unknown as InterviewLedger;
+  let client: OpencodeClient;
+  let sesionId: string;
   try {
-    const res = await promptStructured(
-      fakeLedger,
-      DECISION_VALIDATION_SCHEMA,
-      prompt,
-      isValidDecisionValidation,
+    client = await ensureClient();
+    sesionId = (
+      await crearSesionEfimera(client, `Validación de decisión propia (${asr.id})`, projectPath)
+    ).id;
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+  const fakeLedger = { session_id: sesionId, project_path: projectPath } as unknown as InterviewLedger;
+  try {
+    const res = await conWatchdog(
+      promptStructured(
+        fakeLedger,
+        DECISION_VALIDATION_SCHEMA,
+        prompt,
+        isValidDecisionValidation,
+        `Validación de decisión ${asr.id}`,
+        SYNTHESIS_TIMEOUT_MS,
+        undefined,
+        "tactics",
+      ),
       `Validación de decisión ${asr.id}`,
-      SYNTHESIS_TIMEOUT_MS,
-      undefined,
-      "tactics",
     );
     return { ok: true, data: res.data };
   } catch (err) {
@@ -986,11 +1067,14 @@ export function leerEstadoAnalisis(
 ): EstadoAnalisisTacticas {
   const doc = leerAnalisisDoc(projectPath);
   if (!doc || doc.synthesis_path !== synthesisPath) return { estado: "idle" };
-  if (
-    doc.estado === "running" &&
-    Date.now() - Date.parse(doc.iniciado_at) > STALE_ANALISIS_MS
-  ) {
-    return { estado: "stale", doc };
+  if (doc.estado === "running") {
+    // Un doc "running" SIN run vivo en este proceso = interrumpido (la app
+    // se cerró o murió a mitad): stale INMEDIATO, sin esperar el umbral.
+    // El umbral viejo queda solo como red de seguridad extra.
+    if (!analisisEnCurso(synthesisPath)) return { estado: "stale", doc };
+    if (Date.now() - Date.parse(doc.iniciado_at) > STALE_ANALISIS_MS) {
+      return { estado: "stale", doc };
+    }
   }
   return { estado: doc.estado, doc };
 }
@@ -1060,6 +1144,9 @@ export async function ejecutarAnalisisTacticas(
   // hasta terminar y persiste cada hito.
   void (async () => {
     try {
+      console.log(
+        `[tácticas] run iniciado (${genuinos.length} ASR: ${genuinos.map((a) => a.id).join(", ")})`,
+      );
       const ahora = new Date().toISOString();
       const doc: AnalisisTacticasDoc = {
         synthesis_path: synthesisPath,
@@ -1096,12 +1183,15 @@ export async function ejecutarAnalisisTacticas(
       }
       docFinal.estado = "done";
       escribirAnalisisDoc(projectPath, docFinal);
+      console.log("[tácticas] run terminado (done)");
     } catch (err) {
       // Catastrófico (p.ej. sin permisos de escritura): queda registrado.
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(`[tácticas] run terminado con error global: ${msg}`);
       const doc = leerAnalisisDoc(projectPath);
       if (doc && doc.synthesis_path === synthesisPath) {
         doc.estado = "error";
-        doc.error_global = err instanceof Error ? err.message : String(err);
+        doc.error_global = msg;
         escribirAnalisisDoc(projectPath, doc);
       }
     } finally {
@@ -1131,6 +1221,9 @@ export async function ejecutarReintentoTactico(
   runsActivos.add(synthesisPath);
   void (async () => {
     try {
+      console.log(
+        `[tácticas] reintento iniciado (${asrId}${categoriaExplicita ? `, categoría ${categoriaExplicita}` : ""})`,
+      );
       const docExistente = leerAnalisisDoc(projectPath);
       const doc: AnalisisTacticasDoc =
         docExistente && docExistente.synthesis_path === synthesisPath

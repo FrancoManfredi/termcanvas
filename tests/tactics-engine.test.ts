@@ -45,6 +45,10 @@ import {
   mapearAtributoACategoria,
   type CategoriaTactica,
 } from "../shared/tacticCategorias.ts";
+import {
+  setTacticaWatchdogMs,
+  TACTICA_WATCHDOG_MS_DEFAULT,
+} from "../headless-runtime/interview/tactics.ts";
 import type { SynthesisResult, AsrItem } from "../headless-runtime/interview/schema.ts";
 import type { TacticaCandidata, ConflictoTacticas } from "../headless-runtime/interview/tactics.ts";
 import { setCatalogClient } from "../electron/model-catalog.ts";
@@ -78,7 +82,10 @@ interface PromptCall {
   parts: { type: string; text: string }[];
 }
 
-function makeMockClient(prompts: ((req: PromptCall) => unknown)[] = []) {
+function makeMockClient(
+  prompts: ((req: PromptCall) => unknown)[] = [],
+  opts?: { createError?: string },
+) {
   const calls = {
     create: [] as { title: string; directory: string }[],
     prompt: [] as PromptCall[],
@@ -90,6 +97,7 @@ function makeMockClient(prompts: ((req: PromptCall) => unknown)[] = []) {
     session: {
       create: async (input: { title: string; directory: string }) => {
         calls.create.push(input);
+        if (opts?.createError) throw new Error(opts.createError);
         return { data: { id: `ses_mock_${calls.create.length}` }, error: null };
       },
       prompt: async (input: PromptCall) => {
@@ -950,4 +958,78 @@ test("confirmar decisión poda la entrada del análisis pendiente; sin pendiente
   });
   assert.ok(res.ok);
   assert.equal(fs.existsSync(analisisTacticasPath(tmp)), false, "sin pendientes no queda archivo");
+});
+
+// ─── Blindaje: watchdog + sesión acotada + recuperación instantánea ──────
+
+test("watchdog: un modelo colgado NO cuelga la llamada — corta con error claro", async () => {
+  setTacticaWatchdogMs(80);
+  try {
+    const { client } = makeMockClient([
+      () => new Promise(() => {}), // el prompt nunca responde
+    ]);
+    setTestClient(client);
+    const res = await analizarPrimero();
+    assert.equal(res.ok, false);
+    if (!res.ok && !("reason" in res)) {
+      assert.match(res.error, /excedió el tiempo total/);
+    }
+  } finally {
+    setTacticaWatchdogMs(TACTICA_WATCHDOG_MS_DEFAULT);
+  }
+});
+
+test("fallo de sesión (server caído) vuelve como error per-ASR, sin colgar el job", async () => {
+  const { client } = makeMockClient([], { createError: "connect ECONNREFUSED" });
+  setTestClient(client);
+
+  // Llamada directa: ok:false con el mensaje del fallo.
+  const directa = await analizarPrimero();
+  assert.equal(directa.ok, false);
+  if (!directa.ok && !("reason" in directa)) assert.match(directa.error, /ECONNREFUSED/);
+
+  // Job completo: el ASR queda en error y el doc llega a done (no running).
+  const arranque = await ejecutarAnalisisTacticas(tmp, synthesisPath);
+  assert.deepEqual(arranque, { started: true });
+  await esperarHasta(() => leerEstadoAnalisis(tmp, synthesisPath).estado === "done");
+  const final = leerEstadoAnalisis(tmp, synthesisPath);
+  if (final.estado !== "done") return;
+  for (const entry of Object.values(final.doc.resultados_por_asr)) {
+    assert.equal(entry.estado, "error");
+  }
+});
+
+test("leerEstadoAnalisis: doc running SIN run vivo = stale INMEDIATO; CON run vivo = running", async () => {
+  // Doc fresco (timestamp de ahora) sin ningún run activo → stale igual.
+  fs.mkdirSync(path.join(tmp, ".agents", "architecture"), { recursive: true });
+  fs.writeFileSync(
+    analisisTacticasPath(tmp),
+    JSON.stringify({
+      synthesis_path: synthesisPath,
+      estado: "running",
+      iniciado_at: new Date().toISOString(),
+      actualizado_at: new Date().toISOString(),
+      resultados_por_asr: { "ASR-001": { estado: "corriendo" } },
+      consolidacion: { estado: "pendiente" },
+    }),
+  );
+  assert.equal(leerEstadoAnalisis(tmp, synthesisPath).estado, "stale");
+
+  // Con un run VIVO para esa síntesis → running legítimo (no stale).
+  let liberar!: () => void;
+  const puerta = new Promise<void>((resolve) => {
+    liberar = resolve;
+  });
+  const { client } = makeMockClient([
+    async () => {
+      await puerta;
+      return okPrompt(analysisPayload([candidata({ es_recomendada: true })]));
+    },
+  ]);
+  setTestClient(client);
+  await ejecutarAnalisisTacticas(tmp, synthesisPath); // pisa el doc a running
+  const durante = leerEstadoAnalisis(tmp, synthesisPath);
+  assert.equal(durante.estado, "running", "con run vivo el doc NO es stale");
+  liberar();
+  await esperarHasta(() => leerEstadoAnalisis(tmp, synthesisPath).estado === "done");
 });

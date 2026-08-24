@@ -150,7 +150,8 @@ export function ArchitectureTacticsSection() {
       if (remoto.estado === "stale") {
         setRun({
           phase: "error",
-          error: "El análisis quedó interrumpido (la app se cerró a mitad de camino). Reintentá.",
+          error:
+            "El análisis quedó interrumpido (se cerró la app o murió a mitad de camino). Reintentá.",
         });
         return "error";
       }
