@@ -18,6 +18,7 @@
 import { ipcMain } from "electron";
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   cancelInterviewSession,
   setPhaseActivityListener,
@@ -80,7 +81,11 @@ import { isCategoriaTactica } from "../shared/tacticCategorias.ts";
 
 // Catálogo de tácticas empaquetado: prod = <resources>/architecture-tactics
 // (extraResources del builder); dev = <repo>/resources/architecture-tactics.
-// Mismo patrón que getSkillsSourceDir en skill-manager.ts.
+// Mismo patrón que getSkillsSourceDir en skill-manager.ts. El bundle de main
+// es ESM ("type": "module"): __dirname se shimea desde import.meta.url igual
+// que en main.ts.
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 const catalogoProdDir = path.join(process.resourcesPath ?? "", "architecture-tactics");
 setCatalogoTacticasBaseDir(
   fs.existsSync(catalogoProdDir)
