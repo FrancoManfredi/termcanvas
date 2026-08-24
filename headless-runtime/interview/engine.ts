@@ -54,6 +54,7 @@ import {
   fetchModelCatalog,
   validatePhaseAgainstCatalog,
 } from "../../electron/model-catalog.ts";
+import { encontrarPuertoServidor } from "./puerto-libre.ts";
 
 export { QUESTION_SCHEMA, GAP_CHECK_SCHEMA, ASR_REVIEW_SCHEMA, SYNTHESIS_SCHEMA, QuestionOutputSchema, GapCheckResultSchema, AsrReviewVerdictSchema, SynthesisSchema } from "./schema.ts";
 export type { QuestionOutput, GapCheckResult, GapRecord, AsrReviewVerdict, SynthesisResult } from "./schema.ts";
@@ -405,14 +406,15 @@ export async function ensureClient(): Promise<OpencodeClient> {
     let lastError: unknown;
     for (let attempt = 0; attempt < SERVER_START_RETRIES; attempt++) {
       try {
+        // Puerto VALIDADO (bind real) y fuera del rango dinámico de Windows:
+        // el sorteo crudo [20000,65000) pisa a veces puertos efímeros en uso
+        // por conexiones salientes y `opencode serve` crashea con un
+        // críptico "Server exited with code 1 — Unexpected error/ServeError"
+        // (bun no reporta EADDRINUSE legible). Reproducido 1/8 veces.
+        const port = await encontrarPuertoServidor(20000, 45000);
         const server = await createOpencodeServer({
           hostname: "127.0.0.1",
-          // Puerto efímero ALEATORIO, no 0: `opencode serve --port=0` mapea
-          // al default 4096, y un `opencode serve` huérfano de otra sesión
-          // que haya quedado en 4096 hace que el arranque se cuelgue hasta el
-          // timeout ("Timeout waiting for server to start"). Un puerto alto
-          // aleatorio evita esa colisión con restos de procesos viejos.
-          port: 20000 + Math.floor(Math.random() * 45000),
+          port,
           timeout: SERVER_START_TIMEOUT_MS,
         });
         runningServer = server;
@@ -423,6 +425,11 @@ export async function ensureClient(): Promise<OpencodeClient> {
         console.warn(
           `[interview] no se pudo arrancar el server de opencode (intento ${attempt + 1}/${SERVER_START_RETRIES}): ${err instanceof Error ? err.message : String(err)}`,
         );
+        // Backoff: los fallos transitorios (puerto recién liberado, estado
+        // del SO) no se repiten necesariamente al instante.
+        if (attempt < SERVER_START_RETRIES - 1) {
+          await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+        }
       }
     }
     throw lastError instanceof Error ? lastError : new Error("No se pudo arrancar el server de opencode.");

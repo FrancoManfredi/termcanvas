@@ -32,6 +32,7 @@ import {
   type ModelRef,
   type PhaseId,
 } from "../shared/phaseModels";
+import { encontrarPuertoServidor } from "../headless-runtime/interview/puerto-libre.ts";
 
 // ─── Tipos públicos (canónicos en shared, re-exportados por compat) ──────
 
@@ -120,10 +121,10 @@ async function ensureCatalogClient(): Promise<CatalogClient> {
     try {
       const server = await createOpencodeServer({
         hostname: "127.0.0.1",
-        // Puerto alto ALEATORIO, nunca 0: `opencode serve --port=0` mapea al
-        // default 4096 y un server huérfano de otra sesión cuelga el arranque
-        // hasta el timeout (lección ya aprendida en engine.ts).
-        port: 20000 + Math.floor(Math.random() * 45000),
+        // Puerto VALIDADO (bind real) y fuera del rango dinámico de Windows:
+        // mismo fix que engine.ensureClient (crash críptico ServeError cuando
+        // el sorteo pisaba un puerto efímero en uso).
+        port: await encontrarPuertoServidor(20000, 45000),
         timeout: CATALOG_SERVER_TIMEOUT_MS,
       });
       runningServer = server;
