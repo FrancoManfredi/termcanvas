@@ -179,6 +179,7 @@ function buildAnalysisPrompt(
     catalogo.contenido,
     "",
     "REGLAS:",
+    "- Máximo 4 candidatas en total: elegí las de mayor impacto real para ESTE ASR.",
     "- Devolvé SOLO candidatas genuinamente viables dadas las restricciones reales. Si solo existe UNA táctica realista, devolvé una sola con es_unica_viable=true — NUNCA inventes una segunda opción débil solo para llenar un mínimo.",
     "- Exactamente UNA candidata con es_recomendada=true; todas las demás false.",
     "- La argumentación y los trade-offs deben citar datos reales del proyecto (stack, presupuesto y tiempos de RESTRICCIONES GLOBALES), no generalidades de libro.",
@@ -251,7 +252,11 @@ function crearPredicateTacticas(headings: string[]) {
     const parsed = TacticsAnalysisOutputSchema.safeParse(value);
     if (!parsed.success) return false;
     const d = parsed.data;
-    if (d.candidatas.length < 1 || d.candidatas.length > 4) return false;
+    // Vacío sí es fallo genuino (sin candidatas no hay análisis); el EXCESO
+    // (>4) NO reintenta: se recorta determinísticamente en sanitizarCandidatas
+    // — el modelo tiende a entregar 5-6 tácticas válidas del catálogo y los
+    // reintentos ciegos solo repetían el mismo fracaso (bug ASR-001/003).
+    if (d.candidatas.length < 1) return false;
     // Exactamente UNA recomendada.
     if (d.candidatas.filter((c) => c.es_recomendada).length !== 1) return false;
     // Conexión con objetivo de negocio OBLIGATORIA en el 100% de las
@@ -267,14 +272,32 @@ function crearPredicateTacticas(headings: string[]) {
   };
 }
 
-// length===1 ⇔ es_unica_viable: una sola tarjeta DEBE llevar el badge (si el
-// modelo lo omitió, la señal visual se perdería) y varias tarjetas NUNCA
-// pueden llevarlo (sería mentira visual). Determinístico, cero re-llamadas.
-function sanitizeUnicidad(data: TacticsAnalysisOutput): TacticsAnalysisOutput {
-  const unica = data.candidatas.length === 1;
+// Sanitización post-parse (no dispara reintentos):
+//   1. RECORTE a 4: si vienen más, quedan la recomendada + las primeras en
+//      orden de llegada hasta completar (preserva el orden original). El
+//      modelo demostró entregar 5-6 válidas seguidas y el recorte le ahorra
+//      al usuario elegir entre 6 tarjetas sin valor agregado.
+//   2. Unicidad length===1 ⇔ es_unica_viable: una sola tarjeta DEBE llevar el
+//      badge (si el modelo lo omitió, la señal visual se perdería) y varias
+//      tarjetas NUNCA pueden llevarlo (sería mentira visual).
+function sanitizarCandidatas(
+  data: TacticsAnalysisOutput,
+  etiqueta: string,
+): TacticsAnalysisOutput {
+  let candidatas = data.candidatas;
+  if (candidatas.length > 4) {
+    const recomendada = candidatas.find((c) => c.es_recomendada);
+    const otras = candidatas.filter((c) => !c.es_recomendada).slice(0, 3);
+    const aConservar = new Set([recomendada!, ...otras]);
+    candidatas = candidatas.filter((c) => aConservar.has(c));
+    console.log(
+      `[tácticas ${etiqueta}] ${data.candidatas.length} candidatas > máximo 4: se conservan la recomendada + las primeras 3.`,
+    );
+  }
+  const unica = candidatas.length === 1;
   return {
     ...data,
-    candidatas: data.candidatas.map((c) => ({ ...c, es_unica_viable: unica })),
+    candidatas: candidatas.map((c) => ({ ...c, es_unica_viable: unica })),
   };
 }
 
@@ -437,11 +460,10 @@ export async function analyzeTacticForAsr(
     );
     // asr_id y categoria_atributo los fija el MOTOR con los datos de entrada
     // (transcripción fiel): el eco del modelo no manda.
-    const data = sanitizeUnicidad({
-      ...res.data,
-      asr_id: asr.id,
-      categoria_atributo: catalogo.categoria,
-    });
+    const data = sanitizarCandidatas(
+      { ...res.data, asr_id: asr.id, categoria_atributo: catalogo.categoria },
+      asr.id,
+    );
     console.log(`[tácticas ${asr.id}] terminó ok`);
     return {
       ok: true,

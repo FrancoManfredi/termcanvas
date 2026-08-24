@@ -217,6 +217,10 @@ Texto de la táctica.
 #### ${TACTICA_TERCIARIA}
 
 Texto de la táctica.
+
+#### Introducir concurrencia
+
+Texto de la táctica.
 `;
 
 const CATALOGO_SEGURIDAD = `### 2.5.4 Tácticas para la seguridad
@@ -455,6 +459,47 @@ test("analyzeTacticForAsr: exige sacrificio declarado cuando cumple_totalmente=f
   const res = await analizarPrimero();
   assert.equal(res.ok, false);
   if (!res.ok && !("reason" in res)) assert.match(res.error, /fuera de contrato/);
+});
+
+test("analyzeTacticForAsr: >4 candidatas válidas se RECORTAN a recomendada + primeras 3 (sin reintento)", async () => {
+  // Bug real ASR-001/003: el modelo entrega 5-6 tácticas legítimas del
+  // catálogo y los reintentos ciegos repetían el mismo fracaso. Ahora se
+  // repara determinísticamente.
+  const logs: string[] = [];
+  const spy = mock.method(console, "log", (...args: unknown[]) => {
+    logs.push(args.map(String).join(" "));
+  });
+  try {
+    const payload = analysisPayload([
+      candidata({ nombre_tactica: TACTICA_TERCIARIA }),
+      candidata({ nombre_tactica: TACTICA_SECUNDARIA }),
+      candidata({ nombre_tactica: TACTICA_PRINCIPAL, es_recomendada: true }),
+      candidata({ nombre_tactica: TACTICA_CUARTA }),
+      candidata({ nombre_tactica: "Introducir concurrencia" }), // 5ta → fuera
+    ]);
+    const { client, calls } = makeMockClient([() => okPrompt(payload)]);
+    setTestClient(client);
+
+    const res = await analizarPrimero();
+    assert.ok(res.ok, "el exceso de candidatas ya no es motivo de rechazo");
+    if (!res.ok) return;
+    assert.equal(calls.prompt.length, 1, "cero reintentos: recorte en una pasada");
+    assert.equal(res.data.candidatas.length, 4);
+    // La recomendada sobrevive siempre; el orden original se preserva.
+    assert.equal(res.data.candidatas.find((c) => c.es_recomendada)?.nombre_tactica, TACTICA_PRINCIPAL);
+    assert.deepEqual(
+      res.data.candidatas.map((c) => c.nombre_tactica),
+      [TACTICA_TERCIARIA, TACTICA_SECUNDARIA, TACTICA_PRINCIPAL, TACTICA_CUARTA],
+    );
+    assert.ok(
+      logs.some((l) => l.includes("[tácticas ASR-001] 5 candidatas > máximo 4")),
+      "el recorte queda trazado en consola",
+    );
+    // Con 4 candidatas ninguna lleva el flag de única viable.
+    assert.ok(res.data.candidatas.every((c) => !c.es_unica_viable));
+  } finally {
+    spy.mock.restore();
+  }
 });
 
 // ─── Consolidación ────────────────────────────────────────────────────────
