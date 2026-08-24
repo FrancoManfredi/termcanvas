@@ -115,7 +115,7 @@ export function ContextSyncCard() {
   return (
     <div className="p-3 rounded-lg border border-[var(--border)] bg-[var(--bg)] space-y-2">
       <div className="flex items-center justify-between gap-2">
-        <div className="min-w-0">
+        <div className="min-w-0 self-center">
           <p className="text-[11px] font-semibold text-[var(--text-primary)]">
             Sincronización entre máquinas
           </p>
@@ -126,7 +126,7 @@ export function ContextSyncCard() {
         {needsInit ? (
           <button
             type="button"
-            className="btn btn-primary text-[11px] py-1 px-2.5 min-h-[30px] shrink-0"
+            className="btn btn-primary text-[11px] py-1 px-2.5 min-h-[30px] shrink-0 self-center"
             disabled={busy}
             onClick={() => setConfirmInitOpen(true)}
           >
@@ -135,7 +135,7 @@ export function ContextSyncCard() {
         ) : (
           <button
             type="button"
-            className="btn btn-primary text-[11px] py-1 px-2.5 min-h-[30px] shrink-0"
+            className="btn btn-primary text-[11px] py-1 px-2.5 min-h-[30px] shrink-0 self-center"
             disabled={busy || !hasLocalAgents}
             onClick={() => void syncNow()}
             title="Pull + push del contexto .agents"

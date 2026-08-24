@@ -21,9 +21,16 @@ export type CoreSubcategory =
   | "glossary"
   | "planning_diagnosis"
   | "planning_roadmap"
-  | "github_issues";
+  | "github_issues"
+  | "sync";
 
-export type SectionGroup = "entrevistas" | "post" | "planning" | "integraciones";
+export type SectionGroup =
+  | "entrevistas"
+  | "post"
+  | "planning"
+  | "integraciones"
+  // Grupo anclado al footer fijo del sidebar (fuera del scroll).
+  | "sincronizacion";
 
 // ─── Iconos (mismos SVG que el diseño) ──────────────────────────────────
 
@@ -69,6 +76,14 @@ export const QualityIcon = () => (
 export const TacticsIcon = () => (
   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
     <polygon points="12 2 19 21 12 17 5 21 12 2"></polygon>
+  </svg>
+);
+
+export const SyncIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <polyline points="23 4 23 10 17 10"></polyline>
+    <polyline points="1 20 1 14 7 14"></polyline>
+    <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
   </svg>
 );
 

@@ -1,19 +1,18 @@
-// Sección POST ENTREVISTAS → Tácticas de Arquitectura (ASR → ADR).
+// Sección PLANNING → Tácticas de Arquitectura (ASR → ADR).
 //
-// Mismo patrón interactivo que la entrevista y la migración legacy: opciones
-// con argumentación visible + siempre disponible el texto libre, estado local
-// explícito idle/running/done/error por el CTA global y POR ASR (un fallo
-// nunca es silencioso y el reintento es quirúrgico). La decisión final es
-// SIEMPRE humana: el análisis propone candidatas con UNA recomendada, el
-// arquitecto confirma.
+// El análisis corre como TRABAJO DE FONDO en el proceso main: esta sección
+// solo ARRANCA el job y REFLEJA el estado persistido en
+// <repo>/.agents/architecture/analisis-tacticas.json vía polling (~2s).
+// Cerrar el modal o navegar no interrumpe nada; cerrar la APP a mitad de
+// camino deja el doc marcado como interrumpido (stale) con reintento; los
+// resultados terminados sobreviven al cierre para elegir con calma.
 //
-// Flujo: analizar (N llamadas paralelas + consolidación de conflictos) →
-// elegir candidata o escribir decisión propia (con validación no bloqueante)
-// → confirmar → ADR markdown en <repo>/.agents/architecture/decisions/ +
-// manifiesto decisiones-activo.json. Re-analizar un ASR con ADR activo crea
-// uno nuevo y supersede al anterior (nunca se edita in-place).
+// Mismo patrón interactivo que la entrevista: candidatas con argumentación
+// visible + siempre disponible el texto libre (con validación no bloqueante),
+// conflictos de la consolidación como alerta NO bloqueante, y la decisión
+// final SIEMPRE humana por tarjeta.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useCoreModal } from "../context";
 import { NoSynthesis, SearchHeader, SynthLoading } from "../sectionChrome";
@@ -53,17 +52,39 @@ interface AdvertenciaLibre {
   textoLibre: string;
 }
 
+type ResultadoAsr =
+  | { ok: true; data: TacticsAnalysisOutput; categoriaUsada: string; categoriaConfiada: boolean }
+  | { ok: false; reason?: "categoria_no_mapeada"; atributo?: string; error: string };
+
+interface DocAnalisis {
+  estado: "running" | "done" | "error";
+  iniciado_at: string;
+  resultados_por_asr: Record<string, { estado: string; resultado?: ResultadoAsr; error?: string }>;
+  consolidacion?: {
+    estado: string;
+    data?: { conflictos?: ConflictoTacticas[] };
+    error?: string;
+  };
+  error_global?: string;
+}
+
+type EstadoRemoto =
+  | { estado: "idle" }
+  | { estado: "stale"; doc: DocAnalisis }
+  | { estado: "running" | "done" | "error"; doc: DocAnalisis };
+
+const POLL_MS = 2000;
+
 export function ArchitectureTacticsSection() {
-  const { synthesis, synthesisPath, synthLoading } = useCoreModal();
+  const { synthesis, synthesisPath, synthLoading, search } = useCoreModal();
   const hasSynthesis = synthesis !== null;
 
-  // ── Estado del análisis ────────────────────────────────────────────────
+  // ── Estado espejo del job de fondo ─────────────────────────────────────
   const [run, setRun] = useState<{ phase: "idle" | "running" | "done" | "error"; error?: string }>({
     phase: "idle",
   });
   const [status, setStatus] = useState<TacticStatusEntry[]>([]);
   const [analisis, setAnalisis] = useState<Record<string, TacticsAnalysisOutput>>({});
-  // Metadatos del mapeo atributo → categoría (para el fallback manual).
   const [metaAnalisis, setMetaAnalisis] = useState<
     Record<string, { categoriaUsada: string; confiado: boolean }>
   >({});
@@ -78,10 +99,18 @@ export function ArchitectureTacticsSection() {
   const [textoLibre, setTextoLibre] = useState<Record<string, string>>({});
   const [confirmando, setConfirmando] = useState<string | null>(null);
   const [advertencia, setAdvertencia] = useState<AdvertenciaLibre | null>(null);
-  // Categoría elegida manualmente cuando el mapeo automático no confió.
   const [categoriaManual, setCategoriaManual] = useState<Record<string, string>>({});
 
+  const prevPhaseRef = useRef<"idle" | "running" | "done" | "error">("idle");
+
   const genuinos = status.filter((a) => a.es_asr_genuino);
+  const q = search.trim().toLowerCase();
+  const visibles = genuinos.filter(
+    (g) =>
+      !q ||
+      g.asrId.toLowerCase().includes(q) ||
+      g.atributo.toLowerCase().includes(q),
+  );
 
   const loadStatus = useCallback(async () => {
     if (!synthesisPath) return;
@@ -95,28 +124,7 @@ export function ArchitectureTacticsSection() {
     }
   }, [synthesisPath]);
 
-  // Al cambiar de síntesis activa se limpia TODO el estado efímero: otro
-  // proyecto/entrevista no puede heredar selecciones ni conflictos.
-  useEffect(() => {
-    void loadStatus();
-    setRun({ phase: "idle" });
-    setAnalisis({});
-    setMetaAnalisis({});
-    setErroresAnalisis({});
-    setConflictos(null);
-    setConflictosError(null);
-    setSeleccion({});
-    setTextoLibre({});
-    setAdvertencia(null);
-    setCategoriaManual({});
-  }, [synthesisPath, loadStatus]);
-
-  const registrarResultado = (
-    asrId: string,
-    r:
-      | { ok: true; data: TacticsAnalysisOutput; categoriaUsada: string; categoriaConfiada: boolean }
-      | { ok: false; reason?: "categoria_no_mapeada"; atributo?: string; error: string },
-  ) => {
+  const registrarResultado = useCallback((asrId: string, r: ResultadoAsr) => {
     if (r.ok) {
       setAnalisis((prev) => ({ ...prev, [asrId]: r.data }));
       setMetaAnalisis((prev) => ({
@@ -134,28 +142,98 @@ export function ArchitectureTacticsSection() {
         [asrId]: { mensaje: friendlyTacticsError(r.error), sinCategoria: r.reason === "categoria_no_mapeada" },
       }));
     }
-  };
+  }, []);
+
+  const aplicarEstadoRemoto = useCallback(
+    (remoto: EstadoRemoto): "idle" | "running" | "stale" | "done" | "error" => {
+      if (remoto.estado === "idle") return "idle";
+      if (remoto.estado === "stale") {
+        setRun({
+          phase: "error",
+          error: "El análisis quedó interrumpido (la app se cerró a mitad de camino). Reintentá.",
+        });
+        return "error";
+      }
+      const doc = remoto.doc;
+      for (const [asrId, entry] of Object.entries(doc.resultados_por_asr ?? {})) {
+        if (entry.estado === "corriendo") continue;
+        if (entry.resultado) registrarResultado(asrId, entry.resultado);
+        else
+          setErroresAnalisis((e) => ({
+            ...e,
+            [asrId]: { mensaje: friendlyTacticsError(entry.error ?? "Fallo desconocido.") },
+          }));
+      }
+      const c = doc.consolidacion;
+      if (c?.estado === "skipped") {
+        setConflictosError(null);
+        setConflictos([]);
+      } else if (c?.estado === "ok") {
+        setConflictosError(null);
+        setConflictos(c.data?.conflictos ?? []);
+      } else if (c?.estado === "error") {
+        setConflictos(null);
+        setConflictosError(c.error ?? "No se pudo ejecutar la consolidación.");
+      }
+      if (doc.error_global) {
+        setRun({ phase: "error", error: friendlyTacticsError(doc.error_global) });
+        return "error";
+      }
+      const fase: "running" | "done" = remoto.estado === "running" ? "running" : "done";
+      setRun({ phase: fase });
+      return remoto.estado;
+    },
+    [registrarResultado],
+  );
+
+  const refrescarEstadoRemoto = useCallback(async () => {
+    const active = resolveActiveWorktree();
+    if (!active || !synthesisPath) return;
+    try {
+      const remoto = await window.termcanvas.interview.tacticsAnalysisState(active.path, synthesisPath);
+      const antes = prevPhaseRef.current;
+      const nueva = aplicarEstadoRemoto(remoto);
+      prevPhaseRef.current = nueva === "idle" ? antes : (nueva as typeof antes);
+      // Transición running → done detectada por el poll: aviso no intrusivo.
+      if (antes === "running" && nueva !== "running" && nueva !== "idle") {
+        useNotificationStore.getState().notify("info", "Análisis de tácticas terminado.");
+      }
+    } catch {
+      // Best-effort: un poll fallido no rompe nada.
+    }
+  }, [synthesisPath, aplicarEstadoRemoto]);
+
+  // Al cambiar de síntesis activa se limpia TODO el estado efímero y se
+  // hidrata desde disco: otro proyecto/entrevista no hereda selecciones, y
+  // un análisis en curso/terminado reaparece aunque se haya cerrado todo.
+  useEffect(() => {
+    void loadStatus();
+    setRun({ phase: "idle" });
+    setAnalisis({});
+    setMetaAnalisis({});
+    setErroresAnalisis({});
+    setConflictos(null);
+    setConflictosError(null);
+    setSeleccion({});
+    setTextoLibre({});
+    setAdvertencia(null);
+    setCategoriaManual({});
+    void refrescarEstadoRemoto();
+  }, [synthesisPath, loadStatus, refrescarEstadoRemoto]);
+
+  // Polling SOLO mientras hay trabajo en vuelo (el job vive en el proceso
+  // main: este componente puede desmontarse sin consecuencias).
+  useEffect(() => {
+    if (run.phase !== "running" || !synthesisPath) return;
+    const timer = setInterval(() => void refrescarEstadoRemoto(), POLL_MS);
+    return () => clearInterval(timer);
+  }, [run.phase, synthesisPath, refrescarEstadoRemoto]);
 
   const conflictsFor = useCallback(
     (asrId: string): ConflictoTacticas[] =>
       (conflictos ?? []).filter((c) => c.asr_a === asrId || c.asr_b === asrId),
     [conflictos],
   );
-
-  const aplicarConsolidacion = (
-    c:
-      | { ok: true; skipped: true }
-      | { ok: true; skipped: false; data: { conflictos: ConflictoTacticas[] } }
-      | { ok: false; error: string },
-  ) => {
-    if (!c.ok) {
-      setConflictos(null);
-      setConflictosError(c.error);
-      return;
-    }
-    setConflictosError(null);
-    setConflictos(c.skipped ? [] : c.data.conflictos);
-  };
 
   const runAnalysis = async () => {
     const active = resolveActiveWorktree();
@@ -164,25 +242,28 @@ export function ArchitectureTacticsSection() {
       return;
     }
     setRun({ phase: "running" });
+    prevPhaseRef.current = "running";
     try {
       const res = await window.termcanvas.interview.analyzeTactics(active.path, synthesisPath);
-      if (!res.ok) {
-        setRun({ phase: "error", error: friendlyTacticsError(res.error) });
-        return;
+      if (!res.started && res.motivo !== "ya_en_curso") {
+        setRun({
+          phase: "error",
+          error:
+            res.motivo === "no_genuine_asrs"
+              ? "No hay restricciones arquitectónicas genuinas en esta síntesis."
+              : res.motivo === "no_synthesis"
+                ? "La síntesis no existe o no es válida."
+                : "No se pudo iniciar el análisis.",
+        });
       }
-      for (const [asrId, r] of Object.entries(res.resultados)) {
-        registrarResultado(asrId, r);
-      }
-      aplicarConsolidacion(res.consolidacion);
-      setRun({ phase: "done" });
+      // El primer tick del poll trae el estado real del doc.
     } catch (err) {
       setRun({ phase: "error", error: friendlyTacticsError(err instanceof Error ? err.message : String(err)) });
     }
   };
 
-  // Reintento quirúrgico: SOLO el ASR que falló (las llamadas exitosas no se
-  // repiten ni se paga otra vez la consolidación). Si el usuario eligió una
-  // categoría manualmente, viaja como explícita.
+  // Reintento quirúrgico: SOLO el ASR indicado (lo lanza el proceso main;
+  // este componente solo marca el poll activo y limpia el error local).
   const retryOne = async (asrId: string) => {
     const active = resolveActiveWorktree();
     if (!active || !synthesisPath) return;
@@ -191,15 +272,15 @@ export function ArchitectureTacticsSection() {
       delete next[asrId];
       return next;
     });
+    setRun((r) => (r.phase === "running" ? r : { phase: "running" }));
+    prevPhaseRef.current = "running";
     try {
-      const categoria = categoriaManual[asrId];
-      const res = await window.termcanvas.interview.analyzeOneTactic(
+      await window.termcanvas.interview.analyzeOneTactic(
         active.path,
         synthesisPath,
         asrId,
-        categoria,
+        categoriaManual[asrId],
       );
-      registrarResultado(asrId, res);
     } catch (err) {
       setErroresAnalisis((e) => ({
         ...e,
@@ -221,7 +302,12 @@ export function ArchitectureTacticsSection() {
     setConflictosError(null);
     try {
       const res = await window.termcanvas.interview.consolidateTactics(active.path, recomendadas);
-      aplicarConsolidacion(res);
+      if (!res.ok) {
+        setConflictosError(res.error);
+      } else {
+        setConflictosError(null);
+        setConflictos(res.skipped ? [] : res.data.conflictos);
+      }
     } catch (err) {
       setConflictosError(err instanceof Error ? err.message : String(err));
     }
@@ -230,7 +316,7 @@ export function ArchitectureTacticsSection() {
   const confirmarConPayload = async (
     entry: TacticStatusEntry,
     payload: ConfirmTacticDecisionInput,
-  ) => {
+  ): Promise<boolean> => {
     const active = resolveActiveWorktree();
     if (!active) {
       useNotificationStore.getState().notify("error", "No hay un proyecto activo.");
@@ -252,7 +338,7 @@ export function ArchitectureTacticsSection() {
         useNotificationStore.getState().notify("error", res.error);
         return false;
       }
-      await loadStatus();
+      await Promise.all([loadStatus(), refrescarEstadoRemoto()]);
       setSeleccion((s) => {
         const next = { ...s };
         delete next[entry.asrId];
@@ -374,8 +460,8 @@ export function ArchitectureTacticsSection() {
       <div className="space-y-4">
         <SearchHeader
           label="Tácticas de arquitectura por ASR"
-          count={`${genuinos.length} ASR genuinos`}
-          placeholder=""
+          count={`${visibles.length} de ${genuinos.length} ASR genuinos`}
+          placeholder="Buscar ASR…"
           actions={
             <button
               type="button"
@@ -422,7 +508,10 @@ export function ArchitectureTacticsSection() {
         {run.phase === "running" && (
           <div className="flex items-center gap-2.5 text-xs text-[var(--text-muted)]">
             <div className="w-4 h-4 rounded-full border-2 border-[var(--border)] border-t-[var(--accent)] animate-spin" />
-            <span>Analizando tácticas por cada ASR genuino… (una llamada por ASR, luego consolidación)</span>
+            <span>
+              Analizando en segundo plano — podés cerrar este modal o seguir trabajando: los resultados
+              quedan acá al volver.
+            </span>
           </div>
         )}
 
@@ -463,9 +552,9 @@ export function ArchitectureTacticsSection() {
           </div>
         )}
 
-        {/* Tarjetas: una por ASR genuino. */}
+        {/* Tarjetas: una por ASR genuino visible según búsqueda. */}
         <div className="space-y-3">
-          {genuinos.map((entry) => {
+          {visibles.map((entry) => {
             const analysis = analisis[entry.asrId];
             const errorAsr = erroresAnalisis[entry.asrId];
             const sel = seleccion[entry.asrId];

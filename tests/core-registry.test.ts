@@ -15,7 +15,7 @@ import {
 } from "../src/components/core/registry.tsx";
 import type { SynthesisResult } from "../headless-runtime/interview/index.ts";
 
-test("SECTION_REGISTRY cubre exactamente las 11 subcategorías sin duplicados", () => {
+test("SECTION_REGISTRY cubre exactamente las 12 subcategorías sin duplicados", () => {
   const ids = SECTION_REGISTRY.map((def) => def.id);
   const uniqueIds = new Set(ids);
   assert.equal(uniqueIds.size, ids.length, "ids duplicados en el registro");
@@ -32,6 +32,7 @@ test("SECTION_REGISTRY cubre exactamente las 11 subcategorías sin duplicados", 
     "planning_diagnosis",
     "planning_roadmap",
     "github_issues",
+    "sync",
   ] as const;
   for (const expected of EXPECTED) {
     assert.ok(
@@ -73,6 +74,20 @@ test("sectionById resuelve cada id y cae a functional_requirements ante desconoc
   // funcional_requirements (índice 3 del registro).
   const fallback = sectionById("no_existe" as never);
   assert.equal(fallback.id, "functional_requirements");
+});
+
+test("ubicación de las secciones movidas: tácticas en PLANNING y sync en su grupo fijo", () => {
+  const byId = (id: string) => SECTION_REGISTRY.find((def) => def.id === id)!;
+  // Las decisiones de arquitectura condicionan diagnóstico y planning.
+  assert.equal(byId("architecture_tactics").group, "planning");
+  // Sincronización vive en su propio grupo anclado al footer del sidebar.
+  assert.equal(byId("sync").group, "sincronizacion");
+
+  const ordenGrupos = SECTION_GROUPS.map((g) => g.id);
+  assert.equal(ordenGrupos[ordenGrupos.length - 1], "sincronizacion", "SINCRONIZACIÓN es el último grupo (footer fijo)");
+
+  const enPlanning = SECTION_REGISTRY.filter((d) => d.group === "planning").map((d) => d.id);
+  assert.equal(enPlanning[0], "architecture_tactics", "tácticas abre el grupo PLANNING");
 });
 
 test("badges estáticos y derivados de síntesis devuelven strings", () => {

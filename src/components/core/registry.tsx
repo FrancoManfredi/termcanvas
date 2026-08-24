@@ -17,6 +17,7 @@ import {
   PlannerIcon,
   QualityIcon,
   RequirementsIcon,
+  SyncIcon,
   TacticsIcon,
   UserStoryIcon,
   type CoreSubcategory,
@@ -28,6 +29,7 @@ import { UserStoriesSection } from "./sections/UserStoriesSection";
 import { FunctionalRequirementsSection } from "./sections/FunctionalRequirementsSection";
 import { QualityAttributesSection } from "./sections/QualityAttributesSection";
 import { ArchitectureTacticsSection } from "./sections/ArchitectureTacticsSection";
+import { SyncSection } from "./sections/SyncSection";
 import { ConstraintsSection } from "./sections/ConstraintsSection";
 import { GlossarySection } from "./sections/GlossarySection";
 import { PlanningDiagnosisSection } from "./sections/PlanningDiagnosisSection";
@@ -57,6 +59,13 @@ export const SECTION_GROUPS: Array<{ id: SectionGroup; heading: string; ariaLabe
   { id: "post", heading: "POST ENTREVISTAS", ariaLabel: "Navegación Post Entrevistas" },
   { id: "planning", heading: "PLANNING", ariaLabel: "Navegación de Planning" },
   { id: "integraciones", heading: "INTEGRACIONES", ariaLabel: "Navegación de Integraciones" },
+  // Grupo anclado al FONDO del sidebar (footer fijo, fuera del scroll):
+  // la sincronización entre máquinas es transversal a todas las fases.
+  {
+    id: "sincronizacion",
+    heading: "SINCRONIZACIÓN",
+    ariaLabel: "Navegación de Sincronización",
+  },
 ];
 
 export const SECTION_REGISTRY: SectionDef[] = [
@@ -101,18 +110,6 @@ export const SECTION_REGISTRY: SectionDef[] = [
     Component: QualityAttributesSection,
   },
   {
-    // El badge cuenta los ASR GENUINOS: son los únicos que disparan el
-    // análisis de tácticas (las preferencias UX no requieren la disciplina).
-    id: "architecture_tactics",
-    group: "post",
-    icon: TacticsIcon,
-    label: "Tácticas de Arquitectura",
-    badge: countOf(
-      (s) => (s.atributos_de_calidad_y_asrs ?? []).filter((q) => q.es_asr_genuino).length,
-    ),
-    Component: ArchitectureTacticsSection,
-  },
-  {
     id: "constraints",
     group: "post",
     icon: ConstraintsIcon,
@@ -127,6 +124,20 @@ export const SECTION_REGISTRY: SectionDef[] = [
     label: "Glosario del Proyecto",
     badge: countOf((s) => Object.keys(s.glosario_de_terminos ?? {}).length),
     Component: GlossarySection,
+  },
+  {
+    // Las decisiones de arquitectura condicionan el diagnóstico y la
+    // planificación: primera posición del grupo PLANNING. El badge cuenta los
+    // ASR GENUINOS: son los únicos que disparan el análisis (las preferencias
+    // UX no requieren la disciplina).
+    id: "architecture_tactics",
+    group: "planning",
+    icon: TacticsIcon,
+    label: "Tácticas de Arquitectura",
+    badge: countOf(
+      (s) => (s.atributos_de_calidad_y_asrs ?? []).filter((q) => q.es_asr_genuino).length,
+    ),
+    Component: ArchitectureTacticsSection,
   },
   {
     id: "planning_diagnosis",
@@ -151,6 +162,16 @@ export const SECTION_REGISTRY: SectionDef[] = [
     label: "GitHub Issues",
     badge: "IA",
     Component: GithubIssuesSection,
+  },
+  {
+    // Sincronización entre máquinas: grupo anclado al fondo del sidebar
+    // (el shell la renderiza en un footer fijo, fuera del scroll).
+    id: "sync",
+    group: "sincronizacion",
+    icon: SyncIcon,
+    label: "Sincronización",
+    badge: "Repo",
+    Component: SyncSection,
   },
 ];
 

@@ -258,10 +258,11 @@ export function CoreArchitectureModal({
         className="w-[92vw] max-w-[1400px] h-[90vh] max-h-[900px] bg-[var(--surface)] border border-[var(--border)] rounded-xl shadow-2xl flex overflow-hidden tc-enter relative"
       >
         <CoreModalContext.Provider value={ctxValue}>
-          {/* Sidebar de navegación (desde el registro de secciones) */}
-          <aside className="w-64 bg-[var(--bg)] border-r border-[var(--border)] flex flex-col justify-between p-4 shrink-0 overflow-y-auto">
-            <div className="space-y-5">
-              {SECTION_GROUPS.map((group, groupIdx) => (
+          {/* Sidebar de navegación: grupos scrolleables + footer FIJO con la
+              sección de Sincronización (transversal, siempre visible abajo). */}
+          <aside className="w-64 bg-[var(--bg)] border-r border-[var(--border)] flex flex-col shrink-0 overflow-hidden">
+            <div className="flex-1 overflow-y-auto p-4 space-y-5">
+              {SECTION_GROUPS.filter((group) => group.id !== "sincronizacion").map((group, groupIdx, arr) => (
                 <div
                   key={group.id}
                   className={`space-y-1.5 ${groupIdx > 0 ? "pt-2 border-t border-[var(--border)]" : ""}`}
@@ -292,9 +293,45 @@ export function CoreArchitectureModal({
                       );
                     })}
                   </nav>
+                  {groupIdx === arr.length - 1 && <div className="pt-2" />}
                 </div>
               ))}
             </div>
+
+            {/* Footer fijo: SINCRONIZACIÓN (nunca scrollea). */}
+            {SECTION_GROUPS.filter((group) => group.id === "sincronizacion").map((group) => (
+              <div
+                key={group.id}
+                className="shrink-0 border-t border-[var(--border)] p-4 space-y-1.5 bg-[var(--bg)]"
+              >
+                <span className="text-[10px] font-mono tracking-wider text-[var(--text-muted)] uppercase block px-1 font-semibold">
+                  {group.heading}
+                </span>
+                <nav className="space-y-1" aria-label={group.ariaLabel}>
+                  {SECTION_REGISTRY.filter((def) => def.group === group.id).map((def) => {
+                    const Icon = def.icon;
+                    const isActive = activeSubcategory === def.id;
+                    return (
+                      <button
+                        key={def.id}
+                        type="button"
+                        aria-current={isActive ? "page" : undefined}
+                        className={sidebarBtnClass(isActive)}
+                        onClick={() => navigate(def.id)}
+                      >
+                        <div className="flex items-center gap-2 truncate">
+                          <Icon />
+                          <span className="truncate">{def.label}</span>
+                        </div>
+                        <span className="text-[9.5px] font-mono shrink-0 tabular-nums">
+                          {sectionBadge(def, { synthesis })}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </nav>
+              </div>
+            ))}
           </aside>
 
           {/* Panel principal */}
