@@ -85,6 +85,10 @@ export function adrManifestPath(projectPath: string): string {
   return path.join(architectureDir(projectPath), "decisiones-activo.json");
 }
 
+export function analisisTacticasPath(projectPath: string): string {
+  return path.join(architectureDir(projectPath), "analisis-tacticas.json");
+}
+
 // ─── Manifiesto de ADRs activos ──────────────────────────────────────────
 // Mapa asr_id → ADR activo. RESOLVE/REVIEW/FIX/PLANNING consultan ESTO, no
 // parsean metadata de los markdown en tiempo real (barato y confiable).
@@ -331,6 +335,9 @@ export async function analyzeTacticForAsr(
   const contexto = getActiveBrief(projectPath) ?? findLatestBriefDocument(projectPath);
   const briefText = contexto ? formatBriefForPrompt(contexto.brief) : "(sin brief de contexto)";
   const prompt = buildAnalysisPrompt(synthesis, asr, briefText, catalogo);
+  // Trazabilidad pedida por el dueño: el prompt completo de cada ASR queda
+  // en la consola del proceso main (terminal donde corre electron).
+  console.log(`[tácticas ${asr.id}] prompt (${prompt.length} chars):\n${prompt}`);
 
   // Sesión efímera REAL por llamada: NO se pasa session_id vacío (el SDK
   // armaría "/session//message" y el server respondería HTML — ver nota en
@@ -838,6 +845,10 @@ export async function confirmTacticDecision(
   };
   writeAdrManifest(projectPath, manifest);
 
+  // La decisión está tomada: la entrada sale de los pendientes (el archivo
+  // completo desaparece cuando no queda ninguna sin decidir).
+  podarEntradaAnalisis(projectPath, input.synthesisPath, input.asrId);
+
   return {
     ok: true,
     adrNumero: `ADR-${nnn}`,
@@ -908,4 +919,268 @@ export function formatDecisionsForPrompt(projectPath: string): string {
     "- NO propongas una táctica alternativa sin justificar explícitamente por qué la ya decidida no aplica a este caso puntual.",
     "- Si al explorar el código notás que la implementación existente parece seguir un ADR reemplazado, señalalo EXPLÍCITAMENTE en tu resumen final como posibilidad a verificar (no como hecho confirmado) — podría requerir migrar la implementación. Comentarios `// @follows ADR-XXX` en el código, si existen, son evidencia más fuerte; el mecanismo no depende de que existan.",
   ].join("\n");
+}
+
+// ─── Análisis como TRABAJO DE FONDO persistido ───────────────────────────
+// El análisis corre EN EL PROCESO MAIN desacoplado de la UI: cerrar el modal
+// o la app no lo cancela (cerrar la app sí — al reabrir, el estado queda en
+// disco y los resultados terminados se muestran para elegir). La fuente de
+// verdad es analisis-tacticas.json junto a las decisiones: se escribe
+// atómicamente después de CADA evento (arranque, ASR terminal, consolidación)
+// para que un crash nunca pierda más que el ASR en vuelo.
+
+export interface AnalisisAsrEntry {
+  estado: "corriendo" | "ok" | "error";
+  resultado?: TacticAnalysisResult;
+  error?: string;
+}
+
+export interface AnalisisTacticasDoc {
+  synthesis_path: string;
+  estado: "running" | "done" | "error";
+  iniciado_at: string;
+  actualizado_at: string;
+  resultados_por_asr: Record<string, AnalisisAsrEntry>;
+  consolidacion: {
+    estado: "pendiente" | "ok" | "skipped" | "error";
+    data?: TacticsConsolidationOutput;
+    error?: string;
+  };
+  error_global?: string;
+}
+
+export type EstadoAnalisisTacticas =
+  | { estado: "idle" }
+  | { estado: "stale"; doc: AnalisisTacticasDoc }
+  | { estado: "running" | "done" | "error"; doc: AnalisisTacticasDoc };
+
+// Un run completo (2-4 ASR) no debería superar esto ni de cerca: si el doc
+// quedó "running" con timestamp viejo es que la app murió a mitad de camino.
+const STALE_ANALISIS_MS = 45 * 60 * 1000;
+
+function leerAnalisisDoc(projectPath: string): AnalisisTacticasDoc | null {
+  const p = analisisTacticasPath(projectPath);
+  if (!fs.existsSync(p)) return null;
+  try {
+    const raw = JSON.parse(fs.readFileSync(p, "utf-8")) as AnalisisTacticasDoc;
+    if (!raw || typeof raw !== "object" || typeof raw.synthesis_path !== "string") return null;
+    if (!raw.resultados_por_asr || typeof raw.resultados_por_asr !== "object") return null;
+    return raw;
+  } catch {
+    return null;
+  }
+}
+
+function escribirAnalisisDoc(projectPath: string, doc: AnalisisTacticasDoc): void {
+  fs.mkdirSync(architectureDir(projectPath), { recursive: true });
+  doc.actualizado_at = new Date().toISOString();
+  // Una sola escritura con el documento ya armado en memoria: quien lee ve
+  // siempre JSON válido.
+  fs.writeFileSync(analisisTacticasPath(projectPath), JSON.stringify(doc, null, 2));
+}
+
+/** Estado del análisis para la UI, con detección de run interrumpido. */
+export function leerEstadoAnalisis(
+  projectPath: string,
+  synthesisPath: string,
+): EstadoAnalisisTacticas {
+  const doc = leerAnalisisDoc(projectPath);
+  if (!doc || doc.synthesis_path !== synthesisPath) return { estado: "idle" };
+  if (
+    doc.estado === "running" &&
+    Date.now() - Date.parse(doc.iniciado_at) > STALE_ANALISIS_MS
+  ) {
+    return { estado: "stale", doc };
+  }
+  return { estado: doc.estado, doc };
+}
+
+function podarEntradaAnalisis(projectPath: string, synthesisPath: string, asrId: string): void {
+  const doc = leerAnalisisDoc(projectPath);
+  if (!doc || doc.synthesis_path !== synthesisPath) return;
+  delete doc.resultados_por_asr[asrId];
+  if (Object.keys(doc.resultados_por_asr).length === 0) {
+    try {
+      fs.rmSync(analisisTacticasPath(projectPath));
+    } catch {
+      // Best-effort: sin pendientes el archivo sobrante es inofensivo.
+    }
+    return;
+  }
+  escribirAnalisisDoc(projectPath, doc);
+}
+
+// Un solo run activo por síntesis: re-clicar "Analizar" mientras corre no
+// duplica llamadas ni pisa el doc a mitad de escritura.
+const runsActivos = new Set<string>();
+
+export function analisisEnCurso(synthesisPath: string): boolean {
+  return runsActivos.has(synthesisPath);
+}
+
+async function consolidarYSeguir(
+  projectPath: string,
+  doc: AnalisisTacticasDoc,
+  sintesis: SynthesisResult,
+): Promise<void> {
+  const recomendadas = Object.entries(doc.resultados_por_asr).flatMap(([asrId, entry]) => {
+    const r = entry.resultado;
+    if (!entry || entry.estado !== "ok" || !r || !r.ok) return [];
+    const rec = r.data.candidatas.find((c) => c.es_recomendada);
+    const atributo = sintesis.atributos_de_calidad_y_asrs.find((a) => a.id === asrId)?.atributo ?? "";
+    return rec ? [{ asrId, atributo, candidata: rec }] : [];
+  });
+  const c = await consolidateTactics(projectPath, recomendadas);
+  if (!c.ok) {
+    doc.consolidacion = { estado: "error", error: c.error };
+  } else if (c.skipped) {
+    doc.consolidacion = { estado: "skipped" };
+  } else {
+    doc.consolidacion = { estado: "ok", data: c.data };
+  }
+}
+
+/**
+ * Arranca el análisis COMPLETO como trabajo de fondo: vuelve inmediatamente
+ * ({ started }) y el progreso va quedando en analisis-tacticas.json. Nunca
+ * lanza: los fallos viven en el doc.
+ */
+export async function ejecutarAnalisisTacticas(
+  projectPath: string,
+  synthesisPath: string,
+): Promise<{ started: boolean; motivo?: string }> {
+  if (runsActivos.has(synthesisPath)) return { started: false, motivo: "ya_en_curso" };
+  const synthesis = loadSynthesis(synthesisPath);
+  if (!synthesis) return { started: false, motivo: "no_synthesis" };
+  const genuinos = (synthesis.atributos_de_calidad_y_asrs ?? []).filter((a) => a.es_asr_genuino === true);
+  if (genuinos.length === 0) return { started: false, motivo: "no_genuine_asrs" };
+
+  runsActivos.add(synthesisPath);
+  // Fire-and-forget deliberado: el caller (IPC) vuelve YA; este cuerpo corre
+  // hasta terminar y persiste cada hito.
+  void (async () => {
+    try {
+      const ahora = new Date().toISOString();
+      const doc: AnalisisTacticasDoc = {
+        synthesis_path: synthesisPath,
+        estado: "running",
+        iniciado_at: ahora,
+        actualizado_at: ahora,
+        resultados_por_asr: Object.fromEntries(
+          genuinos.map((a) => [a.id, { estado: "corriendo" } satisfies AnalisisAsrEntry]),
+        ),
+        consolidacion: { estado: "pendiente" },
+      };
+      escribirAnalisisDoc(projectPath, doc);
+
+      await Promise.all(
+        genuinos.map(async (a) => {
+          const resultado = await analyzeTacticForAsr(projectPath, synthesis, a);
+          // Re-leer antes de pisar: otro ASR pudo haber escrito entre medio.
+          const actual = leerAnalisisDoc(projectPath);
+          if (!actual || actual.synthesis_path !== synthesisPath) return;
+          actual.resultados_por_asr[a.id] = { estado: resultado.ok ? "ok" : "error", resultado };
+          escribirAnalisisDoc(projectPath, actual);
+        }),
+      );
+
+      const docFinal = leerAnalisisDoc(projectPath);
+      if (!docFinal || docFinal.synthesis_path !== synthesisPath) return;
+      try {
+        await consolidarYSeguir(projectPath, docFinal, synthesis);
+      } catch (err) {
+        docFinal.consolidacion = {
+          estado: "error",
+          error: err instanceof Error ? err.message : String(err),
+        };
+      }
+      docFinal.estado = "done";
+      escribirAnalisisDoc(projectPath, docFinal);
+    } catch (err) {
+      // Catastrófico (p.ej. sin permisos de escritura): queda registrado.
+      const doc = leerAnalisisDoc(projectPath);
+      if (doc && doc.synthesis_path === synthesisPath) {
+        doc.estado = "error";
+        doc.error_global = err instanceof Error ? err.message : String(err);
+        escribirAnalisisDoc(projectPath, doc);
+      }
+    } finally {
+      runsActivos.delete(synthesisPath);
+    }
+  })();
+  return { started: true };
+}
+
+/**
+ * Reintento quirúrgico de UN ASR como trabajo de fondo (persistido igual).
+ * Si termina OK y hay ≥2 recomendadas vivas, re-consolida automáticamente:
+ * la recomendada nueva puede cambiar los conflictos.
+ */
+export async function ejecutarReintentoTactico(
+  projectPath: string,
+  synthesisPath: string,
+  asrId: string,
+  categoriaExplicita?: CategoriaTactica,
+): Promise<{ started: boolean; motivo?: string }> {
+  if (runsActivos.has(synthesisPath)) return { started: false, motivo: "ya_en_curso" };
+  const synthesis = loadSynthesis(synthesisPath);
+  if (!synthesis) return { started: false, motivo: "no_synthesis" };
+  const asr = (synthesis.atributos_de_calidad_y_asrs ?? []).find((a) => a.id === asrId);
+  if (!asr) return { started: false, motivo: "asr_inexistente" };
+
+  runsActivos.add(synthesisPath);
+  void (async () => {
+    try {
+      const docExistente = leerAnalisisDoc(projectPath);
+      const doc: AnalisisTacticasDoc =
+        docExistente && docExistente.synthesis_path === synthesisPath
+          ? docExistente
+          : {
+              synthesis_path: synthesisPath,
+              estado: "running",
+              iniciado_at: new Date().toISOString(),
+              actualizado_at: new Date().toISOString(),
+              resultados_por_asr: {},
+              consolidacion: { estado: "pendiente" },
+            };
+      doc.estado = "running";
+      doc.resultados_por_asr[asrId] = { estado: "corriendo" };
+      escribirAnalisisDoc(projectPath, doc);
+
+      const resultado = await analyzeTacticForAsr(projectPath, synthesis, asr, { categoriaExplicita });
+
+      const actual = leerAnalisisDoc(projectPath);
+      if (!actual || actual.synthesis_path !== synthesisPath) return;
+      actual.resultados_por_asr[asrId] = { estado: resultado.ok ? "ok" : "error", resultado };
+
+      const okVivos = Object.values(actual.resultados_por_asr).filter((e) => e.estado === "ok");
+      if (resultado.ok && okVivos.length >= 1) {
+        try {
+          await consolidarYSeguir(projectPath, actual, synthesis);
+        } catch (err) {
+          actual.consolidacion = {
+            estado: "error",
+            error: err instanceof Error ? err.message : String(err),
+          };
+        }
+      }
+      const hayCorriendo = Object.values(actual.resultados_por_asr).some((e) => e.estado === "corriendo");
+      actual.estado = hayCorriendo ? "running" : "done";
+      escribirAnalisisDoc(projectPath, actual);
+    } catch (err) {
+      const doc = leerAnalisisDoc(projectPath);
+      if (doc && doc.synthesis_path === synthesisPath) {
+        doc.resultados_por_asr[asrId] = {
+          estado: "error",
+          error: err instanceof Error ? err.message : String(err),
+        };
+        const hayCorriendo = Object.values(doc.resultados_por_asr).some((e) => e.estado === "corriendo");
+        doc.estado = hayCorriendo ? "running" : "done";
+        escribirAnalisisDoc(projectPath, doc);
+      }
+    } finally {
+      runsActivos.delete(synthesisPath);
+    }
+  })();
+  return { started: true };
 }

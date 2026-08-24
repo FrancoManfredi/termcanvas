@@ -52,12 +52,14 @@ import {
   backfillStoriesForSynthesis,
   loadSynthesis,
   synthesisFilePath,
-  analyzeTacticForAsr,
   consolidateTactics,
   validateFreeTextDecision,
   confirmTacticDecision,
   tacticsStatusForSynthesis,
   formatDecisionsForPrompt,
+  ejecutarAnalisisTacticas,
+  ejecutarReintentoTactico,
+  leerEstadoAnalisis,
   type ConfirmTacticDecisionInput,
   type TacticaCandidata,
   addUserStory,
@@ -331,10 +333,10 @@ export function registerInterviewIpc(): void {
     },
   );
 
-  // Lanza UNA llamada angosta POR cada ASR genuino en paralelo (sesión
-  // efímera propia por llamada) y DESPUÉS la consolidación con visión
-  // completa de las recomendadas. El resultado es POR ASR para que un fallo
-  // de uno no tire los demás y el reintento sea quirúrgico.
+  // Arranca el análisis COMPLETO como trabajo de fondo en el proceso main y
+  // vuelve de inmediato: cerrar el modal o navegar no lo interrumpe. El
+  // progreso queda en .agents/architecture/analisis-tacticas.json (leer con
+  // interview:tacticsAnalysisState).
   ipcMain.handle(
     "interview:analyzeTactics",
     async (_event, projectPath: string, synthesisPath: string) => {
@@ -344,44 +346,29 @@ export function registerInterviewIpc(): void {
       if (typeof synthesisPath !== "string" || synthesisPath.length === 0) {
         throw new Error("interview:analyzeTactics requiere synthesisPath");
       }
-      const synthesis = loadSynthesis(synthesisPath);
-      if (!synthesis) {
-        return { ok: false as const, reason: "no_synthesis" as const, error: "La síntesis no existe o no es válida." };
-      }
-      const genuinos = (synthesis.atributos_de_calidad_y_asrs ?? []).filter((a) => a.es_asr_genuino === true);
-      if (genuinos.length === 0) {
-        return {
-          ok: false as const,
-          reason: "no_genuine_asrs" as const,
-          error: "No hay restricciones arquitectónicas genuinas en esta síntesis.",
-        };
-      }
-      const pares = await Promise.all(
-        genuinos.map(async (a) => [a.id, await analyzeTacticForAsr(projectPath, synthesis, a)] as const),
-      );
-      const resultados = Object.fromEntries(pares);
-      // La consolidación solo ve las recomendadas de los análisis exitosos:
-      // un ASR que falló no aporta recomendada, y no bloquea a los demás.
-      const recomendadas = genuinos.flatMap((a) => {
-        const r = resultados[a.id];
-        if (!r.ok) return [];
-        const rec = r.data.candidatas.find((c) => c.es_recomendada);
-        return rec ? [{ asrId: a.id, atributo: a.atributo, candidata: rec }] : [];
-      });
-      const consolidacion = await consolidateTactics(projectPath, recomendadas);
-      const consolidacionPayload = consolidacion.ok
-        ? consolidacion.skipped
-          ? { ok: true as const, skipped: true as const }
-          : { ok: true as const, skipped: false as const, data: consolidacion.data }
-        : { ok: false as const, error: consolidacion.error };
-      return { ok: true as const, resultados, consolidacion: consolidacionPayload };
+      return ejecutarAnalisisTacticas(projectPath, synthesisPath);
     },
   );
 
-  // Reintento quirúrgico de UN solo ASR (los fallos no obligan a repetir las
-  // llamadas que ya salieron bien — cada una es una sesión efímera aparte).
-  // `categoriaExplicita` es el fallback manual de la UI cuando el mapeo
-  // automático del atributo no fue confiado o el usuario re-mapeó.
+  // Estado persistido del análisis (idle/running/done/error/stale + resultados
+  // parciales): la UI lo hidrata al montar y lo sondea mientras corre.
+  ipcMain.handle(
+    "interview:tacticsAnalysisState",
+    (_event, projectPath: string, synthesisPath: string) => {
+      if (typeof projectPath !== "string" || projectPath.length === 0) {
+        throw new Error("interview:tacticsAnalysisState requiere projectPath");
+      }
+      if (typeof synthesisPath !== "string" || synthesisPath.length === 0) {
+        throw new Error("interview:tacticsAnalysisState requiere synthesisPath");
+      }
+      return leerEstadoAnalisis(projectPath, synthesisPath);
+    },
+  );
+
+  // Reintento quirúrgico de UN solo ASR, también como trabajo de fondo
+  // persistido (los fallos no obligan a repetir las llamadas que ya salieron
+  // bien). `categoriaExplicita` es el fallback manual de la UI cuando el
+  // mapeo automático del atributo no fue confiado o el usuario re-mapeó.
   ipcMain.handle(
     "interview:analyzeOneTactic",
     async (
@@ -407,15 +394,7 @@ export function registerInterviewIpc(): void {
         }
         categoria = categoriaExplicita;
       }
-      const synthesis = loadSynthesis(synthesisPath);
-      if (!synthesis) {
-        return { ok: false as const, error: "La síntesis no existe o no es válida." };
-      }
-      const asr = (synthesis.atributos_de_calidad_y_asrs ?? []).find((a) => a.id === asrId);
-      if (!asr) {
-        return { ok: false as const, error: `El ASR ${asrId} no existe en esta síntesis.` };
-      }
-      return analyzeTacticForAsr(projectPath, synthesis, asr, { categoriaExplicita: categoria });
+      return ejecutarReintentoTactico(projectPath, synthesisPath, asrId, categoria);
     },
   );
 

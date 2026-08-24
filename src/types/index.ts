@@ -54,6 +54,7 @@ import type {
   ConfirmTacticDecisionInput,
   ConfirmTacticDecisionResult,
   TacticaCandidata,
+  EstadoAnalisisTacticas,
 } from "../../headless-runtime/interview/tactics.ts";
 
 export type { Pin, PinLink, PinStatus, CreatePinInput, UpdatePinInput };
@@ -1147,29 +1148,16 @@ export interface TermCanvasAPI {
       projectPath: string,
       synthesisPath: string,
     ) => Promise<{ asrs: TacticStatusEntry[] }>;
+    // Arranca el análisis como trabajo de fondo (vuelve al instante); el
+    // progreso se lee con tacticsAnalysisState.
     analyzeTactics: (
       projectPath: string,
       synthesisPath: string,
-    ) => Promise<
-      | {
-          ok: true;
-          resultados: Record<
-            string,
-            | {
-                ok: true;
-                data: TacticsAnalysisOutput;
-                categoriaUsada: string;
-                categoriaConfiada: boolean;
-              }
-            | { ok: false; reason?: "categoria_no_mapeada"; atributo?: string; error: string }
-          >;
-          consolidacion:
-            | { ok: true; skipped: true }
-            | { ok: true; skipped: false; data: TacticsConsolidationOutput }
-            | { ok: false; error: string };
-        }
-      | { ok: false; reason: "no_synthesis" | "no_genuine_asrs"; error: string }
-    >;
+    ) => Promise<{ started: boolean; motivo?: string }>;
+    tacticsAnalysisState: (
+      projectPath: string,
+      synthesisPath: string,
+    ) => Promise<EstadoAnalisisTacticas>;
     validateTacticText: (
       projectPath: string,
       synthesisPath: string,
@@ -1188,15 +1176,7 @@ export interface TermCanvasAPI {
       synthesisPath: string,
       asrId: string,
       categoriaExplicita?: string,
-    ) => Promise<
-      | {
-          ok: true;
-          data: TacticsAnalysisOutput;
-          categoriaUsada: string;
-          categoriaConfiada: boolean;
-        }
-      | { ok: false; reason?: "categoria_no_mapeada"; atributo?: string; error: string }
-    >;
+    ) => Promise<{ started: boolean; motivo?: string }>;
     consolidateTactics: (
       projectPath: string,
       recomendadas: Array<{

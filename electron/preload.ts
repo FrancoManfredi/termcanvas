@@ -810,26 +810,20 @@ contextBridge.exposeInMainWorld("termcanvas", {
       ipcRenderer.invoke("interview:tacticsStatus", projectPath, synthesisPath) as Promise<{
         asrs: import("../headless-runtime/interview/tactics.ts").TacticStatusEntry[];
       }>,
+    // Arranca el análisis como trabajo de fondo (vuelve al instante); el
+    // progreso se lee con tacticsAnalysisState.
     analyzeTactics: (projectPath: string, synthesisPath: string) =>
-      ipcRenderer.invoke("interview:analyzeTactics", projectPath, synthesisPath) as Promise<
-        | {
-            ok: true;
-            resultados: Record<
-              string,
-              | {
-                  ok: true;
-                  data: import("../headless-runtime/interview/tactics.ts").TacticsAnalysisOutput;
-                  categoriaUsada: string;
-                  categoriaConfiada: boolean;
-                }
-                | { ok: false; reason?: "categoria_no_mapeada"; atributo?: string; error: string }
-            >;
-            consolidacion:
-              | { ok: true; skipped: true }
-              | { ok: true; skipped: false; data: import("../headless-runtime/interview/tactics.ts").TacticsConsolidationOutput }
-              | { ok: false; error: string };
-          }
-        | { ok: false; reason: "no_synthesis" | "no_genuine_asrs"; error: string }
+      ipcRenderer.invoke("interview:analyzeTactics", projectPath, synthesisPath) as Promise<{
+        started: boolean;
+        motivo?: string;
+      }>,
+    tacticsAnalysisState: (projectPath: string, synthesisPath: string) =>
+      ipcRenderer.invoke(
+        "interview:tacticsAnalysisState",
+        projectPath,
+        synthesisPath,
+      ) as Promise<
+        import("../headless-runtime/interview/tactics.ts").EstadoAnalisisTacticas
       >,
     validateTacticText: (projectPath: string, synthesisPath: string, asrId: string, textoLibre: string) =>
       ipcRenderer.invoke(
@@ -861,15 +855,10 @@ contextBridge.exposeInMainWorld("termcanvas", {
         synthesisPath,
         asrId,
         categoriaExplicita,
-      ) as Promise<
-        | {
-            ok: true;
-            data: import("../headless-runtime/interview/tactics.ts").TacticsAnalysisOutput;
-            categoriaUsada: string;
-            categoriaConfiada: boolean;
-          }
-        | { ok: false; reason?: "categoria_no_mapeada"; atributo?: string; error: string }
-      >,
+      ) as Promise<{
+        started: boolean;
+        motivo?: string;
+      }>,
     consolidateTactics: (
       projectPath: string,
       recomendadas: Array<{

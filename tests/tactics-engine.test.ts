@@ -19,7 +19,7 @@
 //     texto libre sin validación previa.
 //   - formatDecisionsForPrompt: inyección downstream desde el manifiesto.
 
-import { test, beforeEach, afterEach } from "node:test";
+import { test, beforeEach, afterEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
@@ -36,9 +36,15 @@ import {
   tacticsStatusForSynthesis,
   formatDecisionsForPrompt,
   readAdrManifest,
+  ejecutarAnalisisTacticas,
+  leerEstadoAnalisis,
+  analisisTacticasPath,
 } from "../headless-runtime/interview/tactics.ts";
 import { setCatalogoTacticasBaseDir } from "../headless-runtime/interview/tactic-catalog.ts";
-import { mapearAtributoACategoria } from "../shared/tacticCategorias.ts";
+import {
+  mapearAtributoACategoria,
+  type CategoriaTactica,
+} from "../shared/tacticCategorias.ts";
 import type { SynthesisResult, AsrItem } from "../headless-runtime/interview/schema.ts";
 import type { TacticaCandidata, ConflictoTacticas } from "../headless-runtime/interview/tactics.ts";
 import { setCatalogClient } from "../electron/model-catalog.ts";
@@ -763,4 +769,185 @@ test("tacticsStatusForSynthesis: mapea los ASRs con su ADR activo y el flag genu
   assert.ok(asr1?.es_asr_genuino && asr1.adrActivo?.adr === "ADR-001");
   assert.ok(asr2?.es_asr_genuino && asr2.adrActivo === null, "sin decisión todavía");
   assert.equal(asr3?.es_asr_genuino, false, "la preferencia UX aparece pero no dispara análisis");
+});
+
+// ─── Trabajo de fondo persistido ─────────────────────────────────────────
+
+async function esperarHasta(fn: () => boolean, timeoutMs = 3000): Promise<void> {
+  const inicio = Date.now();
+  while (!fn()) {
+    if (Date.now() - inicio > timeoutMs) throw new Error("timeout esperando condición del job");
+    await new Promise((r) => setTimeout(r, 20));
+  }
+}
+
+test("console.log: el prompt completo de cada ASR queda en la consola del proceso main", async () => {
+  const logs: string[] = [];
+  const spy = mock.method(console, "log", (...args: unknown[]) => {
+    logs.push(args.map(String).join(" "));
+  });
+  try {
+    const { client } = makeMockClient([() => okPrompt(analysisPayload([candidata({ es_recomendada: true })]))]);
+    setTestClient(client);
+    const res = await analizarPrimero();
+    assert.ok(res.ok);
+    const delPrompt = logs.filter((l) => l.includes("[tácticas ASR-001] prompt ("));
+    assert.equal(delPrompt.length, 1, "UN log por llamada");
+    assert.ok(delPrompt[0].includes(CATALOGO_RENDIMIENTO.trim().slice(0, 40)), "el log incluye el contenido del catálogo");
+  } finally {
+    spy.mock.restore();
+  }
+});
+
+test("ejecutarAnalisisTacticas: job de fondo que persiste resultados y consolidación", async () => {
+  const conflictos = [
+    {
+      asr_a: "ASR-001",
+      tactica_a: TACTICA_PRINCIPAL,
+      asr_b: "ASR-002",
+      tactica_b: "Cifrar los datos",
+      explicacion: "Tensión entre rendimiento y seguridad.",
+    },
+  ];
+  const { client, calls } = makeMockClient([
+    () => okPrompt(analysisPayload([{ ...candidata(), es_recomendada: true }])),
+    () =>
+      okPrompt(
+        analysisPayload(
+          [{ ...candidata(), nombre_tactica: "Cifrar los datos", es_recomendada: true }],
+          { categoria_atributo: "seguridad" },
+        ),
+      ),
+    () => okPrompt({ conflictos }),
+  ]);
+  setTestClient(client);
+
+  const arranque = await ejecutarAnalisisTacticas(tmp, synthesisPath);
+  assert.deepEqual(arranque, { started: true });
+
+  // El doc arranca en running con ambos ASR corriendo.
+  const temprano = leerEstadoAnalisis(tmp, synthesisPath);
+  assert.ok(temprano.estado === "running" || temprano.estado === "done", "el doc existe desde el arranque");
+
+  await esperarHasta(() => leerEstadoAnalisis(tmp, synthesisPath).estado === "done");
+
+  const final = leerEstadoAnalisis(tmp, synthesisPath);
+  assert.equal(final.estado, "done");
+  if (final.estado !== "done") return;
+  const doc = final.doc;
+  assert.equal(doc.synthesis_path, synthesisPath);
+  const r1 = doc.resultados_por_asr["ASR-001"];
+  const r2 = doc.resultados_por_asr["ASR-002"];
+  assert.ok(r1?.estado === "ok" && r1.resultado?.ok);
+  assert.ok(r2?.estado === "ok");
+  if (r1.resultado?.ok) {
+    assert.equal(r1.resultado.categoriaUsada, "rendimiento");
+    assert.equal(r1.resultado.data.categoria_atributo, "rendimiento");
+  }
+  assert.equal(doc.consolidacion.estado, "ok");
+  if (doc.consolidacion.estado === "ok") assert.equal(doc.consolidacion.data?.conflictos.length, 1);
+  assert.equal(calls.create.length, 3, "2 análisis + 1 consolidación");
+});
+
+test("ejecutarAnalisisTacticas: un segundo arranque para la misma síntesis NO duplica el run", async () => {
+  let liberar!: () => void;
+  const puerta = new Promise<void>((resolve) => {
+    liberar = resolve;
+  });
+  const { client } = makeMockClient([
+    async () => {
+      await puerta;
+      return okPrompt(analysisPayload([candidata({ es_recomendada: true })]));
+    },
+  ]);
+  setTestClient(client);
+
+  const primera = await ejecutarAnalisisTacticas(tmp, synthesisPath);
+  assert.deepEqual(primera, { started: true });
+  const segunda = await ejecutarAnalisisTacticas(tmp, synthesisPath);
+  assert.equal(segunda.started, false);
+  assert.equal(segunda.motivo, "ya_en_curso");
+
+  liberar();
+  await esperarHasta(() => leerEstadoAnalisis(tmp, synthesisPath).estado === "done");
+});
+
+test("leerEstadoAnalisis: running con timestamp viejo = stale (app cerrada a mitad)", () => {
+  const hace46min = new Date(Date.now() - 46 * 60 * 1000).toISOString();
+  const docViejo = {
+    synthesis_path: synthesisPath,
+    estado: "running",
+    iniciado_at: hace46min,
+    actualizado_at: hace46min,
+    resultados_por_asr: { "ASR-001": { estado: "corriendo" } },
+    consolidacion: { estado: "pendiente" },
+  };
+  fs.mkdirSync(path.join(tmp, ".agents", "architecture"), { recursive: true });
+  fs.writeFileSync(analisisTacticasPath(tmp), JSON.stringify(docViejo));
+  const estado = leerEstadoAnalisis(tmp, synthesisPath);
+  assert.equal(estado.estado, "stale");
+
+  // Con síntesis distinta → idle (no contamina otra entrevista).
+  const otro = leerEstadoAnalisis(tmp, path.join(tmp, "otra-sintesis.json"));
+  assert.equal(otro.estado, "idle");
+});
+
+test("confirmar decisión poda la entrada del análisis pendiente; sin pendientes borra el archivo", async () => {
+  const analisisOk = {
+    ok: true,
+    data: analysisPayload([
+      candidata({ es_recomendada: true }),
+      candidata({ nombre_tactica: TACTICA_SECUNDARIA }),
+    ]),
+    categoriaUsada: "rendimiento",
+    categoriaConfiada: true,
+  } as never;
+
+  // Doc con DOS pendientes → confirmar ASR-001 deja el archivo con ASR-002.
+  const base = {
+    synthesis_path: synthesisPath,
+    estado: "done",
+    iniciado_at: new Date().toISOString(),
+    actualizado_at: new Date().toISOString(),
+    consolidacion: { estado: "skipped" },
+  };
+  fs.mkdirSync(path.join(tmp, ".agents", "architecture"), { recursive: true });
+  fs.writeFileSync(
+    analisisTacticasPath(tmp),
+    JSON.stringify({
+      ...base,
+      resultados_por_asr: {
+        "ASR-001": { estado: "ok", resultado: analisisOk },
+        "ASR-002": { estado: "ok", resultado: analisisOk },
+      },
+    }),
+  );
+
+  let res = await confirmTacticDecision(tmp, {
+    synthesisPath,
+    asrId: "ASR-001",
+    tipo: "candidata",
+    analysis: (analisisOk as { data: never }).data,
+    candidataIndex: 0,
+    conflictosInvolucrados: [],
+    conflictosAceptados: false,
+  });
+  assert.ok(res.ok);
+  assert.ok(fs.existsSync(analisisTacticasPath(tmp)), "quedan pendientes: el archivo sigue");
+  const docTrasPrimera = JSON.parse(fs.readFileSync(analisisTacticasPath(tmp), "utf-8"));
+  assert.equal(docTrasPrimera.resultados_por_asr["ASR-001"], undefined);
+  assert.ok(docTrasPrimera.resultados_por_asr["ASR-002"]);
+
+  // Última pendiente → confirmar borra el archivo entero.
+  res = await confirmTacticDecision(tmp, {
+    synthesisPath,
+    asrId: "ASR-002",
+    tipo: "candidata",
+    analysis: (analisisOk as { data: never }).data,
+    candidataIndex: 0,
+    conflictosInvolucrados: [],
+    conflictosAceptados: false,
+  });
+  assert.ok(res.ok);
+  assert.equal(fs.existsSync(analisisTacticasPath(tmp)), false, "sin pendientes no queda archivo");
 });
