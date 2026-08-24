@@ -50,6 +50,16 @@ import {
 } from "./schema.ts";
 import { loadSynthesis } from "./requirements.ts";
 import { getActiveBrief, findLatestBriefDocument, formatBriefForPrompt } from "./brief.ts";
+import {
+  cargarCatalogoTacticas,
+  matcheaCatalogo,
+  type CatalogoTacticas,
+} from "./tactic-catalog.ts";
+import {
+  mapearAtributoACategoria,
+  CATEGORIA_LABELS,
+  type CategoriaTactica,
+} from "../../shared/tacticCategorias.ts";
 
 // Re-exports: la superficie pública del feature vive acá para que renderer e
 // IPC tipen contra un solo módulo.
@@ -149,9 +159,19 @@ function escenarioText(asr: AsrItem): string {
   ].join("\n");
 }
 
-function buildAnalysisPrompt(synthesis: SynthesisResult, asr: AsrItem, briefText: string): string {
+function buildAnalysisPrompt(
+  synthesis: SynthesisResult,
+  asr: AsrItem,
+  briefText: string,
+  catalogo: CatalogoTacticas,
+): string {
   return [
     "Sos un Arquitecto de Software Senior. Analizá las tácticas de arquitectura aplicables al ASR de abajo para ESTE proyecto.",
+    "",
+    `CATÁLOGO DE TÁCTICAS (${CATEGORIA_LABELS[catalogo.categoria]} — categoría "${catalogo.categoria}"):`,
+    "REGLA: usá EXCLUSIVAMENTE las tácticas de este catálogo, nombres exactos, sin inventar variantes ni mezclar con otras fuentes. El campo nombre_tactica de cada candidata debe ser el nombre EXACTO de una táctica del catálogo de abajo.",
+    "",
+    catalogo.contenido,
     "",
     "REGLAS:",
     "- Devolvé SOLO candidatas genuinamente viables dadas las restricciones reales. Si solo existe UNA táctica realista, devolvé una sola con es_unica_viable=true — NUNCA inventes una segunda opción débil solo para llenar un mínimo.",
@@ -217,21 +237,29 @@ function buildValidationPrompt(synthesis: SynthesisResult, asr: AsrItem, textoLi
 // resto de las llamadas). La consistencia de es_unica_viable NO reintenta:
 // se sanitiza después de validar porque es ruido barato de reparar.
 
-function isValidTacticsAnalysis(value: unknown): value is TacticsAnalysisOutput {
-  const parsed = TacticsAnalysisOutputSchema.safeParse(value);
-  if (!parsed.success) return false;
-  const d = parsed.data;
-  if (d.candidatas.length < 1 || d.candidatas.length > 4) return false;
-  // Exactamente UNA recomendada.
-  if (d.candidatas.filter((c) => c.es_recomendada).length !== 1) return false;
-  // Conexión con objetivo de negocio OBLIGATORIA en el 100% de las
-  // candidatas: las descartadas también quedan registradas en el ADR bajo
-  // "Candidatas consideradas", así que una sin justificación de negocio
-  // contaminaría el registro histórico completo.
-  if (d.candidatas.some((c) => c.conexion_con_objetivo_de_negocio.trim().length === 0)) return false;
-  // Sacrificio declarado cuando no cumple totalmente la restricción.
-  if (d.candidatas.some((c) => !c.cumple_totalmente_la_restriccion && !(c.que_se_sacrifica ?? "").trim())) return false;
-  return true;
+// Guardrail del catálogo: cada nombre_tactica debe matchear un heading real
+// del archivo cargado (match por tokens — ver tactic-catalog.ts). Sin esto
+// el modelo puede colar tácticas inventadas "de memoria" aunque el prompt
+// prohíba mezclar fuentes; con esto, el reintento existente lo corrige.
+function crearPredicateTacticas(headings: string[]) {
+  return function isValidTacticsAnalysis(value: unknown): value is TacticsAnalysisOutput {
+    const parsed = TacticsAnalysisOutputSchema.safeParse(value);
+    if (!parsed.success) return false;
+    const d = parsed.data;
+    if (d.candidatas.length < 1 || d.candidatas.length > 4) return false;
+    // Exactamente UNA recomendada.
+    if (d.candidatas.filter((c) => c.es_recomendada).length !== 1) return false;
+    // Conexión con objetivo de negocio OBLIGATORIA en el 100% de las
+    // candidatas: las descartadas también quedan registradas en el ADR bajo
+    // "Candidatas consideradas", así que una sin justificación de negocio
+    // contaminaría el registro histórico completo.
+    if (d.candidatas.some((c) => c.conexion_con_objetivo_de_negocio.trim().length === 0)) return false;
+    // Sacrificio declarado cuando no cumple totalmente la restricción.
+    if (d.candidatas.some((c) => !c.cumple_totalmente_la_restriccion && !(c.que_se_sacrifica ?? "").trim())) return false;
+    // Nada fuera del catálogo cargado.
+    if (d.candidatas.some((c) => !matcheaCatalogo(c.nombre_tactica, headings))) return false;
+    return true;
+  };
 }
 
 // length===1 ⇔ es_unica_viable: una sola tarjeta DEBE llevar el badge (si el
@@ -260,20 +288,49 @@ function isValidDecisionValidation(value: unknown): value is DecisionValidationO
   return true;
 }
 
-// ─── Llamada 1: análisis por ASR ─────────────────────────────────────────
+// ─── Llamada 1: análisis por ASR (con catálogo de la categoría) ──────────
 
 export type TacticAnalysisResult =
-  | { ok: true; data: TacticsAnalysisOutput }
+  | {
+      ok: true;
+      data: TacticsAnalysisOutput;
+      categoriaUsada: CategoriaTactica;
+      /** false = mapeo débil: la UI ofrece re-mapear manualmente. */
+      categoriaConfiada: boolean;
+    }
+  | { ok: false; reason: "categoria_no_mapeada"; atributo: string; error: string }
   | { ok: false; error: string };
 
 export async function analyzeTacticForAsr(
   projectPath: string,
   synthesis: SynthesisResult,
   asr: AsrItem,
+  opts?: { categoriaExplicita?: CategoriaTactica },
 ): Promise<TacticAnalysisResult> {
+  // Categoría del catálogo: explícita (fallback manual de la UI) o mapeo
+  // automático desde el texto libre del atributo.
+  const mapeo = opts?.categoriaExplicita
+    ? { categoria: opts.categoriaExplicita as CategoriaTactica, confiado: true }
+    : mapearAtributoACategoria(asr.atributo);
+  if (!mapeo.categoria) {
+    return {
+      ok: false,
+      reason: "categoria_no_mapeada",
+      atributo: asr.atributo,
+      error: `No se pudo mapear el atributo "${asr.atributo}" a una categoría del catálogo — elegila manualmente.`,
+    };
+  }
+
+  let catalogo: CatalogoTacticas;
+  try {
+    catalogo = cargarCatalogoTacticas(mapeo.categoria);
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
+  }
+
   const contexto = getActiveBrief(projectPath) ?? findLatestBriefDocument(projectPath);
   const briefText = contexto ? formatBriefForPrompt(contexto.brief) : "(sin brief de contexto)";
-  const prompt = buildAnalysisPrompt(synthesis, asr, briefText);
+  const prompt = buildAnalysisPrompt(synthesis, asr, briefText, catalogo);
 
   // Sesión efímera REAL por llamada: NO se pasa session_id vacío (el SDK
   // armaría "/session//message" y el server respondería HTML — ver nota en
@@ -295,16 +352,25 @@ export async function analyzeTacticForAsr(
       fakeLedger,
       TACTICS_ANALYSIS_SCHEMA,
       prompt,
-      isValidTacticsAnalysis,
+      crearPredicateTacticas(catalogo.headings),
       `Tácticas ${asr.id}`,
       SYNTHESIS_TIMEOUT_MS,
       undefined,
       "tactics",
     );
-    // asr_id lo fija el MOTOR con el id de entrada (transcripción fiel, igual
-    // que respuestas_detalladas del brief): el eco del modelo no manda.
-    const data = sanitizeUnicidad({ ...res.data, asr_id: asr.id });
-    return { ok: true, data };
+    // asr_id y categoria_atributo los fija el MOTOR con los datos de entrada
+    // (transcripción fiel): el eco del modelo no manda.
+    const data = sanitizeUnicidad({
+      ...res.data,
+      asr_id: asr.id,
+      categoria_atributo: catalogo.categoria,
+    });
+    return {
+      ok: true,
+      data,
+      categoriaUsada: catalogo.categoria,
+      categoriaConfiada: mapeo.confiado,
+    };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
   } finally {

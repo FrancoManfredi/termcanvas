@@ -816,8 +816,13 @@ contextBridge.exposeInMainWorld("termcanvas", {
             ok: true;
             resultados: Record<
               string,
-              | { ok: true; data: import("../headless-runtime/interview/tactics.ts").TacticsAnalysisOutput }
-              | { ok: false; error: string }
+              | {
+                  ok: true;
+                  data: import("../headless-runtime/interview/tactics.ts").TacticsAnalysisOutput;
+                  categoriaUsada: string;
+                  categoriaConfiada: boolean;
+                }
+                | { ok: false; reason?: "categoria_no_mapeada"; atributo?: string; error: string }
             >;
             consolidacion:
               | { ok: true; skipped: true }
@@ -844,10 +849,26 @@ contextBridge.exposeInMainWorld("termcanvas", {
       ipcRenderer.invoke("interview:confirmTacticDecision", projectPath, input) as Promise<
         import("../headless-runtime/interview/tactics.ts").ConfirmTacticDecisionResult
       >,
-    analyzeOneTactic: (projectPath: string, synthesisPath: string, asrId: string) =>
-      ipcRenderer.invoke("interview:analyzeOneTactic", projectPath, synthesisPath, asrId) as Promise<
-        | { ok: true; data: import("../headless-runtime/interview/tactics.ts").TacticsAnalysisOutput }
-        | { ok: false; error: string }
+    analyzeOneTactic: (
+      projectPath: string,
+      synthesisPath: string,
+      asrId: string,
+      categoriaExplicita?: string,
+    ) =>
+      ipcRenderer.invoke(
+        "interview:analyzeOneTactic",
+        projectPath,
+        synthesisPath,
+        asrId,
+        categoriaExplicita,
+      ) as Promise<
+        | {
+            ok: true;
+            data: import("../headless-runtime/interview/tactics.ts").TacticsAnalysisOutput;
+            categoriaUsada: string;
+            categoriaConfiada: boolean;
+          }
+        | { ok: false; reason?: "categoria_no_mapeada"; atributo?: string; error: string }
       >,
     consolidateTactics: (
       projectPath: string,

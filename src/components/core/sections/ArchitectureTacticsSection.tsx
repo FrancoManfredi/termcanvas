@@ -26,6 +26,10 @@ import type {
   TacticsAnalysisOutput,
   TacticStatusEntry,
 } from "../../../../headless-runtime/interview/tactics";
+import {
+  CATEGORIAS_TACTICAS,
+  CATEGORIA_LABELS,
+} from "../../../../shared/tacticCategorias";
 
 // Traduce los errores del motor a mensajes accionables para el usuario
 // (mismo criterio que friendlyMigrationError).
@@ -59,7 +63,13 @@ export function ArchitectureTacticsSection() {
   });
   const [status, setStatus] = useState<TacticStatusEntry[]>([]);
   const [analisis, setAnalisis] = useState<Record<string, TacticsAnalysisOutput>>({});
-  const [erroresAnalisis, setErroresAnalisis] = useState<Record<string, string>>({});
+  // Metadatos del mapeo atributo → categoría (para el fallback manual).
+  const [metaAnalisis, setMetaAnalisis] = useState<
+    Record<string, { categoriaUsada: string; confiado: boolean }>
+  >({});
+  const [erroresAnalisis, setErroresAnalisis] = useState<
+    Record<string, { mensaje: string; sinCategoria?: boolean }>
+  >({});
   const [conflictos, setConflictos] = useState<ConflictoTacticas[] | null>(null);
   const [conflictosError, setConflictosError] = useState<string | null>(null);
 
@@ -68,6 +78,8 @@ export function ArchitectureTacticsSection() {
   const [textoLibre, setTextoLibre] = useState<Record<string, string>>({});
   const [confirmando, setConfirmando] = useState<string | null>(null);
   const [advertencia, setAdvertencia] = useState<AdvertenciaLibre | null>(null);
+  // Categoría elegida manualmente cuando el mapeo automático no confió.
+  const [categoriaManual, setCategoriaManual] = useState<Record<string, string>>({});
 
   const genuinos = status.filter((a) => a.es_asr_genuino);
 
@@ -89,13 +101,40 @@ export function ArchitectureTacticsSection() {
     void loadStatus();
     setRun({ phase: "idle" });
     setAnalisis({});
+    setMetaAnalisis({});
     setErroresAnalisis({});
     setConflictos(null);
     setConflictosError(null);
     setSeleccion({});
     setTextoLibre({});
     setAdvertencia(null);
+    setCategoriaManual({});
   }, [synthesisPath, loadStatus]);
+
+  const registrarResultado = (
+    asrId: string,
+    r:
+      | { ok: true; data: TacticsAnalysisOutput; categoriaUsada: string; categoriaConfiada: boolean }
+      | { ok: false; reason?: "categoria_no_mapeada"; atributo?: string; error: string },
+  ) => {
+    if (r.ok) {
+      setAnalisis((prev) => ({ ...prev, [asrId]: r.data }));
+      setMetaAnalisis((prev) => ({
+        ...prev,
+        [asrId]: { categoriaUsada: r.categoriaUsada, confiado: r.categoriaConfiada },
+      }));
+      setErroresAnalisis((e) => {
+        const next = { ...e };
+        delete next[asrId];
+        return next;
+      });
+    } else {
+      setErroresAnalisis((e) => ({
+        ...e,
+        [asrId]: { mensaje: friendlyTacticsError(r.error), sinCategoria: r.reason === "categoria_no_mapeada" },
+      }));
+    }
+  };
 
   const conflictsFor = useCallback(
     (asrId: string): ConflictoTacticas[] =>
@@ -131,14 +170,9 @@ export function ArchitectureTacticsSection() {
         setRun({ phase: "error", error: friendlyTacticsError(res.error) });
         return;
       }
-      const okAnalisis: Record<string, TacticsAnalysisOutput> = {};
-      const errores: Record<string, string> = {};
       for (const [asrId, r] of Object.entries(res.resultados)) {
-        if (r.ok) okAnalisis[asrId] = r.data;
-        else errores[asrId] = friendlyTacticsError(r.error);
+        registrarResultado(asrId, r);
       }
-      setAnalisis((prev) => ({ ...prev, ...okAnalisis }));
-      setErroresAnalisis(errores);
       aplicarConsolidacion(res.consolidacion);
       setRun({ phase: "done" });
     } catch (err) {
@@ -147,7 +181,8 @@ export function ArchitectureTacticsSection() {
   };
 
   // Reintento quirúrgico: SOLO el ASR que falló (las llamadas exitosas no se
-  // repiten ni se paga otra vez la consolidación).
+  // repiten ni se paga otra vez la consolidación). Si el usuario eligió una
+  // categoría manualmente, viaja como explícita.
   const retryOne = async (asrId: string) => {
     const active = resolveActiveWorktree();
     if (!active || !synthesisPath) return;
@@ -157,16 +192,18 @@ export function ArchitectureTacticsSection() {
       return next;
     });
     try {
-      const res = await window.termcanvas.interview.analyzeOneTactic(active.path, synthesisPath, asrId);
-      if (res.ok) {
-        setAnalisis((prev) => ({ ...prev, [asrId]: res.data }));
-      } else {
-        setErroresAnalisis((e) => ({ ...e, [asrId]: friendlyTacticsError(res.error) }));
-      }
+      const categoria = categoriaManual[asrId];
+      const res = await window.termcanvas.interview.analyzeOneTactic(
+        active.path,
+        synthesisPath,
+        asrId,
+        categoria,
+      );
+      registrarResultado(asrId, res);
     } catch (err) {
       setErroresAnalisis((e) => ({
         ...e,
-        [asrId]: friendlyTacticsError(err instanceof Error ? err.message : String(err)),
+        [asrId]: { mensaje: friendlyTacticsError(err instanceof Error ? err.message : String(err)) },
       }));
     }
   };
@@ -430,9 +467,11 @@ export function ArchitectureTacticsSection() {
         <div className="space-y-3">
           {genuinos.map((entry) => {
             const analysis = analisis[entry.asrId];
-            const errorAsr = erroresAnalisis[entry.asrId]?.trim();
+            const errorAsr = erroresAnalisis[entry.asrId];
             const sel = seleccion[entry.asrId];
             const enConflicto = conflictsFor(entry.asrId);
+            const meta = metaAnalisis[entry.asrId];
+            const categoriaElegida = categoriaManual[entry.asrId] ?? meta?.categoriaUsada ?? "";
             return (
               <div key={entry.asrId} className="p-3.5 rounded-md border border-[var(--border)] bg-[var(--bg)] space-y-3 text-xs">
                 <div className="flex items-center justify-between gap-2 flex-wrap border-b border-[var(--border)] pb-2">
@@ -479,15 +518,71 @@ export function ArchitectureTacticsSection() {
                   <div className="w-full p-2.5 rounded-md bg-[var(--red-soft)] border border-red-500/30 text-[11px] text-[var(--text-primary)] space-y-2">
                     <div className="flex items-start gap-2">
                       <AlertIcon />
-                      <p className="leading-snug">{errorAsr}</p>
+                      <p className="leading-snug">{errorAsr.mensaje}</p>
                     </div>
+                    {errorAsr.sinCategoria && (
+                      <p className="text-[10.5px] text-[var(--text-muted)] leading-relaxed">
+                        Elegí la categoría del catálogo que corresponde a este atributo:
+                      </p>
+                    )}
+                    {(errorAsr.sinCategoria || categoriaManual[entry.asrId]) && (
+                      <select
+                        className="textarea-minimal text-xs py-1.5 w-full"
+                        value={categoriaElegida}
+                        onChange={(e) =>
+                          setCategoriaManual((m) => ({ ...m, [entry.asrId]: e.target.value }))
+                        }
+                      >
+                        <option value="">— categoría del catálogo —</option>
+                        {CATEGORIAS_TACTICAS.map((c) => (
+                          <option key={c} value={c}>
+                            {CATEGORIA_LABELS[c]}
+                          </option>
+                        ))}
+                      </select>
+                    )}
                     <button
                       type="button"
                       className="btn btn-ghost text-xs py-1 min-h-[28px]"
+                      disabled={errorAsr.sinCategoria && !categoriaElegida}
                       onClick={() => void retryOne(entry.asrId)}
                     >
                       Reintentar {entry.asrId}
+                      {errorAsr.sinCategoria && categoriaElegida ? ` (${CATEGORIA_LABELS[categoriaElegida as keyof typeof CATEGORIA_LABELS] ?? categoriaElegida})` : ""}
                     </button>
+                  </div>
+                )}
+
+                {/* Mapeo automático dudoso: aviso + re-mapeo manual opcional. */}
+                {!errorAsr && meta && !meta.confiado && (
+                  <div className="w-full p-2.5 rounded-md bg-[var(--amber-soft)] border border-amber-500/30 text-[11px] space-y-2">
+                    <p className="text-[var(--amber)] leading-snug">
+                      El atributo se mapeó a <span className="font-semibold">{CATEGORIA_LABELS[meta.categoriaUsada as keyof typeof CATEGORIA_LABELS] ?? meta.categoriaUsada}</span> con baja confianza — verificá si es la categoría correcta.
+                    </p>
+                    <div className="flex items-center gap-2">
+                      <select
+                        className="textarea-minimal text-xs py-1 flex-1"
+                        value={categoriaManual[entry.asrId] ?? ""}
+                        onChange={(e) =>
+                          setCategoriaManual((m) => ({ ...m, [entry.asrId]: e.target.value }))
+                        }
+                      >
+                        <option value="">— cambiar categoría y re-analizar —</option>
+                        {CATEGORIAS_TACTICAS.filter((c) => c !== meta.categoriaUsada).map((c) => (
+                          <option key={c} value={c}>
+                            {CATEGORIA_LABELS[c]}
+                          </option>
+                        ))}
+                      </select>
+                      <button
+                        type="button"
+                        className="btn btn-ghost text-xs py-1 px-2.5 min-h-[28px] shrink-0 border border-[var(--border)]"
+                        disabled={!categoriaManual[entry.asrId]}
+                        onClick={() => void retryOne(entry.asrId)}
+                      >
+                        Re-analizar
+                      </button>
+                    </div>
                   </div>
                 )}
 

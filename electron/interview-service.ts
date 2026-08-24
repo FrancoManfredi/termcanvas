@@ -16,6 +16,7 @@
 // cerrar el modal no pierde nada: al reabrir se lista y se retoma.
 
 import { ipcMain } from "electron";
+import fs from "node:fs";
 import path from "node:path";
 import {
   cancelInterviewSession,
@@ -74,6 +75,18 @@ import {
   type UserAnswerInput,
 } from "../headless-runtime/interview/index.ts";
 import { TacticaCandidataSchema } from "../headless-runtime/interview/schema.ts";
+import { setCatalogoTacticasBaseDir } from "../headless-runtime/interview/tactic-catalog.ts";
+import { isCategoriaTactica } from "../shared/tacticCategorias.ts";
+
+// Catálogo de tácticas empaquetado: prod = <resources>/architecture-tactics
+// (extraResources del builder); dev = <repo>/resources/architecture-tactics.
+// Mismo patrón que getSkillsSourceDir en skill-manager.ts.
+const catalogoProdDir = path.join(process.resourcesPath ?? "", "architecture-tactics");
+setCatalogoTacticasBaseDir(
+  fs.existsSync(catalogoProdDir)
+    ? catalogoProdDir
+    : path.resolve(__dirname, "..", "resources", "architecture-tactics"),
+);
 
 // El contexto para el motor: el brief ACTIVO del proyecto (elegido por el
 // dueño en el modal de contexto), o el más reciente si no hay selección.
@@ -362,9 +375,17 @@ export function registerInterviewIpc(): void {
 
   // Reintento quirúrgico de UN solo ASR (los fallos no obligan a repetir las
   // llamadas que ya salieron bien — cada una es una sesión efímera aparte).
+  // `categoriaExplicita` es el fallback manual de la UI cuando el mapeo
+  // automático del atributo no fue confiado o el usuario re-mapeó.
   ipcMain.handle(
     "interview:analyzeOneTactic",
-    async (_event, projectPath: string, synthesisPath: string, asrId: string) => {
+    async (
+      _event,
+      projectPath: string,
+      synthesisPath: string,
+      asrId: string,
+      categoriaExplicita?: string,
+    ) => {
       if (typeof projectPath !== "string" || projectPath.length === 0) {
         throw new Error("interview:analyzeOneTactic requiere projectPath");
       }
@@ -374,6 +395,13 @@ export function registerInterviewIpc(): void {
       if (typeof asrId !== "string" || asrId.length === 0) {
         throw new Error("interview:analyzeOneTactic requiere asrId");
       }
+      let categoria: import("../shared/tacticCategorias").CategoriaTactica | undefined;
+      if (categoriaExplicita !== undefined && categoriaExplicita !== null && categoriaExplicita !== "") {
+        if (!isCategoriaTactica(categoriaExplicita)) {
+          throw new Error(`interview:analyzeOneTactic: categoría desconocida "${categoriaExplicita}"`);
+        }
+        categoria = categoriaExplicita;
+      }
       const synthesis = loadSynthesis(synthesisPath);
       if (!synthesis) {
         return { ok: false as const, error: "La síntesis no existe o no es válida." };
@@ -382,7 +410,7 @@ export function registerInterviewIpc(): void {
       if (!asr) {
         return { ok: false as const, error: `El ASR ${asrId} no existe en esta síntesis.` };
       }
-      return analyzeTacticForAsr(projectPath, synthesis, asr);
+      return analyzeTacticForAsr(projectPath, synthesis, asr, { categoriaExplicita: categoria });
     },
   );
 

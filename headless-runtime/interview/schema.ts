@@ -9,6 +9,7 @@
 // dispara el reintento del motor solo cuando el ruido es irrecuperable.
 
 import { z } from "zod";
+import { CATEGORIAS_TACTICAS as CATEGORIAS_DEL_CATALOGO } from "../../shared/tacticCategorias.ts";
 
 // ─── Output de la llamada de pregunta (clasifica + juzga + detecta + genera)
 export const QuestionOutputSchema = z.object({
@@ -403,14 +404,9 @@ export const BACKFILL_STORIES_SCHEMA = z.toJSONSchema(BackfillStoriesOutputSchem
 // La consistencia de es_unica_viable con la longitud del array se SANITIZA
 // después de validar (ruido barato de reparar, no merece una re-llamada).
 
-export const CATEGORIAS_TACTICAS = [
-  "disponibilidad",
-  "rendimiento",
-  "seguridad",
-  "eficiencia_energetica",
-  "modificabilidad",
-  "despliegue",
-] as const;
+export const CATEGORIAS_TACTICAS = CATEGORIAS_DEL_CATALOGO;
+export type { CategoriaTactica } from "../../shared/tacticCategorias.ts";
+export { CATEGORIA_LABELS, mapearAtributoACategoria } from "../../shared/tacticCategorias.ts";
 
 export const TacticaCandidataSchema = z.object({
   nombre_tactica: z.string().min(1).catch("(sin tactica)").describe("Nombre de la táctica del catálogo (ej: Ping/Echo, Rollback, Cache, Autenticación)"),

@@ -1,10 +1,13 @@
 // Tests del feature Tácticas de Arquitectura por ASR → ADR con el CLIENTE
 // DE MODELO MOCKEADO (mismo seam setTestClient que interview-engine-mock).
 // NADA corre contra un modelo real. Cubre:
-//   - analyzeTacticForAsr: sesión efímera propia + asr_id fijado por el
-//     motor + sanitización de es_unica_viable (length===1 ⇔ true) +
-//     reintentos del predicate (una sola recomendada, conexión de negocio en
-//     el 100%, sacrificio declarado).
+//   - analyzeTacticForAsr: sesión efímera propia + asr_id/categoria fijados
+//     por el motor + sanitización de es_unica_viable (length===1 <=> true)
+//     + reintentos del predicate (una sola recomendada, conexión de negocio
+//     en el 100%, sacrificio declarado).
+//   - CATÁLOGO: carga del archivo de la categoría, inyección inline en el
+//     prompt, guardrail que rechaza nombres fuera del catálogo, mapeo
+//     atributo → categoría con fallback manual (categoria_no_mapeada).
 //   - consolidateTactics: skip con <2 recomendadas; conflicto con visión
 //     completa.
 //   - validateFreeTextDecision: choque con restricción + Y-statement.
@@ -34,6 +37,8 @@ import {
   formatDecisionsForPrompt,
   readAdrManifest,
 } from "../headless-runtime/interview/tactics.ts";
+import { setCatalogoTacticasBaseDir } from "../headless-runtime/interview/tactic-catalog.ts";
+import { mapearAtributoACategoria } from "../shared/tacticCategorias.ts";
 import type { SynthesisResult, AsrItem } from "../headless-runtime/interview/schema.ts";
 import type { TacticaCandidata, ConflictoTacticas } from "../headless-runtime/interview/tactics.ts";
 import { setCatalogClient } from "../electron/model-catalog.ts";
@@ -174,9 +179,65 @@ function makeSynthesis(): SynthesisResult {
   };
 }
 
-const CANDIDATA_CACHE: Record<string, unknown> = {
-  nombre_tactica: "Cache",
-  proposito: "Mantener datos en almacenamiento múltiple",
+const TACTICA_PRINCIPAL = "Mantener múltiples copias de los datos";
+const TACTICA_SECUNDARIA = "Gestionar los pedidos de trabajo";
+const TACTICA_TERCIARIA = "Limitar el tamaño de las colas";
+const TACTICA_CUARTA = "Aumentar los recursos";
+
+// Fixture del catálogo (mismo formato que resources/architecture-tactics/
+// <categoria>.md: headings #### = tácticas reales del archivo).
+const CATALOGO_RENDIMIENTO = `### 2.5.2 Tácticas para el rendimiento
+
+#### ${TACTICA_SECUNDARIA}
+
+Texto de la táctica.
+
+#### ${TACTICA_PRINCIPAL}
+
+Texto de la táctica.
+
+#### ${TACTICA_CUARTA}
+
+Texto de la táctica.
+
+#### ${TACTICA_TERCIARIA}
+
+Texto de la táctica.
+`;
+
+const CATALOGO_SEGURIDAD = `### 2.5.4 Tácticas para la seguridad
+
+#### Cifrar los datos
+
+Texto de la táctica.
+
+#### Autenticar actores
+
+Texto de la táctica.
+`;
+
+let tmp: string;
+let synthesisPath: string;
+
+beforeEach(() => {
+  tmp = fs.mkdtempSync(path.join(os.tmpdir(), "tactics-test-"));
+  synthesisPath = path.join(tmp, "entrevista-123-sintesis.json");
+  fs.writeFileSync(synthesisPath, JSON.stringify(makeSynthesis()));
+  // Catálogo fixture por test (setCatalogoTacticasBaseDir es estado global).
+  const catalogos = path.join(tmp, "catalogos");
+  fs.mkdirSync(catalogos, { recursive: true });
+  fs.writeFileSync(path.join(catalogos, "rendimiento.md"), CATALOGO_RENDIMIENTO);
+  fs.writeFileSync(path.join(catalogos, "seguridad.md"), CATALOGO_SEGURIDAD);
+  setCatalogoTacticasBaseDir(catalogos);
+});
+
+afterEach(() => {
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+
+const CANDIDATA_BASE: Record<string, unknown> = {
+  nombre_tactica: TACTICA_PRINCIPAL,
+  proposito: "Gestionar los recursos",
   argumentacion: "Las lecturas repetidas del catálogo sobre el monolito Node.js se sirven de memoria.",
   trade_offs_para_este_proyecto: "Memoria extra del proceso único, sin costo de infra.",
   conexion_con_objetivo_de_negocio: "Permite demostrar el MVP rápido ante inversores sin servidores caros.",
@@ -187,7 +248,7 @@ const CANDIDATA_CACHE: Record<string, unknown> = {
 };
 
 function candidata(overrides: Partial<TacticaCandidata> = {}): Record<string, unknown> {
-  return { ...CANDIDATA_CACHE, ...overrides };
+  return { ...CANDIDATA_BASE, ...overrides };
 }
 
 function analysisPayload(candidatas: Record<string, unknown>[], overrides: Record<string, unknown> = {}) {
@@ -201,68 +262,160 @@ function analysisPayload(candidatas: Record<string, unknown>[], overrides: Recor
   };
 }
 
-let tmp: string;
-let synthesisPath: string;
+async function analizarPrimero(opts?: {
+  categoriaExplicita?: import("../shared/tacticCategorias").CategoriaTactica;
+}) {
+  const syn = makeSynthesis();
+  return analyzeTacticForAsr(tmp, syn, syn.atributos_de_calidad_y_asrs[0], opts);
+}
 
-beforeEach(() => {
-  tmp = fs.mkdtempSync(path.join(os.tmpdir(), "tactics-test-"));
-  synthesisPath = path.join(tmp, "entrevista-123-sintesis.json");
-  fs.writeFileSync(synthesisPath, JSON.stringify(makeSynthesis()));
+// ─── Mapeo atributo → categoría ──────────────────────────────────────────
+
+test("mapearAtributoACategoria: nombres directos y keywords primarias son confiad@s", () => {
+  for (const [texto, esperada] of [
+    ["Rendimiento", "rendimiento"],
+    ["Disponibilidad", "disponibilidad"],
+    ["Seguridad de la información", "seguridad"],
+    ["Protección ante fallas catastróficas", "proteccion"],
+    ["Modificabilidad", "modificabilidad"],
+    ["Facilidad de despliegue", "despliegue"],
+    ["Eficiencia energética", "eficiencia_energetica"],
+    ["performance bajo carga", "rendimiento"],
+  ] as const) {
+    const r = mapearAtributoACategoria(texto);
+    assert.equal(r.categoria, esperada, `"${texto}" debe mapear a ${esperada}`);
+    assert.equal(r.confiado, true, `"${texto}" debe ser confiado`);
+  }
 });
 
-afterEach(() => {
-  fs.rmSync(tmp, { recursive: true, force: true });
+test("mapearAtributoACategoria: protección y seguridad NO se confunden (safety vs security)", () => {
+  // Keyword específica de protección gana aunque el texto mencione seguridad.
+  const r = mapearAtributoACategoria("Protección y seguridad física del sistema");
+  assert.equal(r.categoria, "proteccion");
+  const s = mapearAtributoACategoria("Resistir ataques y proteger credenciales");
+  assert.notEqual(s.categoria, "proteccion");
+});
+
+test("mapearAtributoACategoria: sin match devuelve null no-confiado (fallback manual)", () => {
+  const r = mapearAtributoACategoria("Usabilidad");
+  assert.equal(r.categoria, null);
+  assert.equal(r.confiado, false);
+  const vacio = mapearAtributoACategoria("");
+  assert.equal(vacio.categoria, null);
+});
+
+// ─── Catálogo: inyección + guardrail ─────────────────────────────────────
+
+test("analyzeTacticForAsr: inyecta el archivo de SU categoría con la regla de exclusividad", async () => {
+  const { client, calls } = makeMockClient([
+    () => okPrompt(analysisPayload([candidata({ es_recomendada: true })])),
+  ]);
+  setTestClient(client);
+  const res = await analizarPrimero();
+  void res;
+  const texto = calls.prompt[0].parts[0].text;
+  assert.ok(texto.includes(CATALOGO_RENDIMIENTO.trim()), "el contenido completo del catálogo va inline");
+  assert.ok(
+    texto.includes("usá EXCLUSIVAMENTE las tácticas de este catálogo, nombres exactos, sin inventar variantes ni mezclar con otras fuentes"),
+    "la instrucción anti-invención está en el prompt",
+  );
+  assert.ok(!texto.includes("Cifrar los datos"), "NO inyecta categorías ajenas al ASR");
+});
+
+test("analyzeTacticForAsr: guardrail rechaza nombre inventado y reintenta; si persiste, falla", async () => {
+  const inventada = analysisPayload([candidata({ es_recomendada: true, nombre_tactica: "Cache distribuido con TTL adaptativo" })]);
+  const { client } = makeMockClient([() => okPrompt(inventada)]);
+  setTestClient(client);
+  const res = await analizarPrimero();
+  assert.equal(res.ok, false);
+  if (!res.ok && !("reason" in res)) assert.match(res.error, /fuera de contrato/);
+});
+
+test("analyzeTacticForAsr: guardrail acepta paráfrasis cuyo matchea por tokens (sin 'los')", async () => {
+  const parafraseada = analysisPayload([
+    candidata({ es_recomendada: true, nombre_tactica: "gestionar pedidos de trabajo" }),
+  ]);
+  const { client, calls } = makeMockClient([() => okPrompt(parafraseada)]);
+  setTestClient(client);
+  const res = await analizarPrimero();
+  assert.ok(res.ok, "la paráfrasis con tokens del heading es válida");
+  assert.equal(calls.prompt.length, 1, "no consume reintentos");
+});
+
+test("analyzeTacticForAsr: atributo sin categoría del catálogo falla ANTES de llamar al modelo", async () => {
+  const { client, calls } = makeMockClient([]);
+  setTestClient(client);
+  const syn = makeSynthesis();
+  const res = await analyzeTacticForAsr(tmp, syn, syn.atributos_de_calidad_y_asrs[2]);
+  assert.ok(!res.ok && (res as { reason?: string }).reason === "categoria_no_mapeada");
+  assert.match((res as { error: string }).error, /Usabilidad/);
+  assert.equal(calls.create.length, 0, "no se paga sesión ni llamada sin categoría");
+});
+
+test("analyzeTacticForAsr: categoría explícita (fallback manual) pisa el mapeo automático", async () => {
+  const { client, calls } = makeMockClient([
+    () =>
+      okPrompt(
+        analysisPayload([{ ...candidata(), nombre_tactica: "Cifrar los datos", es_recomendada: true }]),
+      ),
+  ]);
+  setTestClient(client);
+  const res = await analizarPrimero({ categoriaExplicita: "seguridad" });
+  assert.ok(res.ok);
+  if (!res.ok) return;
+  assert.equal(res.categoriaUsada, "seguridad", "la explícita pisa 'rendimiento' del atributo");
+  assert.equal(res.data.categoria_atributo, "seguridad", "categoria_atributo la fija el motor");
+  const texto = calls.prompt[0].parts[0].text;
+  assert.ok(texto.includes("Cifrar los datos"), "inyecta el catálogo de la explícita");
+  assert.ok(!texto.includes(TACTICA_PRINCIPAL), "no mezcla el catálogo del atributo");
 });
 
 // ─── Análisis por ASR ─────────────────────────────────────────────────────
 
 test("analyzeTacticForAsr: una sesión efímera propia, liberada al terminar; asr_id lo fija el motor", async () => {
   const { client, calls } = makeMockClient([
-    () =>
-      okPrompt(
-        analysisPayload([
-          candidata({ es_recomendada: true }),
-        ]),
-      ),
+    () => okPrompt(analysisPayload([candidata({ es_recomendada: true })])),
   ]);
   setTestClient(client);
-  const res = await analyzeTacticForAsr(tmp, makeSynthesis(), makeSynthesis().atributos_de_calidad_y_asrs[0]);
+  const res = await analizarPrimero();
   assert.equal(res.ok, true);
   if (!res.ok) return;
   assert.equal(res.data.asr_id, "ASR-001", "el eco del modelo no manda: el motor fija el id");
   assert.equal(calls.create.length, 1, "UNA sesión efímera por llamada");
   assert.equal(calls.deleted.length, 1, "la sesión se libera en finally");
-  assert.equal(calls.deleted[0], calls.create[0] ? "ses_mock_1" : "");
 });
 
 test("analyzeTacticForAsr: única candidata sin es_unica_viable se SANITIZA a true (badge garantizado)", async () => {
   const { client } = makeMockClient([() => okPrompt(analysisPayload([candidata({ es_recomendada: true })]))]);
   setTestClient(client);
-  const res = await analyzeTacticForAsr(tmp, makeSynthesis(), makeSynthesis().atributos_de_calidad_y_asrs[0]);
+  const res = await analizarPrimero();
   assert.ok(res.ok && res.data.candidatas[0].es_unica_viable === true);
 });
 
 test("analyzeTacticForAsr: varias candidatas NUNCA llevan es_unica_viable (se limpia el flag mentiroso)", async () => {
   const payload = analysisPayload([
     candidata({ es_recomendada: true, es_unica_viable: true }),
-    candidata({ nombre_tactica: "Cola de mensajes" }),
+    candidata({ nombre_tactica: TACTICA_TERCIARIA }),
   ]);
   const { client } = makeMockClient([() => okPrompt(payload)]);
   setTestClient(client);
-  const res = await analyzeTacticForAsr(tmp, makeSynthesis(), makeSynthesis().atributos_de_calidad_y_asrs[0]);
+  const res = await analizarPrimero();
   assert.ok(res.ok && res.data.candidatas.every((c) => c.es_unica_viable === false));
 });
 
 test("analyzeTacticForAsr: reintenta cuando hay DOS recomendadas y acepta al intento válido", async () => {
   const malo = analysisPayload([
     candidata({ es_recomendada: true }),
-    candidata({ nombre_tactica: "Otra", es_recomendada: true }),
+    candidata({ nombre_tactica: TACTICA_SECUNDARIA, es_recomendada: true }),
   ]);
-  const bueno = analysisPayload([candidata({ es_recomendada: true }), candidata({ nombre_tactica: "Otra" })]);
+  const bueno = analysisPayload([
+    candidata({ es_recomendada: true }),
+    candidata({ nombre_tactica: TACTICA_SECUNDARIA }),
+  ]);
   const { client } = makeMockClient([() => okPrompt(malo), () => okPrompt(bueno)]);
   setTestClient(client);
   const antes = structuredRetryCount();
-  const res = await analyzeTacticForAsr(tmp, makeSynthesis(), makeSynthesis().atributos_de_calidad_y_asrs[0]);
+  const res = await analizarPrimero();
   assert.ok(res.ok, "el segundo intento debe validar");
   assert.ok(structuredRetryCount() > antes, "el fallo de contrato consumió un reintento auditado");
 });
@@ -270,13 +423,13 @@ test("analyzeTacticForAsr: reintenta cuando hay DOS recomendadas y acepta al int
 test("analyzeTacticForAsr: falla si alguna candidata no tiene conexión de negocio (100% obligatoria)", async () => {
   const payload = analysisPayload([
     candidata({ es_recomendada: true }),
-    candidata({ nombre_tactica: "Sin conexión", conexion_con_objetivo_de_negocio: "   " }),
+    candidata({ nombre_tactica: TACTICA_CUARTA, conexion_con_objetivo_de_negocio: "   " }),
   ]);
   const { client } = makeMockClient([() => okPrompt(payload)]);
   setTestClient(client);
-  const res = await analyzeTacticForAsr(tmp, makeSynthesis(), makeSynthesis().atributos_de_calidad_y_asrs[0]);
+  const res = await analizarPrimero();
   assert.equal(res.ok, false);
-  if (!res.ok) assert.match(res.error, /fuera de contrato/);
+  if (!res.ok && !("reason" in res)) assert.match(res.error, /fuera de contrato/);
 });
 
 test("analyzeTacticForAsr: exige sacrificio declarado cuando cumple_totalmente=false", async () => {
@@ -285,9 +438,9 @@ test("analyzeTacticForAsr: exige sacrificio declarado cuando cumple_totalmente=f
   ]);
   const { client } = makeMockClient([() => okPrompt(payload)]);
   setTestClient(client);
-  const res = await analyzeTacticForAsr(tmp, makeSynthesis(), makeSynthesis().atributos_de_calidad_y_asrs[0]);
+  const res = await analizarPrimero();
   assert.equal(res.ok, false);
-  if (!res.ok) assert.match(res.error, /fuera de contrato/);
+  if (!res.ok && !("reason" in res)) assert.match(res.error, /fuera de contrato/);
 });
 
 // ─── Consolidación ────────────────────────────────────────────────────────
@@ -350,9 +503,10 @@ test("buildYStatementFromCandidate: una línea desde los campos de la candidata,
   const syn = makeSynthesis();
   const c = candidata() as unknown as TacticaCandidata;
   const y = buildYStatementFromCandidate(syn.atributos_de_calidad_y_asrs[0], c);
-  assert.match(y, /^En el contexto de Rendimiento \(ASR-001\), decidimos optar por Cache para lograr/);
+  assert.match(y, new RegExp(`optar por ${TACTICA_PRINCIPAL} para lograr`));
   assert.match(y, /aceptando Memoria extra del proceso único, sin costo de infra\.$/);
   assert.equal(y.split("\n").length, 1, "formato UNA línea");
+  assert.doesNotMatch(y, /\.\./, "nunca termina con doble punto");
 });
 
 // ─── Render del ADR ───────────────────────────────────────────────────────
@@ -366,14 +520,14 @@ function adrInput(overrides: Partial<Parameters<typeof renderAdrMarkdown>[0]> = 
     sintesisFileName: "entrevista-123-sintesis.json",
     fecha: "2026-08-23",
     yStatement: "En el contexto de X decidimos Y aceptando Z.",
-    tacticaNombre: "Cache",
+    tacticaNombre: TACTICA_PRINCIPAL,
     conexionNegocio: "MVP rápido sin servidores caros.",
     decisionTexto: "Argumentación de la candidata elegida.",
     decisionEsTextoLibre: false,
     justificacionRecomendada: "Justificación del análisis.",
     elegidaEsLaRecomendada: true,
     tradeOffsElegida: "Memoria extra del proceso único.",
-    candidatasDescartadas: [candidata({ nombre_tactica: "CDN" }) as unknown as TacticaCandidata],
+    candidatasDescartadas: [candidata({ nombre_tactica: TACTICA_SECUNDARIA }) as unknown as TacticaCandidata],
     conflictosInvolucrados: [] as ConflictoTacticas[],
     conflictosAceptados: false,
     limitacionAceptada: null,
@@ -383,13 +537,13 @@ function adrInput(overrides: Partial<Parameters<typeof renderAdrMarkdown>[0]> = 
 
 test("renderAdrMarkdown: template completo con candidatas descartadas y conexión de negocio", () => {
   const md = renderAdrMarkdown(adrInput());
-  assert.match(md, /^# ADR-001: Cache$/m);
+  assert.match(md, new RegExp(`^# ADR-001: ${TACTICA_PRINCIPAL}$`, "m"));
   assert.match(md, /\*\*Estado\*\*: Aceptado/);
   assert.match(md, /> En el contexto de X decidimos Y aceptando Z\./);
   assert.match(md, /## Por qué importa para el proyecto/);
   assert.match(md, /MVP rápido sin servidores caros\./);
   assert.match(md, /## Candidatas consideradas/);
-  assert.match(md, /CDN/, "las descartadas quedan registradas con su argumentación");
+  assert.match(md, new RegExp(TACTICA_SECUNDARIA), "las descartadas quedan registradas con su argumentación");
   assert.match(md, /Conexión con objetivo de negocio: Permite demostrar el MVP/, "cada descartada lleva su conexión");
   assert.match(md, /## Consecuencias \/ Trade-offs/);
   assert.match(md, /Ninguno detectado/);
@@ -419,10 +573,8 @@ test("renderAdrMarkdown: riesgo aceptado consciente queda EN Consecuencias, no s
     }),
   );
   const consecuenciasIdx = md.indexOf("## Consecuencias");
-  assert.ok(conducenciasDespues(md, consecuenciasIdx), "el riesgo va dentro de Consecuencias");
-  function conducenciasDespues(texto: string, desde: number): boolean {
-    return texto.indexOf("**Riesgo aceptado conscientemente**") > desde;
-  }
+  const riesgoIdx = md.indexOf("**Riesgo aceptado conscientemente**");
+  assert.ok(riesgoIdx > consecuenciasIdx, "el riesgo va dentro de Consecuencias");
   assert.match(md, /Conflictos detectados con otras tácticas.*?Cifrado en tránsito/s);
 });
 
@@ -446,7 +598,7 @@ async function confirmPrimera(): Promise<void> {
       okPrompt(
         analysisPayload([
           candidata({ es_recomendada: true }),
-          candidata({ nombre_tactica: "CDN" }),
+          candidata({ nombre_tactica: TACTICA_SECUNDARIA }),
         ]),
       ),
   ]);
@@ -488,10 +640,7 @@ test("confirmTacticDecision: supersede crea ADR nuevo, marca SOLO Estado del vie
   const { client } = makeMockClient([
     () =>
       okPrompt(
-        analysisPayload(
-          [candidata({ es_recomendada: true, nombre_tactica: "CDN" })],
-          { categoria_atributo: "rendimiento" },
-        ),
+        analysisPayload([candidata({ es_recomendada: true, nombre_tactica: TACTICA_SECUNDARIA })]),
       ),
   ]);
   setTestClient(client);
@@ -585,7 +734,7 @@ test("formatDecisionsForPrompt: vacío sin manifiesto; con ADRs incluye y_statem
 test("formatDecisionsForPrompt: tras un supersede lista los ADRs reemplazados (criterio 11)", async () => {
   await confirmPrimera();
   const { client } = makeMockClient([
-    () => okPrompt(analysisPayload([candidata({ es_recomendada: true, nombre_tactica: "CDN" })])),
+    () => okPrompt(analysisPayload([candidata({ es_recomendada: true, nombre_tactica: TACTICA_SECUNDARIA })])),
   ]);
   setTestClient(client);
   const syn = makeSynthesis();

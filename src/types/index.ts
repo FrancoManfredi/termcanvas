@@ -1155,8 +1155,13 @@ export interface TermCanvasAPI {
           ok: true;
           resultados: Record<
             string,
-            | { ok: true; data: TacticsAnalysisOutput }
-            | { ok: false; error: string }
+            | {
+                ok: true;
+                data: TacticsAnalysisOutput;
+                categoriaUsada: string;
+                categoriaConfiada: boolean;
+              }
+            | { ok: false; reason?: "categoria_no_mapeada"; atributo?: string; error: string }
           >;
           consolidacion:
             | { ok: true; skipped: true }
@@ -1182,9 +1187,15 @@ export interface TermCanvasAPI {
       projectPath: string,
       synthesisPath: string,
       asrId: string,
+      categoriaExplicita?: string,
     ) => Promise<
-      | { ok: true; data: TacticsAnalysisOutput }
-      | { ok: false; error: string }
+      | {
+          ok: true;
+          data: TacticsAnalysisOutput;
+          categoriaUsada: string;
+          categoriaConfiada: boolean;
+        }
+      | { ok: false; reason?: "categoria_no_mapeada"; atributo?: string; error: string }
     >;
     consolidateTactics: (
       projectPath: string,

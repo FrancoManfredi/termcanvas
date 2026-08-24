@@ -24,6 +24,10 @@ extraResources:
     to: skills
     filter:
       - "**/*"
+  - from: resources/architecture-tactics
+    to: architecture-tactics
+    filter:
+      - "**/*"
 asarUnpack:
   - node_modules/node-pty/**/*
 
