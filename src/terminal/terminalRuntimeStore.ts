@@ -47,6 +47,7 @@ import { useCodexQuotaStore } from "../stores/codexQuotaStore";
 import { useThemeStore, XTERM_THEMES } from "../stores/themeStore";
 import type { TerminalData, TerminalStatus, TerminalType } from "../types";
 import {
+  clampPromptArg,
   getTerminalLaunchOptions,
   getTerminalPromptArgs,
   getTerminalPromptOnResume,
@@ -1713,7 +1714,7 @@ async function spawnPty(
         ...launch.args,
         ...runPinArgs,
         ...(runtime.meta.terminal.initialPrompt
-          ? [runtime.meta.terminal.initialPrompt]
+          ? [clampPromptArg(runtime.meta.terminal.initialPrompt)]
           : []),
       ];
     } else {
@@ -1723,7 +1724,7 @@ async function spawnPty(
           getTerminalPromptOnResume(runtime.meta.terminal.type))
           ? getTerminalPromptArgs(
               runtime.meta.terminal.type,
-              runtime.meta.terminal.initialPrompt,
+              clampPromptArg(runtime.meta.terminal.initialPrompt),
             )
           : [];
       options.shell = launch.shell;

@@ -31,6 +31,10 @@ export interface AgentConfig {
   model: string;
   cwd?: string;
   resumeSessionId?: string;
+  /** Proyecto TermCanvas para resolver MCPs (todos los LLMs). Si no viene, se intenta derivar de cwd. */
+  projectId?: string;
+  /** Scope futuro: "project" (default) vs "terminal"/"agent". */
+  mcpScope?: "project" | "terminal" | "agent";
 }
 
 const SYSTEM_PROMPT = `You are an AI assistant embedded in TermCanvas, a terminal-based canvas workspace.
@@ -57,6 +61,9 @@ export class AgentService {
   private drivers = new Map<string, ClaudeCodeDriver>();
   private window: BrowserWindow | null = null;
   private tools: ToolRegistry;
+  private mcpResolver?: (projectId: string, scope?: string) => Promise<Array<{ serverId: string; name: string; description?: string; inputSchema?: unknown }>>;
+  private mcpExecutor?: (projectId: string, serverId: string, toolName: string, args: Record<string, unknown>) => Promise<{ content: string; isError?: boolean }>;
+  private projectPathToId?: (projectPath: string) => string | null;
 
   constructor() {
     this.tools = new ToolRegistry();
@@ -65,6 +72,31 @@ export class AgentService {
 
   setWindow(win: BrowserWindow): void {
     this.window = win;
+  }
+
+  setMcpResolver(
+    resolver: (projectId: string, scope?: string) => Promise<Array<{ serverId: string; name: string; description?: string; inputSchema?: unknown }>>,
+  ): void {
+    this.mcpResolver = resolver;
+  }
+
+  setMcpExecutor(
+    executor: (projectId: string, serverId: string, toolName: string, args: Record<string, unknown>) => Promise<{ content: string; isError?: boolean }>,
+  ): void {
+    this.mcpExecutor = executor;
+  }
+
+  setProjectResolver(resolver: (projectPath: string) => string | null): void {
+    this.projectPathToId = resolver;
+  }
+
+  private resolveProjectId(config: AgentConfig): string | null {
+    if (config.projectId) return config.projectId;
+    if (config.cwd && this.projectPathToId) {
+      const viaPath = this.projectPathToId(config.cwd);
+      if (viaPath) return viaPath;
+    }
+    return null;
   }
 
   private getSession(sessionId: string): AgentSession {
@@ -106,13 +138,59 @@ export class AgentService {
 
     const provider = createProvider(config);
 
+    // Resolver MCP tools para este proyecto/scope (si hay manager)
+    let effectiveTools: ToolRegistry = this.tools;
+    const projectId = this.resolveProjectId(config);
+    if (projectId && this.mcpResolver) {
+      try {
+        const mcpRefs = await this.mcpResolver(projectId, config.mcpScope ?? "project");
+        if (mcpRefs.length > 0) {
+          effectiveTools = new ToolRegistry();
+          // copiar tools base
+          for (const t of this.tools.all()) effectiveTools.register(t);
+          // inyectar stubs MCP (v1). En v2 se instanciarán con schemas reales del MCP server.
+          const { z } = await import("zod");
+          for (const ref of mcpRefs) {
+            const toolName = ref.name;
+            const serverId = ref.serverId;
+            const description = ref.description ?? `MCP ${serverId} tool ${toolName}`;
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            const schema = (ref.inputSchema as any) ?? z.object({ input: z.string().optional().describe("JSON input for the tool") });
+            const zodAny = z as unknown as { object: (s: unknown) => import("zod").ZodObject<import("zod").ZodRawShape> };
+            const inputSchema = typeof schema === "object" && "shape" in (schema as object) ? (schema as import("zod").ZodObject<import("zod").ZodRawShape>) : zodAny.object({ input: z.string().optional() });
+            effectiveTools.register({
+              name: toolName,
+              description,
+              inputSchema,
+              isReadOnly: false,
+              call: async (input: Record<string, unknown>) => {
+                if (this.mcpExecutor) {
+                  try {
+                    const res = await this.mcpExecutor(projectId, serverId, toolName, input);
+                    return { content: [{ type: "text", text: res.content }], isError: res.isError };
+                  } catch (e) {
+                    return { content: [{ type: "text", text: `MCP ${serverId}/${toolName} error: ${e instanceof Error ? e.message : String(e)}` }], isError: true };
+                  }
+                }
+                return {
+                  content: [{ type: "text", text: `[MCP ${serverId}] ${toolName} llamado con ${JSON.stringify(input)} — stub v1: conectá el MCP en Ajustes > MCP y reintentá. El tool real se ejecutará vía MCP cuando el manager esté conectado.` }],
+                };
+              },
+            });
+          }
+        }
+      } catch (e) {
+        console.warn("[AgentService] MCP resolver failed:", e);
+      }
+    }
+
     session.abortController = new AbortController();
     session.running = true;
 
     this.emit(sessionId, { type: "stream_start" });
 
     try {
-      const loop = agentLoop(provider, this.tools, session.messages, {
+      const loop = agentLoop(provider, effectiveTools, session.messages, {
         systemPrompt: SYSTEM_PROMPT,
         maxTurns: 20,
         signal: session.abortController.signal,

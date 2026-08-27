@@ -197,7 +197,13 @@ export default defineConfig({
   // watcher would otherwise see those writes, decide a "source file"
   // changed, and trigger a full renderer reload (visible as a
   // Cmd+R-style flash whenever a child Claude is dispatched). The
-  // .gitignore covers git but not Vite — explicit ignore here.
+  // .gitignore covers git but not Vite - explicit ignore here.
+  //
+  // scripts/.tools/ and .termcanvas/ are runtime caches too: the
+  // issue-gate/diagnostico scripts download & extract binaries into
+  // .tools WHILE the dev server runs, and watching freshly extracted
+  // files races their Windows locks — chokidar's fs.watch then throws
+  // EBUSY and the unhandled 'error' event kills the whole dev process.
   server: {
     watch: {
       ignored: [
@@ -205,6 +211,8 @@ export default defineConfig({
         "**/.worktrees/**",
         "**/.hydra-result-*.md",
         "**/.hydra-task-*.md",
+        "**/scripts/.tools/**",
+        "**/.termcanvas/**",
       ],
     },
   },

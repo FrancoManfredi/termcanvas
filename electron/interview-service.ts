@@ -17,6 +17,7 @@
 
 import { ipcMain } from "electron";
 import path from "node:path";
+import { capPromptContextText } from "../shared/prompt-context-cap.ts";
 import {
   cancelInterviewSession,
   setPhaseActivityListener,
@@ -256,7 +257,10 @@ export function registerInterviewIpc(): void {
       if (typeof projectPath !== "string" || projectPath.length === 0) {
         throw new Error("interview:activeRequirementsText requiere projectPath");
       }
-      return resolveRequirementsForPrompt(projectPath, opts)?.text ?? "";
+      const resolved = resolveRequirementsForPrompt(projectPath, opts);
+      return resolved
+        ? capPromptContextText(resolved.text, resolved.sourcePath)
+        : "";
     },
   );
 
@@ -442,7 +446,9 @@ export function registerInterviewIpc(): void {
       throw new Error("interview:activeBriefText requiere projectPath");
     }
     const activo = getActiveBrief(projectPath);
-    return activo ? formatBriefForPrompt(activo.brief) : "";
+    return activo
+      ? capPromptContextText(formatBriefForPrompt(activo.brief), activo.path)
+      : "";
   });
 
   // ── Entrevista de CONTEXTO (Fase 0, brief) ─────────────────────────────

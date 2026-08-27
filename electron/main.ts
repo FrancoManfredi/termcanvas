@@ -167,6 +167,7 @@ import {
   stageHunk,
   unstageHunk,
   getBlame,
+  resolveBranchCheckoutRef,
 } from "./git-info";
 import { parseNulSeparatedGitPaths } from "./git-paths";
 import { createMenu } from "./menu";
@@ -193,6 +194,11 @@ import { SessionScanner } from "./session-scanner.ts";
 import { mergeAndDedupeSessions } from "./session-list.ts";
 import { buildPinRenderHtml } from "./pin-render-utils";
 import { registerContextSyncIpc } from "./context-sync-ipc";
+import { McpManager } from "./mcp/manager.ts";
+import { McpVault } from "./mcp/vault.ts";
+import { registerMcpIpc } from "./mcp/ipc.ts";
+import { writeMcpToAgentsDir } from "./mcp/sync.ts";
+import { getMcpEnvForCwd, registerMcpProject } from "./mcp/project-env.ts";
 import type { RenderDiagnosticEventInput } from "../shared/render-diagnostics";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -346,6 +352,23 @@ const telemetryService = new TelemetryService({
   },
 });
 const agentService = new AgentService();
+const mcpVault = new McpVault();
+const mcpManager = new McpManager({ vault: mcpVault });
+// Conectar MCP tools al AgentService (project-scoped, extensible a terminal/agent por mcpScope)
+agentService.setMcpResolver(async (projectId, scope) => {
+  return mcpManager.getToolsForProject(projectId, (scope as import("../shared/mcp.ts").McpScope) ?? "project");
+});
+agentService.setMcpExecutor(async (projectId, serverId, toolName, args) => {
+  // v1 stub executor: en v2 proxeará al MCP server real
+  return { content: `[MCP ${serverId}] ${toolName} ejecutado con ${JSON.stringify(args)} — stub v1. Conectá el MCP en Ajustes > MCP.` };
+});
+// Resolver cwd -> projectId para cuando el renderer no manda projectId explícito (compat)
+agentService.setProjectResolver((projectPath: string) => {
+  // No tenemos proyecto en main de forma síncrona; el renderer debe mandar projectId.
+  // Este fallback queda para futuro si statePersistence expone proyectos.
+  void projectPath;
+  return null;
+});
 const sessionScanner = new SessionScanner();
 const renderDiagnostics = createRenderDiagnosticsLogger(
   app.getPath("userData"),
@@ -658,15 +681,22 @@ function setupIpc() {
         `terminal:create shell=${options.shell ?? "(default)"} args=${JSON.stringify(options.args)} cwd=${options.cwd}`,
       );
       const cliDir = getCliDir();
+      // Inyectar tokens MCP del proyecto como env vars para que `opencode` los vea vía {env:VAR}
+      // Los tokens quedan en vault cifrado, no en opencode.json del proyecto.
+      let mcpEnv: Record<string, string> = {};
+      try {
+        mcpEnv = await getMcpEnvForCwd(options.cwd, mcpManager);
+      } catch {}
+      const envOverrides: Record<string, string> = {};
+      if (hookSocketPath) envOverrides.TERMCANVAS_SOCKET = hookSocketPath;
+      Object.assign(envOverrides, mcpEnv);
       const ptyId = await ptyManager.create({
         ...options,
         extraPathEntries: getTerminalExtraPathEntries(
           cliDir,
           options.terminalType,
         ),
-        ...(hookSocketPath
-          ? { envOverrides: { TERMCANVAS_SOCKET: hookSocketPath } }
-          : {}),
+        ...(Object.keys(envOverrides).length ? { envOverrides } : {}),
       });
       const pid = ptyManager.getPid(ptyId);
       dbg(`terminal:create => ptyId=${ptyId} pid=${pid ?? "null"}`);
@@ -1007,42 +1037,26 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         const { execFile } = await import("child_process");
         const { promisify } = await import("util");
         const execFileAsync = promisify(execFile);
-        const branchExists = async (ref: string) => {
-          try {
-            await execFileAsync("git", ["rev-parse", "--verify", ref], {
-              cwd: resolvedRepo,
-            });
-            return true;
-          } catch {
-            return false;
-          }
-        };
-        if (await branchExists(`refs/heads/${trimmedBranch}`)) {
+        // Same self-healing as the review flow: a branch that only exists on
+        // origin is fetched and checked out from its remote-tracking ref.
+        const resolved = await resolveBranchCheckoutRef(resolvedRepo, trimmedBranch);
+        if (!resolved.ok) {
+          return { ok: false as const, error: resolved.error };
+        }
+        if (resolved.hasLocal) {
+          // Attach the existing local branch: `-b` would die with
+          // "fatal: a branch named '...' already exists".
           await execFileAsync(
             "git",
             ["worktree", "add", worktreePath, trimmedBranch],
             { cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
           );
-        } else if (
-          await branchExists(`refs/remotes/origin/${trimmedBranch}`)
-        ) {
+        } else {
           await execFileAsync(
             "git",
-            [
-              "worktree",
-              "add",
-              "-b",
-              trimmedBranch,
-              worktreePath,
-              `origin/${trimmedBranch}`,
-            ],
+            ["worktree", "add", "-b", trimmedBranch, worktreePath, `origin/${trimmedBranch}`],
             { cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
           );
-        } else {
-          return {
-            ok: false as const,
-            error: `Branch "${trimmedBranch}" not found locally or on origin — the PR head ref is unreachable`,
-          };
         }
         const worktrees = await projectScanner.listWorktreesAsync(resolvedRepo);
         return { ok: true as const, path: worktreePath, worktrees };
@@ -1124,12 +1138,19 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         const { execFile } = await import("child_process");
         const { promisify } = await import("util");
         const execFileAsync = promisify(execFile);
+        // Resolve before creating: the PR head may exist only on GitHub when
+        // this clone never fetched the branch, which used to fail the whole
+        // review with "fatal: invalid reference".
+        const resolved = await resolveBranchCheckoutRef(resolvedRepo, trimmedBranch);
+        if (!resolved.ok) {
+          return { ok: false as const, error: resolved.error };
+        }
         // The PR branch stays bound to the implementer's worktree and the
         // reviewer must never create its own branch or PR, so the review
         // copy is a detached checkout of the PR branch's commit.
         await execFileAsync(
           "git",
-          ["worktree", "add", "--detach", worktreePath, trimmedBranch],
+          ["worktree", "add", "--detach", worktreePath, resolved.ref],
           { cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
         );
         // Persist the source branch so the scanner can display
@@ -2600,13 +2621,17 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
       sessionId: string,
       text: string,
       config: {
-        type: "anthropic" | "openai";
+        type: "anthropic" | "openai" | "claude-code";
         baseURL: string;
         apiKey: string;
         model: string;
+        cwd?: string;
+        resumeSessionId?: string;
+        projectId?: string;
+        mcpScope?: "project" | "terminal" | "agent";
       },
     ) => {
-      agentService.send(sessionId, text, config);
+      await agentService.send(sessionId, text, config as AgentConfig);
     },
   );
 
@@ -5150,6 +5175,7 @@ app.whenReady().then(async () => {
   });
   setupIpc();
   registerContextSyncIpc();
+  registerMcpIpc(mcpManager);
   registerInterviewIpc();
   // Catálogo de modelos + routing por fase (models:*).
   registerModelCatalogIpc();

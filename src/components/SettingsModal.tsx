@@ -26,6 +26,7 @@ import { FONT_REGISTRY } from "../terminal/fontRegistry";
 import { loadFont } from "../terminal/fontLoader";
 import { useNotificationStore } from "../stores/notificationStore";
 import { PhaseModelsSection } from "./settings/PhaseModelsSection";
+import { McpIntegrationsSection } from "./settings/McpSection";
 import { useUpdaterStore } from "../stores/updaterStore";
 
 const platform = window.termcanvas?.app.platform ?? "darwin";
@@ -623,6 +624,7 @@ const TAB_LABEL_KEYS: Record<Tab, string> = {
   appearance: "settings_appearance",
   features: "settings_features",
   agent: "settings_agent",
+  integrations: "settings_integrations",
   shortcuts: "settings_shortcuts",
 };
 
@@ -697,6 +699,7 @@ export function SettingsModal({ onClose }: Props) {
       "appearance",
       "features",
       "agent",
+      "integrations",
       "shortcuts",
     ];
   }, []);
@@ -1457,6 +1460,13 @@ export function SettingsModal({ onClose }: Props) {
 
                   <PhaseModelsSection />
                 </div>
+              </section>
+            )}
+
+            {tab === "integrations" && (
+              <section>
+                <SectionHeader title={t.settings_integrations ?? "Integrations"} />
+                <McpIntegrationsSection />
               </section>
             )}
 

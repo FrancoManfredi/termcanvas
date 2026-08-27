@@ -9,6 +9,8 @@ import type {
   SpatialWaypoint,
   SpatialWaypointSlot,
 } from "../types/index.ts";
+import type { ProjectMcpConfig, McpServerId } from "../../shared/mcp.ts";
+import { sanitizeProjectMcpConfig } from "../../shared/mcp.ts";
 import {
   filterValidSelectedItems,
   sameSelectedItems,
@@ -177,6 +179,10 @@ interface ProjectStore {
   clearWaypoint: (projectId: string, slot: SpatialWaypointSlot) => void;
 
   setProjects: (projects: ProjectData[]) => void;
+
+  setProjectMcpConfig: (projectId: string, config: ProjectMcpConfig) => void;
+  setProjectMcpServerEnabled: (projectId: string, serverId: McpServerId, enabled: boolean) => void;
+  getProjectMcpConfig: (projectId: string) => ProjectMcpConfig | null;
 }
 
 interface ScannedWorktree {
@@ -1191,8 +1197,44 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
   },
 
   setProjects: (projects) => {
-    set(() => normalizeProjectsFocus(projects));
+    const sanitized = projects.map((p) => ({
+      ...p,
+      mcp: p.mcp ? sanitizeProjectMcpConfig(p.mcp) : undefined,
+    }));
+    set(() => normalizeProjectsFocus(sanitized));
     markDirty();
+  },
+
+  setProjectMcpConfig: (projectId, config) => {
+    const sanitized = sanitizeProjectMcpConfig(config);
+    set((state) => ({
+      projects: state.projects.map((p) => (p.id === projectId ? { ...p, mcp: sanitized } : p)),
+    }));
+    markDirty();
+  },
+
+  setProjectMcpServerEnabled: (projectId, serverId, enabled) => {
+    set((state) => ({
+      projects: state.projects.map((p) => {
+        if (p.id !== projectId) return p;
+        const current = p.mcp ? sanitizeProjectMcpConfig(p.mcp) : sanitizeProjectMcpConfig(undefined);
+        const idx = current.servers.findIndex((s) => s.id === serverId);
+        if (idx >= 0) {
+          current.servers[idx] = { ...current.servers[idx], enabled, updatedAt: Date.now() };
+        } else {
+          current.servers.push({ id: serverId, enabled, updatedAt: Date.now() });
+        }
+        return { ...p, mcp: current };
+      }),
+    }));
+    markDirty();
+  },
+
+  getProjectMcpConfig: (projectId) => {
+    const p = get().projects.find((pr) => pr.id === projectId);
+    if (!p) return null;
+    if (p.mcp) return sanitizeProjectMcpConfig(p.mcp);
+    return sanitizeProjectMcpConfig(undefined);
   },
 }));
 

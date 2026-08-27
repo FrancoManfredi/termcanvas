@@ -305,10 +305,13 @@ export interface ProjectData {
   collapsed?: boolean;
   worktrees: WorktreeData[];
   waypoints?: SpatialWaypointMap;
+  /** MCP por proyecto (catálogo cerrado). Syncea vía sidecar privado; secretos en vault local. */
+  mcp?: import("../../shared/mcp").ProjectMcpConfig;
 }
 
 export interface PersistedProjectData extends Omit<ProjectData, "worktrees"> {
   worktrees: PersistedWorktreeData[];
+  mcp?: import("../../shared/mcp").ProjectMcpConfig;
 }
 
 export interface CanvasState {
@@ -616,6 +619,8 @@ export type {
   ContextSyncStatus,
 };
 
+export type { ProjectMcpConfig, ProjectMcpStatus, McpServerState, McpCatalogEntry } from "../../shared/mcp.ts";
+
 export interface TermCanvasAPI {
   // Rutas del lado de la app (proceso principal): scriptsDir es donde viven
   // los scripts de soporte (ej. run-diagnostico-tools.mjs del pipeline de
@@ -634,6 +639,21 @@ export interface TermCanvasAPI {
     sync: (
       repoPath: string,
     ) => Promise<IpcEnvelope<{ pulled: ContextSyncPull; pushed: ContextSyncPush }>>;
+  };
+  mcp: {
+    status: (projectId: string, projectPath: string) => Promise<IpcEnvelope<import("../../shared/mcp.ts").ProjectMcpStatus>>;
+    setEnabled: (projectId: string, serverId: string, enabled: boolean, projectPath?: string) => Promise<IpcEnvelope<{ ok: boolean; status: string; error?: string }>>;
+    setSecret: (projectId: string, serverId: string, token: string | null, projectPath?: string) => Promise<IpcEnvelope<{ ok: boolean; status: string; error?: string }>>;
+    connect: (projectId: string, serverId: string) => Promise<IpcEnvelope<{ ok: boolean; status: string; error?: string }>>;
+    disconnect: (projectId: string, serverId: string) => Promise<IpcEnvelope<{ ok: boolean }>>;
+    getConfig: (projectId: string) => Promise<IpcEnvelope<import("../../shared/mcp.ts").ProjectMcpConfig>>;
+    hydrateConfig: (projectId: string, config: import("../../shared/mcp.ts").ProjectMcpConfig, projectPath?: string) => Promise<IpcEnvelope<{ ok: boolean }>>;
+    globalStatus: () => Promise<IpcEnvelope<Array<{ name: string; type: string; enabled: boolean; command?: string[]; url?: string; source: string; sourcePath: string }>>>;
+    projectOpencodeStatus: (projectPath: string) => Promise<IpcEnvelope<Array<{ name: string; type: string; enabled: boolean; command?: string[]; url?: string; source: string; sourcePath: string }>>>;
+    healthCheck: (projectId: string, serverId: string, projectPath: string) => Promise<IpcEnvelope<{ ok: boolean; latencyMs?: number; error?: string; details?: string }>>;
+    addCustom: (projectId: string, projectPath: string, entry: import("../../shared/mcp.ts").McpCatalogEntry) => Promise<IpcEnvelope<{ ok: boolean }>>;
+    updateCustom: (projectId: string, projectPath: string, id: string, patch: Partial<import("../../shared/mcp.ts").McpCatalogEntry>) => Promise<IpcEnvelope<{ ok: boolean }>>;
+    removeCustom: (projectId: string, projectPath: string, id: string) => Promise<IpcEnvelope<{ ok: boolean }>>;
   };
   terminal: {
     create: (options: {

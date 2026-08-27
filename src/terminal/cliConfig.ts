@@ -272,6 +272,20 @@ export function getTerminalPromptArgs(
   return config.promptArgs ? config.promptArgs(prompt) : [prompt];
 }
 
+// Windows hard-caps the WHOLE command line at 32,767 characters: CreateProcess
+// fails with error 206 (ERROR_FILENAME_EXCED_RANGE) beyond that, which kills
+// the PTY spawn with a cryptic "Cannot create process" instead of degrading.
+// The prompt travels as a single argv element (--prompt <text> or positional),
+// so it must be clamped before launch. The budget leaves room for the
+// executable path, flags, quoting inflation and the env-independent overhead.
+export const MAX_PROMPT_ARG_CHARS = 28_000;
+
+export function clampPromptArg(prompt: string): string {
+  if (prompt.length <= MAX_PROMPT_ARG_CHARS) return prompt;
+  const dropped = prompt.length - MAX_PROMPT_ARG_CHARS;
+  return `${prompt.slice(0, MAX_PROMPT_ARG_CHARS)}\n\n[TRUNCADO por TermCanvas: el prompt superó ${MAX_PROMPT_ARG_CHARS} caracteres y Windows no admite líneas de comando más largas (error 206); se descartaron los últimos ${dropped}.]`;
+}
+
 export function getTerminalPromptOnResume(type: TerminalType): boolean {
   return TERMINAL_CONFIG[type].launch?.promptOnResume ?? false;
 }
