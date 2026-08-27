@@ -5,6 +5,7 @@ type SettingsTab =
   | "appearance"
   | "features"
   | "agent"
+  | "integrations"
   | "shortcuts";
 
 interface SettingsModalStore {

@@ -276,6 +276,63 @@ export async function getGitCommitDetail(
   }
 }
 
+// Resolves a branch name to a commit-ish a detached worktree can check out
+// even when this clone never fetched the branch (e.g. the PR head was pushed
+// from another machine). Refreshes the branch from origin first so callers
+// see the real head, then falls back to the remote-tracking ref and finally
+// the local branch — only an unreachable ref fails, with the fetch error
+// preserved for diagnostics. `ref`/`source` point at the freshest head
+// (origin preferred); `hasLocal` separately reports whether the local branch
+// exists so flows that ATTACH a branch can avoid re-creating it.
+export async function resolveBranchCheckoutRef(
+  repoPath: string,
+  branch: string,
+): Promise<
+  | { ok: true; ref: string; source: "local" | "origin"; hasLocal: boolean }
+  | { ok: false; error: string }
+> {
+  const refResolves = async (ref: string) => {
+    try {
+      await execFileAsync(
+        "git",
+        ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`],
+        { cwd: repoPath, maxBuffer: DEFAULT_MAX_BUFFER },
+      );
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  // Non-fatal by design: offline clones and repos without an `origin`
+  // remote still resolve through the fallbacks below; only an unreachable
+  // ref turns this into ok:false.
+  let fetchError = "";
+  try {
+    await execFileAsync("git", ["fetch", "origin", `refs/heads/${branch}`], {
+      cwd: repoPath,
+      timeout: 60_000,
+      maxBuffer: DEFAULT_MAX_BUFFER,
+    });
+  } catch (err) {
+    fetchError = err instanceof Error ? err.message : String(err);
+  }
+
+  const hasLocal = await refResolves(`refs/heads/${branch}`);
+  if (await refResolves(`refs/remotes/origin/${branch}`)) {
+    return { ok: true, ref: `origin/${branch}`, source: "origin", hasLocal };
+  }
+  if (hasLocal) {
+    return { ok: true, ref: branch, source: "local", hasLocal };
+  }
+  return {
+    ok: false,
+    error: `Branch "${branch}" not found locally or on origin${
+      fetchError ? ` — git fetch failed: ${fetchError.split(/\r?\n/)[0]}` : ""
+    }`,
+  };
+}
+
 export async function checkoutGitRef(worktreePath: string, ref: string): Promise<void> {
   await execGitText(worktreePath, ["checkout", ref], DEFAULT_MAX_BUFFER);
 }

@@ -644,6 +644,34 @@ contextBridge.exposeInMainWorld("termcanvas", {
     sync: (repoPath: string) =>
       ipcRenderer.invoke("context-sync:sync", repoPath),
   },
+  mcp: {
+    status: (projectId: string, projectPath: string) =>
+      ipcRenderer.invoke("mcp:status", projectId, projectPath),
+    setEnabled: (projectId: string, serverId: string, enabled: boolean, projectPath?: string) =>
+      ipcRenderer.invoke("mcp:set-enabled", projectId, serverId, enabled, projectPath),
+    setSecret: (projectId: string, serverId: string, token: string | null, projectPath?: string) =>
+      ipcRenderer.invoke("mcp:set-secret", projectId, serverId, token, projectPath),
+    connect: (projectId: string, serverId: string) =>
+      ipcRenderer.invoke("mcp:connect", projectId, serverId),
+    disconnect: (projectId: string, serverId: string) =>
+      ipcRenderer.invoke("mcp:disconnect", projectId, serverId),
+    getConfig: (projectId: string) =>
+      ipcRenderer.invoke("mcp:get-config", projectId),
+    hydrateConfig: (projectId: string, config: unknown, projectPath?: string) =>
+      ipcRenderer.invoke("mcp:hydrate-config", projectId, config, projectPath),
+    globalStatus: () =>
+      ipcRenderer.invoke("mcp:global-status"),
+    projectOpencodeStatus: (projectPath: string) =>
+      ipcRenderer.invoke("mcp:project-opencode-status", projectPath),
+    healthCheck: (projectId: string, serverId: string, projectPath: string) =>
+      ipcRenderer.invoke("mcp:health-check", projectId, serverId, projectPath),
+    addCustom: (projectId: string, projectPath: string, entry: unknown) =>
+      ipcRenderer.invoke("mcp:add-custom", projectId, projectPath, entry),
+    updateCustom: (projectId: string, projectPath: string, id: string, patch: unknown) =>
+      ipcRenderer.invoke("mcp:update-custom", projectId, projectPath, id, patch),
+    removeCustom: (projectId: string, projectPath: string, id: string) =>
+      ipcRenderer.invoke("mcp:remove-custom", projectId, projectPath, id),
+  },
   fs: {
     listDir: (dirPath: string) =>
       ipcRenderer.invoke("fs:list-dir", dirPath) as Promise<
@@ -1271,6 +1299,8 @@ contextBridge.exposeInMainWorld("termcanvas", {
         baseURL: string;
         apiKey: string;
         model: string;
+        projectId?: string;
+        mcpScope?: "project" | "terminal" | "agent";
       },
     ): Promise<{ slashCommands: string[] }> =>
       ipcRenderer.invoke("agent:start", sessionId, config),
@@ -1282,6 +1312,10 @@ contextBridge.exposeInMainWorld("termcanvas", {
         baseURL: string;
         apiKey: string;
         model: string;
+        cwd?: string;
+        resumeSessionId?: string;
+        projectId?: string;
+        mcpScope?: "project" | "terminal" | "agent";
       },
     ) => ipcRenderer.invoke("agent:send", sessionId, text, config),
     abort: (sessionId: string) => ipcRenderer.invoke("agent:abort", sessionId),

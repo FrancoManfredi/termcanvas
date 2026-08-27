@@ -12,6 +12,7 @@ import {
   getGitLog,
   initGitRepo,
   isGitRepo,
+  resolveBranchCheckoutRef,
 } from "../electron/git-info.ts";
 
 async function withTempRepo(
@@ -138,5 +139,152 @@ test("getGitCommitDetail returns null for a missing commit hash", async () => {
     );
 
     assert.equal(detail, null);
+  });
+});
+
+function shaOf(repoPath: string, ref: string): string {
+  return execSync(`git rev-parse ${ref}`, {
+    cwd: repoPath,
+    stdio: ["ignore", "pipe", "ignore"],
+  }).toString().trim();
+}
+
+test("resolveBranchCheckoutRef heals a PR head that only exists on origin", async () => {
+  await withTempRepo(async (repoPath, remotePath) => {
+    fs.writeFileSync(path.join(repoPath, "README.md"), "root\n");
+    execSync("git add README.md", { cwd: repoPath, stdio: "pipe" });
+    execSync('git commit -m "root commit"', { cwd: repoPath, stdio: "pipe" });
+    execSync(`git remote add origin "${remotePath}"`, { cwd: repoPath, stdio: "pipe" });
+    execSync("git push -u origin main", { cwd: repoPath, stdio: "pipe" });
+
+    // The PR branch was pushed from another machine: it exists on origin
+    // only and this clone never fetched it — the state that used to make
+    // `git worktree add --detach` die with "fatal: invalid reference".
+    execSync(
+      "git push origin main:refs/heads/refactor/knip-dead-code-44",
+      { cwd: repoPath, stdio: "pipe" },
+    );
+
+    const resolved = await resolveBranchCheckoutRef(
+      repoPath,
+      "refactor/knip-dead-code-44",
+    );
+
+    if (!resolved.ok) {
+      assert.fail(`expected the origin-only PR head to resolve: ${resolved.error}`);
+    }
+    assert.equal(resolved.ref, "origin/refactor/knip-dead-code-44");
+    assert.equal(resolved.source, "origin");
+    assert.equal(resolved.hasLocal, false);
+
+    // The resolved ref must materialize the detached review worktree.
+    const reviewPath = path.join(
+      repoPath,
+      ".worktrees",
+      "knip-review",
+    );
+    execSync(
+      `git worktree add --detach "${reviewPath}" ${resolved.ref}`,
+      { cwd: repoPath, stdio: "pipe" },
+    );
+    assert.equal(shaOf(reviewPath, "HEAD"), shaOf(repoPath, "main"));
+  });
+});
+
+test("resolveBranchCheckoutRef refreshes a stale origin ref before resolving", async () => {
+  await withTempRepo(async (repoPath, remotePath) => {
+    fs.writeFileSync(path.join(repoPath, "README.md"), "v1\n");
+    execSync("git add README.md", { cwd: repoPath, stdio: "pipe" });
+    execSync('git commit -m "v1"', { cwd: repoPath, stdio: "pipe" });
+    execSync(`git remote add origin "${remotePath}"`, { cwd: repoPath, stdio: "pipe" });
+    execSync("git push -u origin main", { cwd: repoPath, stdio: "pipe" });
+    execSync("git push origin main:refs/heads/pr-branch", { cwd: repoPath, stdio: "pipe" });
+    execSync("git fetch origin", { cwd: repoPath, stdio: "pipe" });
+
+    // The PR advances on GitHub while this clone stays behind: its
+    // refs/remotes/origin/pr-branch is now stale.
+    fs.writeFileSync(path.join(repoPath, "README.md"), "v1\nv2\n");
+    execSync("git add README.md", { cwd: repoPath, stdio: "pipe" });
+    execSync('git commit -m "v2"', { cwd: repoPath, stdio: "pipe" });
+    execSync("git push origin main:refs/heads/pr-branch", { cwd: repoPath, stdio: "pipe" });
+
+    const resolved = await resolveBranchCheckoutRef(repoPath, "pr-branch");
+
+    if (!resolved.ok) {
+      assert.fail(`expected the stale ref to resolve: ${resolved.error}`);
+    }
+    assert.equal(resolved.source, "origin");
+    assert.equal(
+      shaOf(repoPath, resolved.ref),
+      shaOf(repoPath, "main"),
+      "the internal fetch must update the stale remote-tracking ref",
+    );
+  });
+});
+
+test("resolveBranchCheckoutRef falls back to the local branch without a usable origin", async () => {
+  await withTempRepo(async (repoPath) => {
+    // No `origin` remote at all: the fetch inside the resolver fails and the
+    // local branch must still be returned so offline reviews keep working.
+    fs.writeFileSync(path.join(repoPath, "README.md"), "root\n");
+    execSync("git add README.md", { cwd: repoPath, stdio: "pipe" });
+    execSync('git commit -m "root commit"', { cwd: repoPath, stdio: "pipe" });
+    execSync("git branch feature/offline", { cwd: repoPath, stdio: "pipe" });
+
+    const resolved = await resolveBranchCheckoutRef(repoPath, "feature/offline");
+
+    if (!resolved.ok) {
+      assert.fail(`expected the local branch to resolve: ${resolved.error}`);
+    }
+    assert.equal(resolved.ref, "feature/offline");
+    assert.equal(resolved.source, "local");
+  });
+});
+
+test("resolveBranchCheckoutRef flags an existing local branch so restore attaches instead of -b", async () => {
+  await withTempRepo(async (repoPath, remotePath) => {
+    fs.writeFileSync(path.join(repoPath, "README.md"), "root\n");
+    execSync("git add README.md", { cwd: repoPath, stdio: "pipe" });
+    execSync('git commit -m "root commit"', { cwd: repoPath, stdio: "pipe" });
+    execSync(`git remote add origin "${remotePath}"`, { cwd: repoPath, stdio: "pipe" });
+    execSync("git push -u origin main", { cwd: repoPath, stdio: "pipe" });
+
+    // The implementer branch exists BOTH locally (its worktree was deleted,
+    // leaving an orphaned branch) and on origin — the state that made
+    // `worktree add -b` die with "fatal: a branch named ... already exists".
+    execSync("git branch pr-branch", { cwd: repoPath, stdio: "pipe" });
+    execSync("git push origin pr-branch", { cwd: repoPath, stdio: "pipe" });
+
+    const resolved = await resolveBranchCheckoutRef(repoPath, "pr-branch");
+
+    if (!resolved.ok) {
+      assert.fail(`expected the orphaned local branch to resolve: ${resolved.error}`);
+    }
+    assert.equal(resolved.hasLocal, true);
+
+    // The restore path must attach the existing branch — the exact command
+    // that used to be skipped in favor of the crashing `-b` variant.
+    const wtPath = path.join(repoPath, ".worktrees", "pr-branch");
+    execSync(`git worktree add "${wtPath}" pr-branch`, { cwd: repoPath, stdio: "pipe" });
+    assert.equal(shaOf(wtPath, "HEAD"), shaOf(repoPath, "pr-branch"));
+  });
+});
+
+test("resolveBranchCheckoutRef reports a clear error for an unreachable ref", async () => {
+  await withTempRepo(async (repoPath, remotePath) => {
+    fs.writeFileSync(path.join(repoPath, "README.md"), "root\n");
+    execSync("git add README.md", { cwd: repoPath, stdio: "pipe" });
+    execSync('git commit -m "root commit"', { cwd: repoPath, stdio: "pipe" });
+    execSync(`git remote add origin "${remotePath}"`, { cwd: repoPath, stdio: "pipe" });
+
+    const resolved = await resolveBranchCheckoutRef(repoPath, "ghost/branch");
+
+    assert.equal(resolved.ok, false);
+    if (!resolved.ok) {
+      assert.match(
+        resolved.error,
+        /Branch "ghost\/branch" not found locally or on origin/,
+      );
+    }
   });
 });

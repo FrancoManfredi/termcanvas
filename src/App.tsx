@@ -312,6 +312,16 @@ export function App() {
     loadAllDownloadedFonts();
   }, []);
 
+  // Hidrata el McpManager del proceso principal con la config por proyecto (state.json)
+  // y mantiene .agents/mcp.json para que context-sync lo espeje cross-device.
+  useEffect(() => {
+    if (!window.termcanvas?.mcp) return;
+    const { projects } = useProjectStore.getState();
+    for (const p of projects) {
+      if (p.mcp) void window.termcanvas.mcp.hydrateConfig(p.id, p.mcp, p.path).catch(() => {});
+    }
+  }, []);
+
   useEffect(() => {
     const unsubscribe = useWorkspaceStore.subscribe(() => updateWindowTitle());
     updateWindowTitle();

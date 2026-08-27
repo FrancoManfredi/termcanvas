@@ -313,6 +313,7 @@ export const zh = {
   settings_appearance: "外观",
   settings_features: "功能",
   settings_agent: "Agent",
+  settings_integrations: "集成",
   settings_shortcuts: "快捷键",
   settings_features_group_canvas: "画布功能",
   settings_features_group_workflow: "工作流",

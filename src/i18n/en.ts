@@ -319,6 +319,7 @@ export const en = {
   settings_appearance: "Appearance",
   settings_features: "Features",
   settings_agent: "Agent",
+  settings_integrations: "Integrations",
   settings_shortcuts: "Shortcuts",
   settings_features_group_canvas: "Canvas surfaces",
   settings_features_group_workflow: "Workflow",
