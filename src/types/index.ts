@@ -250,6 +250,11 @@ export interface TerminalData {
   // diagnóstico; los terminales manuales nunca lo traen.
   modelOverride?: string;
   variantOverride?: string;
+  // Env vars extra SOLO para el proceso de este terminal (ej:
+  // OPENCODE_CONFIG del scope de skills especializadas). Lo setea el
+  // launcher de la sesión; se mergea sobre el env base en electron
+  // (pty-launch envOverrides) sin afectar a otros terminales.
+  envOverride?: Record<string, string>;
   // Captured when the review terminal is created, so the runtime can read
   // GitHub's reviewDecision from the PR before the worktree is deleted.
   reviewPrNumber?: number;
@@ -1097,6 +1102,26 @@ export interface TermCanvasAPI {
     unwatchDir: (dirPath: string) => Promise<void>;
     unwatchAllDirs: () => Promise<void>;
     onDirChanged: (callback: (dirPath: string) => void) => () => void;
+  };
+  skills: {
+    list: () => Promise<Array<{ categoryId: string; skills: Array<{ name: string; description: string; shared: boolean; dirPath: string }> }>>;
+    listForProject: (repoPath: string) => Promise<Array<{ categoryId: string; skills: Array<{ name: string; description: string; shared: boolean; dirPath: string }> }>>;
+    getRoots: () => Promise<{ sharedRoot: string; privateRoot: string }>;
+    getShareAll: (repoPath: string) => Promise<{ shared: boolean }>;
+    setShareAll: (repoPath: string, shared: boolean) => Promise<{ ok: boolean; error?: string }>;
+    copyAll: (fromRepo: string, toRepo: string) => Promise<{ ok: boolean; error?: string; copied?: number }>;
+    saveFromContent: (categoryId: string, skillName: string, content: string, shared: boolean) => Promise<{ ok: boolean; error?: string }>;
+    saveFromContentForProject: (repoPath: string, categoryId: string, skillName: string, content: string) => Promise<{ ok: boolean; error?: string }>;
+    saveFromFile: (categoryId: string, filePath: string, shared: boolean) => Promise<{ ok: boolean; error?: string; skillName?: string }>;
+    saveFromFileForProject: (repoPath: string, categoryId: string, filePath: string) => Promise<{ ok: boolean; error?: string; skillName?: string }>;
+    fetchBySpec: (spec: string, categoryId: string, shared: boolean) => Promise<{ ok: boolean; error?: string; skillName?: string }>;
+    fetchBySpecForProject: (spec: string, repoPath: string, categoryId: string) => Promise<{ ok: boolean; error?: string; skillName?: string }>;
+    remove: (categoryId: string, skillName: string) => Promise<{ ok: boolean; error?: string }>;
+    removeForProject: (repoPath: string, categoryId: string, skillName: string) => Promise<{ ok: boolean; error?: string }>;
+    toggleShare: (categoryId: string, skillName: string) => Promise<{ ok: boolean; error?: string; shared?: boolean }>;
+  };
+  dialog: {
+    openSkillFile: () => Promise<{ canceled: true } | { canceled: false; filePath: string }>;
   };
   models: {
     // Catálogo de modelos de opencode + routing por fase. Los handlers viven

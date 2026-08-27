@@ -675,6 +675,7 @@ function setupIpc() {
         workflowId?: string;
         assignmentId?: string;
         repoPath?: string;
+        envOverrides?: Record<string, string>;
       },
     ) => {
       dbg(
@@ -696,7 +697,18 @@ function setupIpc() {
           cliDir,
           options.terminalType,
         ),
-        ...(Object.keys(envOverrides).length ? { envOverrides } : {}),
+        // Merge caller envOverrides (ej: OPENCODE_CONFIG del scope de skills)
+        // con el override interno (hookSocketPath + mcpEnv). El socket de hooks
+        // nunca se pisa.
+        ...(Object.keys(envOverrides).length || Object.keys(options.envOverrides ?? {}).length
+          ? {
+              envOverrides: {
+                ...envOverrides,
+                ...(options.envOverrides ?? {}),
+                ...(hookSocketPath ? { TERMCANVAS_SOCKET: hookSocketPath } : {}),
+              },
+            }
+          : {}),
       });
       const pid = ptyManager.getPid(ptyId);
       dbg(`terminal:create => ptyId=${ptyId} pid=${pid ?? "null"}`);
@@ -2151,6 +2163,562 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
   });
   ipcMain.handle("fs:unwatch-all-dirs", () => {
     fileTreeWatcher.unwatchAll();
+  });
+
+  // ─── Diagnosis Skills (vendor) ────────────────────────────────────────────
+  const DIAGNOSIS_CATEGORIES = [
+    "diseno-patrones",
+    "organizacion",
+    "documentacion",
+    "seguridad",
+    "proteccion",
+    "rendimiento",
+    "buenas-practicas",
+    "requerimientos",
+  ] as const;
+  const getSharedSkillsRoot = () => path.join(__dirname, "..", "resources", "diagnosis-skills");
+  const getPrivateSkillsRoot = () => path.join(app.getPath("userData"), "diagnosis-skills");
+
+  const parseSkillNameFromContent = (content: string, fallback: string): string => {
+    const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content);
+    if (m) {
+      for (const line of m[1].split(/\r?\n/)) {
+        const kv = /^\s*name:\s*(.*)$/.exec(line);
+        if (kv) return kv[1].trim() || fallback;
+      }
+    }
+    return fallback;
+  };
+
+  ipcMain.handle("skills:get-roots", () => {
+    return { sharedRoot: getSharedSkillsRoot(), privateRoot: getPrivateSkillsRoot() };
+  });
+
+  ipcMain.handle("skills:list", async () => {
+    const sharedRoot = getSharedSkillsRoot();
+    const privateRoot = getPrivateSkillsRoot();
+    const out: Array<{ categoryId: string; skills: Array<{ name: string; description: string; shared: boolean; dirPath: string }> }> = [];
+    for (const cat of DIAGNOSIS_CATEGORIES) {
+      const catSkills: Array<{ name: string; description: string; shared: boolean; dirPath: string }> = [];
+      const seen = new Set<string>();
+      for (const [root, shared] of [[sharedRoot, true], [privateRoot, false]] as const) {
+        const base = path.join(root, cat);
+        let entries: fs.Dirent[] = [];
+        try {
+          entries = fs.readdirSync(base, { withFileTypes: true });
+        } catch {
+          continue;
+        }
+        for (const e of entries) {
+          if (!e.isDirectory()) continue;
+          if (e.name === ".gitkeep") continue;
+          const skillDir = path.join(base, e.name);
+          const skillMd = path.join(skillDir, "SKILL.md");
+          if (!fs.existsSync(skillMd)) continue;
+          let content = "";
+          try {
+            content = fs.readFileSync(skillMd, "utf-8");
+          } catch {
+            continue;
+          }
+          const name = parseSkillNameFromContent(content, e.name);
+          if (seen.has(name) || seen.has(e.name)) continue;
+          // simple description extract
+          let description = "";
+          const dm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content);
+          if (dm) {
+            for (const line of dm[1].split(/\r?\n/)) {
+              const kv = /^\s*description:\s*(.*)$/.exec(line);
+              if (kv) { description = kv[1].trim(); break; }
+            }
+          }
+          if (!description) description = "Skill provista por el usuario";
+          seen.add(name);
+          seen.add(e.name);
+          catSkills.push({ name, description: description.slice(0, 200), shared, dirPath: skillDir });
+        }
+      }
+      catSkills.sort((a, b) => a.name.localeCompare(b.name));
+      out.push({ categoryId: cat, skills: catSkills });
+    }
+    return out;
+  });
+
+  ipcMain.handle("skills:remove", async (_event, categoryId: string, skillName: string) => {
+    const roots = [getSharedSkillsRoot(), getPrivateSkillsRoot()];
+    for (const root of roots) {
+      const candidates = [path.join(root, categoryId, skillName), path.join(root, categoryId)];
+      // also need to handle folder name vs skill name mismatch: scan
+      const base = path.join(root, categoryId);
+      let entries: fs.Dirent[] = [];
+      try {
+        entries = fs.readdirSync(base, { withFileTypes: true });
+      } catch { continue; }
+      for (const e of entries) {
+        if (!e.isDirectory() || e.name === ".gitkeep") continue;
+        const p = path.join(base, e.name, "SKILL.md");
+        if (!fs.existsSync(p)) continue;
+        let content = "";
+        try { content = fs.readFileSync(p, "utf-8"); } catch { continue; }
+        const resolved = parseSkillNameFromContent(content, e.name);
+        if (resolved === skillName || e.name === skillName) {
+          fs.rmSync(path.join(base, e.name), { recursive: true, force: true });
+          return { ok: true };
+        }
+      }
+    }
+    return { ok: false, error: "Skill no encontrada" };
+  });
+
+  ipcMain.handle("skills:toggle-share", async (_event, categoryId: string, skillName: string) => {
+    const sharedRoot = getSharedSkillsRoot();
+    const privateRoot = getPrivateSkillsRoot();
+    let found: { root: string; folder: string; shared: boolean } | null = null;
+    for (const [root, shared] of [[sharedRoot, true], [privateRoot, false]] as const) {
+      const base = path.join(root, categoryId);
+      let entries: fs.Dirent[] = [];
+      try { entries = fs.readdirSync(base, { withFileTypes: true }); } catch { continue; }
+      for (const e of entries) {
+        if (!e.isDirectory() || e.name === ".gitkeep") continue;
+        const p = path.join(base, e.name, "SKILL.md");
+        if (!fs.existsSync(p)) continue;
+        let content = "";
+        try { content = fs.readFileSync(p, "utf-8"); } catch { continue; }
+        const resolved = parseSkillNameFromContent(content, e.name);
+        if (resolved === skillName || e.name === skillName) {
+          found = { root, folder: e.name, shared };
+          break;
+        }
+      }
+      if (found) break;
+    }
+    if (!found) return { ok: false, error: "Skill no encontrada" };
+    const srcBase = path.join(found.root, categoryId, found.folder);
+    const destRoot = found.shared ? privateRoot : sharedRoot;
+    const destBase = path.join(destRoot, categoryId, found.folder);
+    try {
+      fs.mkdirSync(path.join(destRoot, categoryId), { recursive: true });
+      if (fs.existsSync(destBase)) return { ok: false, error: "Ya existe una skill con ese nombre en el destino" };
+      fs.cpSync(srcBase, destBase, { recursive: true });
+      fs.rmSync(srcBase, { recursive: true, force: true });
+      return { ok: true, shared: !found.shared };
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+  });
+
+  ipcMain.handle("skills:save-from-content", async (_event, categoryId: string, skillName: string, content: string, shared: boolean) => {
+    if (!DIAGNOSIS_CATEGORIES.includes(categoryId as never)) return { ok: false, error: "Categoría inválida" };
+    const slugOk = /^[a-z][a-z0-9-]*$/.test(skillName);
+    if (!slugOk) return { ok: false, error: "Nombre debe ser slug [a-z0-9-]" };
+    if (skillName.startsWith("diag-")) return { ok: false, error: "Prefijo diag- reservado" };
+    if (!content.trim()) return { ok: false, error: "Contenido vacío" };
+    const root = shared ? getSharedSkillsRoot() : getPrivateSkillsRoot();
+    const dest = path.join(root, categoryId, skillName);
+    try {
+      fs.mkdirSync(path.join(root, categoryId), { recursive: true });
+      if (fs.existsSync(dest)) return { ok: false, error: "Ya existe una skill con ese nombre en esa categoría" };
+      fs.mkdirSync(dest, { recursive: true });
+      fs.writeFileSync(path.join(dest, "SKILL.md"), content, "utf-8");
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+  });
+
+  ipcMain.handle("skills:save-from-file", async (_event, categoryId: string, filePath: string, shared: boolean) => {
+    if (!DIAGNOSIS_CATEGORIES.includes(categoryId as never)) return { ok: false, error: "Categoría inválida" };
+    let content = "";
+    try { content = fs.readFileSync(filePath, "utf-8"); } catch (e) { return { ok: false, error: String(e) }; }
+    const parsedName = parseSkillNameFromContent(content, path.basename(path.dirname(filePath)) || "skill");
+    // fallback to file's folder name or spec
+    let skillName = parsedName;
+    if (!/^[a-z][a-z0-9-]*$/.test(skillName) || skillName.startsWith("diag-")) {
+      skillName = path.basename(filePath, path.extname(filePath)).toLowerCase().replace(/[^a-z0-9-]/g, "-");
+      if (!skillName || skillName.startsWith("diag-")) skillName = `skill-${Date.now()}`;
+    }
+    const root = shared ? getSharedSkillsRoot() : getPrivateSkillsRoot();
+    const dest = path.join(root, categoryId, skillName);
+    try {
+      fs.mkdirSync(path.join(root, categoryId), { recursive: true });
+      if (fs.existsSync(dest)) return { ok: false, error: `Ya existe ${skillName} en ${categoryId}` };
+      fs.mkdirSync(dest, { recursive: true });
+      // if filePath is already a SKILL.md inside a folder, copy whole folder; else just write file
+      const srcDir = path.dirname(filePath);
+      const srcSkillMd = path.join(srcDir, "SKILL.md");
+      if (fs.existsSync(srcSkillMd) && path.basename(filePath) === "SKILL.md") {
+        fs.cpSync(srcDir, dest, { recursive: true });
+      } else {
+        fs.writeFileSync(path.join(dest, "SKILL.md"), content, "utf-8");
+      }
+      return { ok: true, skillName };
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+  });
+
+  ipcMain.handle("skills:fetch-by-spec", async (_event, spec: string, categoryId: string, shared: boolean) => {
+    const trimmed = String(spec).trim();
+    if (!trimmed) return { ok: false, error: "Spec vacío" };
+    if (!DIAGNOSIS_CATEGORIES.includes(categoryId as never)) return { ok: false, error: "Categoría inválida" };
+    // Supports:
+    // - npx skills add https://github.com/vercel-labs/agent-skills --skill vercel-react-best-practices
+    // - https://github.com/vercel-labs/agent-skills --skill vercel-react-best-practices
+    // - vercel-labs/agent-skills@vercel-react-best-practices
+    // - owner/repo@skill
+    let ownerRepo = trimmed;
+    let skillPart: string | null = null;
+    const skillFlagMatch = trimmed.match(/--skill\s+([^\s"'`]+)/) || trimmed.match(/--skill=([^\s"'`]+)/);
+    const urlMatch = trimmed.match(/https:\/\/github\.com\/[^\s"'`]+/);
+    if (skillFlagMatch) {
+      skillPart = skillFlagMatch[1].replace(/['"`]/g, "");
+      if (urlMatch) {
+        ownerRepo = urlMatch[0];
+      } else {
+        const addMatch = trimmed.match(/skills\s+add\s+([^\s"'`]+)/);
+        if (addMatch) ownerRepo = addMatch[1];
+        else {
+          // fallback: first token that looks like owner/repo
+          const repoMatch = trimmed.match(/([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+)/);
+          if (repoMatch) ownerRepo = repoMatch[1];
+        }
+      }
+    } else if (urlMatch) {
+      ownerRepo = urlMatch[0];
+      // check for @skill after url e.g. https://github.com/o/r@skill
+      const afterUrl = trimmed.slice((urlMatch.index ?? 0) + urlMatch[0].length);
+      const atAfter = afterUrl.match(/@([^\s"'`]+)/);
+      if (atAfter) skillPart = atAfter[1];
+    } else if (trimmed.includes("@")) {
+      const idx = trimmed.lastIndexOf("@");
+      ownerRepo = trimmed.slice(0, idx);
+      skillPart = trimmed.slice(idx + 1);
+    }
+    ownerRepo = ownerRepo.replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "").split(/\s+/)[0] ?? ownerRepo;
+    const candidates: string[] = [];
+    const skillVariants = new Set<string>();
+    if (skillPart) {
+      skillVariants.add(skillPart);
+      // vercel-labs/agent-skills stores skill as react-best-practices on disk but advertises as vercel-react-best-practices
+      if (skillPart.startsWith("vercel-")) skillVariants.add(skillPart.slice(7));
+      else skillVariants.add(`vercel-${skillPart}`);
+    }
+    if (skillPart) {
+      for (const variant of skillVariants) {
+        candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/main/skills/${variant}/SKILL.md`);
+        candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/master/skills/${variant}/SKILL.md`);
+        candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/main/${variant}/SKILL.md`);
+        candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/master/${variant}/SKILL.md`);
+      }
+      candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/main/SKILL.md`);
+      candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/master/SKILL.md`);
+    } else {
+      candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/main/SKILL.md`);
+      candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/master/SKILL.md`);
+    }
+    const fetchWithTimeout = (url: string, ms = 10000) => new Promise<Buffer>((resolve, reject) => {
+      const req = https.get(url, { headers: { "User-Agent": "termcanvas-skills" } }, (res) => {
+        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          fetchWithTimeout(res.headers.location as string, ms).then(resolve, reject);
+          return;
+        }
+        if (res.statusCode !== 200) { res.resume(); reject(new Error(`HTTP ${res.statusCode}`)); return; }
+        const chunks: Buffer[] = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () => resolve(Buffer.concat(chunks)));
+      });
+      req.setTimeout(ms, () => { req.destroy(new Error("timeout")); });
+      req.on("error", reject);
+    });
+    let content: string | null = null;
+    let lastErr = "";
+    for (const url of candidates) {
+      try {
+        const buf = await fetchWithTimeout(url);
+        const text = buf.toString("utf-8");
+        if (text.includes("---") && text.length > 50) { content = text; break; }
+      } catch (e) { lastErr = String(e); }
+    }
+    // Fallback: try npx skills add to temp and copy
+    if (!content) {
+      try {
+        const { execFile } = await import("child_process");
+        const tmp = path.join(os.tmpdir(), `termcanvas-skill-${Date.now()}`);
+        fs.mkdirSync(tmp, { recursive: true });
+        const targetSpec = skillPart ? `${ownerRepo}@${skillPart}` : ownerRepo;
+        const isWin = process.platform === "win32";
+        await new Promise<void>((resolve, reject) => {
+          const child = execFile(isWin ? "npx.cmd" : "npx", ["-y", "skills", "add", targetSpec, "-y", "--copy"], { cwd: tmp, timeout: 45000, shell: isWin, windowsHide: true } as never, (err: Error | null) => err ? reject(err) : resolve());
+          child.on?.("error", reject);
+        });
+        // try to locate SKILL.md in tmp or global
+        const probeRoots = [tmp, path.join(os.homedir(), ".agents", "skills"), path.join(os.homedir(), ".config", "opencode", "skills")];
+        for (const pr of probeRoots) {
+          const tryPaths = skillPart ? [path.join(pr, skillPart, "SKILL.md"), path.join(pr, skillPart.toLowerCase(), "SKILL.md")] : [];
+          for (const tp of tryPaths) {
+            if (fs.existsSync(tp)) { content = fs.readFileSync(tp, "utf-8"); break; }
+          }
+          if (content) break;
+        }
+        fs.rmSync(tmp, { recursive: true, force: true });
+      } catch (e) { lastErr = String(e); }
+    }
+    if (!content) return { ok: false, error: `No se pudo descargar la skill (probé ${candidates.length} URLs). Último error: ${lastErr}` };
+    let folderName = skillPart || ownerRepo.split("/").pop() || `skill-${Date.now()}`;
+    folderName = folderName.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "");
+    if (!folderName || !/^[a-z][a-z0-9-]*$/.test(folderName) || folderName.startsWith("diag-")) folderName = `skill-${Date.now()}`;
+    const root = shared ? getSharedSkillsRoot() : getPrivateSkillsRoot();
+    const dest = path.join(root, categoryId, folderName);
+    try {
+      fs.mkdirSync(path.join(root, categoryId), { recursive: true });
+      if (fs.existsSync(dest)) return { ok: false, error: `Ya existe ${folderName} en ${categoryId}` };
+      fs.mkdirSync(dest, { recursive: true });
+      // ensure frontmatter has correct name if needed
+      fs.writeFileSync(path.join(dest, "SKILL.md"), content, "utf-8");
+      return { ok: true, skillName: folderName };
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+  });
+
+  // ─── Diagnosis Skills — per-project (valija por repo) ───────────────────────
+  ipcMain.handle("skills:listForProject", async (_event, repoPath: string) => {
+    const baseRoot = path.join(repoPath.replace(/[\\/]+$/, ""), "resources", "diagnosis-skills");
+    const out: Array<{ categoryId: string; skills: Array<{ name: string; description: string; shared: boolean; dirPath: string }> }> = [];
+    for (const cat of DIAGNOSIS_CATEGORIES) {
+      const base = path.join(baseRoot, cat);
+      let entries: fs.Dirent[] = [];
+      try { entries = fs.readdirSync(base, { withFileTypes: true }); } catch { out.push({ categoryId: cat, skills: [] }); continue; }
+      const catSkills: Array<{ name: string; description: string; shared: boolean; dirPath: string }> = [];
+      for (const e of entries) {
+        if (!e.isDirectory() || e.name === ".gitkeep") continue;
+        const p = path.join(base, e.name, "SKILL.md");
+        if (!fs.existsSync(p)) continue;
+        let content = "";
+        try { content = fs.readFileSync(p, "utf-8"); } catch { continue; }
+        const name = parseSkillNameFromContent(content, e.name);
+        let description = "";
+        const dm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content);
+        if (dm) { for (const line of dm[1].split(/\r?\n/)) { const kv = /^\s*description:\s*(.*)$/.exec(line); if (kv) { description = kv[1].trim(); break; } } }
+        if (!description) description = "Skill del proyecto";
+        catSkills.push({ name, description: description.slice(0, 200), shared: true, dirPath: path.join(base, e.name) });
+      }
+      catSkills.sort((a, b) => a.name.localeCompare(b.name));
+      out.push({ categoryId: cat, skills: catSkills });
+    }
+    return out;
+  });
+
+  ipcMain.handle("skills:saveFromContentForProject", async (_event, repoPath: string, categoryId: string, skillName: string, content: string) => {
+    if (!DIAGNOSIS_CATEGORIES.includes(categoryId as never)) return { ok: false, error: "Categoría inválida" };
+    if (!/^[a-z][a-z0-9-]*$/.test(skillName) || skillName.startsWith("diag-")) return { ok: false, error: "Nombre inválido" };
+    if (!content.trim()) return { ok: false, error: "Contenido vacío" };
+    const dest = path.join(repoPath.replace(/[\\/]+$/, ""), "resources", "diagnosis-skills", categoryId, skillName);
+    try {
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      if (fs.existsSync(dest)) return { ok: false, error: "Ya existe" };
+      fs.mkdirSync(dest, { recursive: true });
+      fs.writeFileSync(path.join(dest, "SKILL.md"), content, "utf-8");
+      return { ok: true };
+    } catch (e) { return { ok: false, error: String(e) }; }
+  });
+
+  ipcMain.handle("skills:saveFromFileForProject", async (_event, repoPath: string, categoryId: string, filePath: string) => {
+    if (!DIAGNOSIS_CATEGORIES.includes(categoryId as never)) return { ok: false, error: "Categoría inválida" };
+    let content = "";
+    try { content = fs.readFileSync(filePath, "utf-8"); } catch (e) { return { ok: false, error: String(e) }; }
+    let skillName = parseSkillNameFromContent(content, path.basename(path.dirname(filePath)) || "skill");
+    if (!/^[a-z][a-z0-9-]*$/.test(skillName) || skillName.startsWith("diag-")) {
+      skillName = path.basename(filePath, path.extname(filePath)).toLowerCase().replace(/[^a-z0-9-]/g, "-");
+      if (!skillName || skillName.startsWith("diag-")) skillName = `skill-${Date.now()}`;
+    }
+    const dest = path.join(repoPath.replace(/[\\/]+$/, ""), "resources", "diagnosis-skills", categoryId, skillName);
+    try {
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      if (fs.existsSync(dest)) return { ok: false, error: `Ya existe ${skillName}` };
+      fs.mkdirSync(dest, { recursive: true });
+      const srcDir = path.dirname(filePath);
+      if (fs.existsSync(path.join(srcDir, "SKILL.md")) && path.basename(filePath) === "SKILL.md") fs.cpSync(srcDir, dest, { recursive: true });
+      else fs.writeFileSync(path.join(dest, "SKILL.md"), content, "utf-8");
+      return { ok: true, skillName };
+    } catch (e) { return { ok: false, error: String(e) }; }
+  });
+
+  ipcMain.handle("skills:fetchBySpecForProject", async (_event, spec: string, repoPath: string, categoryId: string) => {
+    // Reuse the same fetch logic as skills:fetch-by-spec but save to repoPath
+    const res = await (async () => {
+      // Call the existing handler logic by invoking via internal function
+      // For now, delegate to the same URL candidates and npx fallback, then save to repo
+      const trimmed = String(spec).trim();
+      if (!trimmed) return { ok: false as const, error: "Spec vacío" };
+      if (!DIAGNOSIS_CATEGORIES.includes(categoryId as never)) return { ok: false as const, error: "Categoría inválida" };
+      let ownerRepo = trimmed;
+      let skillPart: string | null = null;
+      const skillFlagMatch = trimmed.match(/--skill\s+([^\s"'`]+)/) || trimmed.match(/--skill=([^\s"'`]+)/);
+      const urlMatch = trimmed.match(/https:\/\/github\.com\/[^\s"'`]+/);
+      if (skillFlagMatch) {
+        skillPart = skillFlagMatch[1].replace(/['"`]/g, "");
+        if (urlMatch) ownerRepo = urlMatch[0];
+        else {
+          const addMatch = trimmed.match(/skills\s+add\s+([^\s"'`]+)/);
+          if (addMatch) ownerRepo = addMatch[1];
+          else { const m = trimmed.match(/([a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+)/); if (m) ownerRepo = m[1]; }
+        }
+      } else if (urlMatch) {
+        ownerRepo = urlMatch[0];
+        const after = trimmed.slice((urlMatch.index ?? 0) + urlMatch[0].length);
+        const at = after.match(/@([^\s"'`]+)/);
+        if (at) skillPart = at[1];
+      } else if (trimmed.includes("@")) {
+        const idx = trimmed.lastIndexOf("@");
+        ownerRepo = trimmed.slice(0, idx);
+        skillPart = trimmed.slice(idx + 1);
+      }
+      ownerRepo = ownerRepo.replace(/^https:\/\/github\.com\//, "").replace(/\.git$/, "").split(/\s+/)[0] ?? ownerRepo;
+      const candidates: string[] = [];
+      const variants = new Set<string>();
+      if (skillPart) {
+        variants.add(skillPart);
+        if (skillPart.startsWith("vercel-")) variants.add(skillPart.slice(7));
+        else variants.add(`vercel-${skillPart}`);
+      }
+      if (skillPart) {
+        for (const v of variants) {
+          candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/main/skills/${v}/SKILL.md`);
+          candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/master/skills/${v}/SKILL.md`);
+          candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/main/${v}/SKILL.md`);
+        }
+        candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/main/SKILL.md`);
+      } else {
+        candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/main/SKILL.md`);
+      }
+      const fetchWithTimeout = (url: string, ms = 10000) => new Promise<Buffer>((resolve, reject) => {
+        const req = https.get(url, { headers: { "User-Agent": "termcanvas-skills" } }, (res) => {
+          if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) { fetchWithTimeout(res.headers.location as string, ms).then(resolve, reject); return; }
+          if (res.statusCode !== 200) { res.resume(); reject(new Error(`HTTP ${res.statusCode}`)); return; }
+          const chunks: Buffer[] = [];
+          res.on("data", (c) => chunks.push(c));
+          res.on("end", () => resolve(Buffer.concat(chunks)));
+        });
+        req.setTimeout(ms, () => { req.destroy(new Error("timeout")); });
+        req.on("error", reject);
+      });
+      let content: string | null = null;
+      let lastErr = "";
+      for (const url of candidates) {
+        try {
+          const buf = await fetchWithTimeout(url);
+          const text = buf.toString("utf-8");
+          if (text.includes("---") && text.length > 50) { content = text; break; }
+        } catch (e) { lastErr = String(e); }
+      }
+      if (!content) {
+        try {
+          const { execFile } = await import("child_process");
+          const tmp = path.join(os.tmpdir(), `termcanvas-skill-${Date.now()}`);
+          fs.mkdirSync(tmp, { recursive: true });
+          const targetSpec = skillPart ? `${ownerRepo}@${skillPart}` : ownerRepo;
+          const isWin = process.platform === "win32";
+          await new Promise<void>((resolve, reject) => {
+            const child = execFile(isWin ? "npx.cmd" : "npx", ["-y", "skills", "add", targetSpec, "-y", "--copy"], { cwd: tmp, timeout: 45000, shell: isWin, windowsHide: true } as never, (err: Error | null) => err ? reject(err) : resolve());
+            child.on?.("error", reject);
+          });
+          const probeRoots = [tmp, path.join(os.homedir(), ".agents", "skills"), path.join(os.homedir(), ".config", "opencode", "skills")];
+          for (const pr of probeRoots) {
+            const tryPaths = skillPart ? [path.join(pr, skillPart, "SKILL.md"), path.join(pr, skillPart.toLowerCase(), "SKILL.md")] : [];
+            for (const tp of tryPaths) if (fs.existsSync(tp)) { content = fs.readFileSync(tp, "utf-8"); break; }
+            if (content) break;
+          }
+          fs.rmSync(tmp, { recursive: true, force: true });
+        } catch (e) { lastErr = String(e); }
+      }
+      if (!content) return { ok: false as const, error: `No se pudo descargar (probé ${candidates.length} URLs). Último error: ${lastErr}` };
+      let folderName = skillPart || ownerRepo.split("/").pop() || `skill-${Date.now()}`;
+      folderName = folderName.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "");
+      if (!folderName || !/^[a-z][a-z0-9-]*$/.test(folderName) || folderName.startsWith("diag-")) folderName = `skill-${Date.now()}`;
+      const dest = path.join(repoPath.replace(/[\\/]+$/, ""), "resources", "diagnosis-skills", categoryId, folderName);
+      try {
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        if (fs.existsSync(dest)) return { ok: false as const, error: `Ya existe ${folderName} en ${categoryId}` };
+        fs.mkdirSync(dest, { recursive: true });
+        fs.writeFileSync(path.join(dest, "SKILL.md"), content, "utf-8");
+        return { ok: true as const, skillName: folderName };
+      } catch (e) { return { ok: false as const, error: String(e) }; }
+    })();
+    return res;
+  });
+
+  ipcMain.handle("skills:removeForProject", async (_event, repoPath: string, categoryId: string, skillName: string) => {
+    const base = path.join(repoPath.replace(/[\\/]+$/, ""), "resources", "diagnosis-skills", categoryId);
+    let entries: fs.Dirent[] = [];
+    try { entries = fs.readdirSync(base, { withFileTypes: true }); } catch { return { ok: false, error: "Categoría no encontrada" }; }
+    for (const e of entries) {
+      if (!e.isDirectory() || e.name === ".gitkeep") continue;
+      const p = path.join(base, e.name, "SKILL.md");
+      if (!fs.existsSync(p)) continue;
+      let content = "";
+      try { content = fs.readFileSync(p, "utf-8"); } catch { continue; }
+      const resolved = parseSkillNameFromContent(content, e.name);
+      if (resolved === skillName || e.name === skillName) {
+        fs.rmSync(path.join(base, e.name), { recursive: true, force: true });
+        return { ok: true };
+      }
+    }
+    return { ok: false, error: "Skill no encontrada" };
+  });
+
+  ipcMain.handle("skills:copyAll", async (_event, fromRepo: string, toRepo: string) => {
+    const fromRoot = path.join(fromRepo.replace(/[\\/]+$/, ""), "resources", "diagnosis-skills");
+    const toRoot = path.join(toRepo.replace(/[\\/]+$/, ""), "resources", "diagnosis-skills");
+    if (!fs.existsSync(fromRoot)) return { ok: false, error: "Origen sin skills" };
+    let copied = 0;
+    for (const cat of DIAGNOSIS_CATEGORIES) {
+      const srcCat = path.join(fromRoot, cat);
+      const dstCat = path.join(toRoot, cat);
+      if (!fs.existsSync(srcCat)) continue;
+      let entries: fs.Dirent[] = [];
+      try { entries = fs.readdirSync(srcCat, { withFileTypes: true }); } catch { continue; }
+      for (const e of entries) {
+        if (!e.isDirectory() || e.name === ".gitkeep") continue;
+        const src = path.join(srcCat, e.name);
+        const dst = path.join(dstCat, e.name);
+        if (fs.existsSync(dst)) continue;
+        try {
+          fs.mkdirSync(dstCat, { recursive: true });
+          fs.cpSync(src, dst, { recursive: true });
+          copied++;
+        } catch {}
+      }
+    }
+    return { ok: true, copied };
+  });
+
+  ipcMain.handle("skills:setShareAll", async (_event, repoPath: string, shared: boolean) => {
+    // Por ahora es un flag en .agents/diagnosis-skills.json — no mueve archivos.
+    // Si shared=false, el repo no commitea resources/diagnosis-skills (se espera .gitignore).
+    // Mantenemos compatibilidad: solo persistimos la preferencia.
+    try {
+      const cfgPath = path.join(repoPath.replace(/[\\/]+$/, ""), ".agents", "diagnosis-skills.json");
+      fs.mkdirSync(path.dirname(cfgPath), { recursive: true });
+      fs.writeFileSync(cfgPath, JSON.stringify({ shared, updatedAt: Date.now() }, null, 2), "utf-8");
+      return { ok: true };
+    } catch (e) { return { ok: false, error: String(e) }; }
+  });
+
+  ipcMain.handle("skills:getShareAll", async (_event, repoPath: string) => {
+    try {
+      const cfgPath = path.join(repoPath.replace(/[\\/]+$/, ""), ".agents", "diagnosis-skills.json");
+      if (!fs.existsSync(cfgPath)) return { shared: true };
+      const raw = fs.readFileSync(cfgPath, "utf-8");
+      const j = JSON.parse(raw);
+      return { shared: j.shared !== false };
+    } catch { return { shared: true }; }
+  });
+
+  ipcMain.handle("dialog:open-skill-file", async () => {
+    const res = await dialog.showOpenDialog({ properties: ["openFile"], filters: [{ name: "Markdown", extensions: ["md"] }] });
+    if (res.canceled || res.filePaths.length === 0) return { canceled: true as const };
+    return { canceled: false as const, filePath: res.filePaths[0] };
   });
 
   ipcMain.handle("fs:list-all-files", async (_event, dirPath: string) => {

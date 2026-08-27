@@ -44,6 +44,11 @@ import {
 } from "./reviewVerdict";
 import { overrideGateForIssue } from "./issueGate";
 import { buildIssueResolvePrompt } from "./issueResolvePrompt";
+import {
+  categoryIdFromLabels,
+  issueResolveAllowedSkills,
+} from "../skills/registry";
+import { prepareSkillScope } from "../skills/scopedSession";
 import { resolveRepoContextText, resolveRequirementsText, resolveArchitectureDecisionsText } from "../utils/repoContext";
 import { reuseTerminalForIssue } from "../actions/terminalSceneActions";
 import { useTerminalRuntimeStateStore } from "../stores/terminalRuntimeStateStore";
@@ -909,6 +914,22 @@ function XyFlowCanvasInner() {
       const repoContextText = await resolveRepoContextText(project?.path);
       const requirementsText = await resolveRequirementsText(project?.path);
       const decisionsText = await resolveArchitectureDecisionsText(project?.path);
+      // Categoría de diagnóstico del issue (label cat:<id>): define la skill
+      // especializada scopeada para esta sesión. El scope es best-effort:
+      // sin categoría o sin bridge, la sesión corre sin scoping.
+      const issueCategory = categoryIdFromLabels(issue.labels);
+      let envOverride: Record<string, string> | undefined;
+      if (issueCategory) {
+        try {
+          const scope = await prepareSkillScope({
+            repoPath: project?.path ?? target.worktree.path,
+            allow: issueResolveAllowedSkills(issueCategory),
+          });
+          envOverride = scope?.env;
+        } catch (error) {
+          console.warn("[resolve] no se pudo preparar el scope de skills:", error);
+        }
+      }
       const promptInput = {
         issueNumber: issue.issueNumber,
         title: issue.title,
@@ -916,6 +937,7 @@ function XyFlowCanvasInner() {
         repoContextText,
         requirementsText,
         decisionsText,
+        category: issueCategory ?? undefined,
       };
       const initialPrompt = buildIssueResolvePrompt(promptInput, "new");
       let resumePrompt = buildIssueResolvePrompt(promptInput, "resume");
@@ -990,6 +1012,7 @@ function XyFlowCanvasInner() {
         position: flowCenter,
         initialPrompt,
         resumePrompt,
+        envOverride,
         isIssueTerminalLive,
       })
         .then((result) => {

@@ -321,6 +321,8 @@ export const en = {
   settings_agent: "Agent",
   settings_integrations: "Integrations",
   settings_shortcuts: "Shortcuts",
+  settings_skills: "Skills by category",
+  settings_skills_desc: "Manage vendor skills per diagnosis category. Used temporarily during runs.",
   settings_features_group_canvas: "Canvas surfaces",
   settings_features_group_workflow: "Workflow",
   settings_features_group_ambient: "Ambient",

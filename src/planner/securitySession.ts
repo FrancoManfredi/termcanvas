@@ -4,6 +4,7 @@ import {
   ensureTerminalRuntime,
   getTerminalPtyId,
 } from "../terminal/terminalRuntimeStore.ts";
+import { createHeadlessGate } from "./headlessGate.ts";
 
 // Sesión de aplicación de seguridad: spawnea
 // `node scripts/configure-github-security.mjs --apply --repo <path>
@@ -12,10 +13,11 @@ import {
 // progreso por stdout (líneas > ✓ ⚠ ✗) y escribe
 // .agents/planning/security-result-<ts>.json.
 //
-// Dos señales (mismo patrón que toolsSession):
+// Dos señales que el GATE reúne EN CUALQUIER ORDEN (mismo patrón y misma
+// carrera exit-vs-poller que toolsSession; ver headlessGate.ts):
 // - onReady(resultPath): el security-result apareció. El runtime NO se
 //   destruye acá: el log completo queda visible para el usuario.
-// - onExited(code): con exit 0 + archivo presente, la corrida terminó.
+// - onExited(code): exit 0 + archivo presente = la corrida terminó.
 //   El runtime lo destruye la app (store) al pasar a done, no esta sesión.
 
 export interface SecuritySessionHandle {
@@ -104,7 +106,6 @@ export async function launchSecuritySession(
   };
 
   let stopped = false;
-  let fileFound = false;
   let exitSubscribed = false;
   let exitUnsubscribe: (() => void) | null = null;
 
@@ -117,12 +118,27 @@ export async function launchSecuritySession(
     options.onError(message);
   };
 
+  // Gate independiente del orden (mismo bug resuelto en toolsSession: el
+  // exit puede llegar ANTES de que el poller vea el archivo).
+  const gate = createHeadlessGate<string>({
+    onArtifactReady: (foundPath) => {
+      if (!stopped) options.onReady(foundPath);
+    },
+    onCompleted: (exitCode) => {
+      if (!stopped) {
+        clearInterval(interval);
+        options.onExited(exitCode);
+      }
+    },
+    onFailed: (message) => fail(message),
+  });
+
   const startedAt = Date.now();
   const interval = setInterval(async () => {
     if (stopped) return;
     if (Date.now() > startedAt + SESSION_TIMEOUT_MS) {
       fail(
-        `La configuración de seguridad no escribió security-result en ${options.outDir} (tiempo agotado)`,
+        `La configuración de seguridad no cerró su corrida en ${options.outDir} (tiempo agotado)`,
       );
       return;
     }
@@ -133,24 +149,25 @@ export async function launchSecuritySession(
         exitUnsubscribe = window.termcanvas.terminal.onExit(
           (exitedPtyId, exitCode) => {
             if (stopped || exitedPtyId !== ptyId) return;
-            if (exitCode !== 0) {
-              fail(
-                `La configuración de seguridad terminó con error (exit ${exitCode})${fileFound ? "" : " sin escribir security-result"}`,
-              );
-              return;
+            gate.markExit(exitCode, (artifactReady) =>
+              `La configuración de seguridad terminó con error (exit ${exitCode})${artifactReady ? "" : " sin escribir security-result"}`,
+            );
+            if (exitCode === 0) {
+              // Lectura defensiva inmediata al exit (patrón planningSession):
+              // entrega el gate sin esperar el próximo tick.
+              void newestSecurityResult(options.outDir).then((found) => {
+                if (found) gate.markArtifact(found);
+              });
             }
-            if (!fileFound) return;
-            options.onExited(exitCode);
           },
         );
       }
     }
-    if (fileFound) return;
     const found = await newestSecurityResult(options.outDir);
     if (!found) return;
-    fileFound = true;
-    clearInterval(interval);
-    options.onReady(found);
+    // Idempotente: mientras el gate espere el exit, el interval sigue vivo
+    // como backstop; onCompleted/fail lo limpian al resolverse.
+    gate.markArtifact(found);
   }, POLL_INTERVAL_MS);
 
   return {

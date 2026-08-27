@@ -4,7 +4,12 @@
 // la app) recibe solo la salida estructurada de acá (tool-findings-<ts>.json).
 //
 // Uso: node run-diagnostico-tools.mjs --repo <path-al-repo> --out <dir>
-// (La app lo invoca desde src/planner/toolsSession.ts; no se llama directo.)
+//      [--category <id>]
+// Con --category (diagnóstico por categorías) SOLO corren las herramientas
+// mapeadas a esa categoría y el resultado nace acotado en
+// tool-findings-<categoria>-<ts>.json. Sin --category corre el pipeline
+// completo (modo legacy). La app lo invoca desde src/planner/toolsSession.ts;
+// no se llama directo.
 
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -32,6 +37,7 @@ function argValue(name, fallback) {
   const i = args.indexOf(name);
   return i >= 0 && i + 1 < args.length ? args[i + 1] : fallback;
 }
+
 const REPO = path.resolve(
   argValue("--repo", "C:\\Users\\Estudiante UCU\\OneDrive\\Escritorio\\education-games"),
 );
@@ -40,6 +46,51 @@ const OUT_DIR = path.resolve(
 );
 const TOOLS_DIR = path.join(__dirname, ".tools");
 const RAW_DIR = path.join(OUT_DIR, "raw");
+
+// ─── Categorías del diagnóstico ───────────────────────────────────────────
+// Espejo EJECUTABLE del registro de src/types/diagnosisCategories.ts: cada
+// categoría lista las TOOL KEYS que corren para ella (el resto del pipeline
+// no se ejecuta). tests/diagnosis-categories.test.ts verifica que ambos
+// lados estén sincronizados. Categoría sin herramientas = LLM-only: la app
+// ni siquiera lanza este script para esas.
+const CATEGORY_TOOLS = {
+  "diseno-patrones": ["depcruise"],
+  organizacion: ["knip", "depcruise"],
+  documentacion: ["eslint"],
+  seguridad: ["npm-audit", "license-checker", "semgrep", "gitleaks", "zizmor"],
+  proteccion: [],
+  rendimiento: [],
+  "buenas-practicas": ["eslint", "tsc", "jscpd", "npm-outdated", "git-sizer"],
+  requerimientos: [],
+};
+
+// Filtro de hallazgos POR CATEGORÍA, aplicado después de correr cada tool:
+// la categoría recibe solo la porción que le corresponde del output (ej:
+// Documentación toma de eslint únicamente las reglas jsdoc/*, nunca el resto
+// de los warnings del linter — el mismo principio de responsabilidad única
+// por llamada que rige todo el feature). Ausente = la tool aporta todos sus
+// hallazgos a esa categoría.
+const CATEGORY_FINDING_FILTERS = {
+  documentacion: (finding) => String(finding.rule ?? "").startsWith("jsdoc"),
+};
+
+function filterFindingsForCategory(findings, category) {
+  const predicate = category ? CATEGORY_FINDING_FILTERS[category] : null;
+  if (!predicate) return findings;
+  return findings.filter(predicate);
+}
+
+const CATEGORY = (() => {
+  const raw = argValue("--category", null);
+  if (raw == null) return null;
+  if (!Object.prototype.hasOwnProperty.call(CATEGORY_TOOLS, raw)) {
+    process.stderr.write(
+      `[herramientas] categoría desconocida: "${raw}". Válidas: ${Object.keys(CATEGORY_TOOLS).join(", ")}\n`,
+    );
+    process.exit(1);
+  }
+  return raw;
+})();
 
 // Paquetes del repo: se DETECTAN de la estructura real (package.json en la
 // raíz y en subdirectorios directos), no se asumen frontend/backend. Así el
@@ -200,6 +251,11 @@ async function runTool(tool, fn) {
   const label = `${tool.key}${tool.pkg ? ` (${tool.pkg})` : ""}`;
   process.stdout.write(`[herramientas] ${label} — corriendo…\n`);
   const started = Date.now();
+  // Heartbeat cada 30s para que la terminal de la app no quede muda 5 min y
+  // el usuario vea qué tool está colgada antes del timeout global.
+  const heartbeat = setInterval(() => {
+    process.stdout.write(`[herramientas] ${label} — aún corriendo (${Math.round((Date.now() - started) / 1000)}s)…\n`);
+  }, 30000);
   const record = {
     tool: tool.key,
     package: tool.pkg ?? null,
@@ -214,6 +270,7 @@ async function runTool(tool, fn) {
   const ctx = { record, raw: (name, content) => saveRaw(`${tool.key}${tool.pkg ? "-" + tool.pkg : ""}-${name}`, content) };
   try {
     const out = await fn(ctx);
+    clearInterval(heartbeat);
     const findings = dedupFindings(out?.findings ?? []);
     record.files_scanned = out?.files ?? null;
     record.lines_scanned = out?.lines ?? null;
@@ -229,6 +286,7 @@ async function runTool(tool, fn) {
     }
     return { record, findings };
   } catch (error) {
+    clearInterval(heartbeat);
     // Un throw acá es un BUG del orquestador (no un fallo de la herramienta):
     // las tools degradan a no_evaluada por sí solas y no tiran.
     record.status = "error";
@@ -288,13 +346,17 @@ async function countSourceFiles(pkgDir) {
 }
 
 // ─── Descarga best-effort de binarios standalone (gitleaks, git-sizer) ──
-function httpsGet(url) {
+// Con timeout explícito: sin él, un stall de GitHub API cuelga el pipeline
+// entero y el gate de la app hace timeout a los 10-15 min sin artefacto.
+function httpsGet(url, { timeoutMs = 15000 } = {}) {
   return new Promise((resolve, reject) => {
-    https
-      .get(url, { headers: { "User-Agent": "termcanvas-experiment" } }, (res) => {
+    const req = https.get(
+      url,
+      { headers: { "User-Agent": "termcanvas-experiment" } },
+      (res) => {
         if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
           res.resume();
-          httpsGet(res.headers.location).then(resolve, reject);
+          httpsGet(res.headers.location, { timeoutMs }).then(resolve, reject);
           return;
         }
         if (res.statusCode !== 200) {
@@ -305,8 +367,12 @@ function httpsGet(url) {
         const chunks = [];
         res.on("data", (c) => chunks.push(c));
         res.on("end", () => resolve(Buffer.concat(chunks)));
-      })
-      .on("error", reject);
+      },
+    );
+    req.setTimeout(timeoutMs, () => {
+      req.destroy(new Error(`timeout tras ${timeoutMs}ms para ${url}`));
+    });
+    req.on("error", reject);
   });
 }
 
@@ -815,32 +881,36 @@ async function gitSizer(ctx) {
 // subdirectorios directos). Cada tool npm corre solo donde aplica su config:
 // eslint donde hay config de eslint, tsc donde hay tsconfig, depcruise donde
 // hay .dependency-cruiser.*; el resto degrada a "no_evaluada" con motivo.
-async function buildPipeline() {
+async function buildPipeline(category) {
   const packages = await detectPackages(REPO);
+  // Con categoría: solo entran al pipeline las tools mapeadas a ella (las
+  // por-paquete y las repo-level por igual). Sin categoría: todas (legacy).
+  const allowed = category ? new Set(CATEGORY_TOOLS[category]) : null;
+  const wanted = (key) => !allowed || allowed.has(key);
   const pipeline = [];
   for (const p of packages) {
     const cap = await detectCapabilities(p);
     const pkg = { ...p, cap };
-    if (cap.eslint) {
+    if (cap.eslint && wanted("eslint")) {
       pipeline.push({ key: "eslint", pkg: pkg.label, run: (c) => eslintPkg(c, pkg) });
     }
-    if (cap.tsconfig) {
+    if (cap.tsconfig && wanted("tsc")) {
       pipeline.push({ key: "tsc", pkg: pkg.label, run: (c) => tscPkg(c, pkg, cap.tsconfig) });
     }
     if (cap.packageJson) {
-      pipeline.push({ key: "npm-audit", pkg: pkg.label, run: (c) => npmAudit(c, pkg) });
-      pipeline.push({ key: "npm-outdated", pkg: pkg.label, run: (c) => npmOutdated(c, pkg) });
-      pipeline.push({ key: "license-checker", pkg: pkg.label, run: (c) => licenseCheck(c, pkg) });
-      pipeline.push({ key: "knip", pkg: pkg.label, run: (c) => knipPkg(c, pkg) });
-      pipeline.push({ key: "jscpd", pkg: pkg.label, run: (c) => jscpdPkg(c, pkg) });
-      pipeline.push({ key: "depcruise", pkg: pkg.label, run: (c) => depcruisePkg(c, pkg) });
+      if (wanted("npm-audit")) pipeline.push({ key: "npm-audit", pkg: pkg.label, run: (c) => npmAudit(c, pkg) });
+      if (wanted("npm-outdated")) pipeline.push({ key: "npm-outdated", pkg: pkg.label, run: (c) => npmOutdated(c, pkg) });
+      if (wanted("license-checker")) pipeline.push({ key: "license-checker", pkg: pkg.label, run: (c) => licenseCheck(c, pkg) });
+      if (wanted("knip")) pipeline.push({ key: "knip", pkg: pkg.label, run: (c) => knipPkg(c, pkg) });
+      if (wanted("jscpd")) pipeline.push({ key: "jscpd", pkg: pkg.label, run: (c) => jscpdPkg(c, pkg) });
+      if (wanted("depcruise")) pipeline.push({ key: "depcruise", pkg: pkg.label, run: (c) => depcruisePkg(c, pkg) });
     }
   }
   // Repo-level: corren en cualquier repo git (y semgrep sin git igual).
-  pipeline.push({ key: "semgrep", pkg: null, run: semgrep });
-  pipeline.push({ key: "gitleaks", pkg: null, run: gitleaks });
-  pipeline.push({ key: "git-sizer", pkg: null, run: gitSizer });
-  pipeline.push({ key: "zizmor", pkg: null, run: zizmor });
+  if (wanted("semgrep")) pipeline.push({ key: "semgrep", pkg: null, run: semgrep });
+  if (wanted("gitleaks")) pipeline.push({ key: "gitleaks", pkg: null, run: gitleaks });
+  if (wanted("git-sizer")) pipeline.push({ key: "git-sizer", pkg: null, run: gitSizer });
+  if (wanted("zizmor")) pipeline.push({ key: "zizmor", pkg: null, run: zizmor });
   return { pipeline, packages };
 }
 
@@ -877,12 +947,15 @@ async function npmOutdated(ctx, pkg) {
 
 // license-checker: compliance de licencias (copyleft = warning, UNKNOWN =
 // info). Para un producto que se piensa vender/abrir, el copyleft infecta.
+// --production limita a deps de producción (no devDependencies): evita escanear
+// cientos de paquetes de build que inflan el tiempo de 5 min a >10 min y
+// cuelgan el gate global en categorías pesadas como seguridad.
 async function licenseCheck(ctx, pkg) {
   const pkgDir = path.join(REPO, pkg.dir);
-  const res = await run("npx", ["--yes", "license-checker", "--json"], {
+  const res = await run("npx", ["--yes", "license-checker", "--json", "--production"], {
     cwd: pkgDir,
     shell: true,
-    timeoutMs: 300000,
+    timeoutMs: 180000,
   });
   if (!exitedNormally(res)) return degradeTool(ctx, res, "license-checker");
   const parsed = safeJson(res.stdout);
@@ -983,8 +1056,135 @@ async function main() {
   await mkdir(RAW_DIR, { recursive: true });
 
   const started = Date.now();
-  const { pipeline, packages } = await buildPipeline();
+  const { pipeline, packages } = await buildPipeline(CATEGORY);
   const results = [];
+
+  // Watchdog global: si el pipeline completo tarda más que el timeout de la
+  // app (toolsSession 10-15 min), NUNCA escribiría el artefacto y el gate
+  // haría timeout sin dejar rastro. Con watchdog, siempre escribe un
+  // artefacto parcial con las tools que alcanzaron a terminar y marca el
+  // resto como no_evaluada por timeout global — el gate cierra y el LLM
+  // puede continuar con cobertura honesta.
+  const GLOBAL_TIMEOUT_MS =
+    CATEGORY && ["seguridad", "buenas-practicas"].includes(CATEGORY) ? 12 * 60 * 1000 : 8 * 60 * 1000;
+  let globalTimedOut = false;
+  let alreadyWritten = false;
+  async function writeOutput() {
+    if (alreadyWritten) return;
+    alreadyWritten = true;
+    // Filtro POR CATEGORÍA antes de la agregación: el conteo de cada record y
+    // el JSON final reflejan solo lo que la categoría reclama de cada tool.
+    const scoped = results.map((r) => {
+      const filtered = dedupFindings(
+        filterFindingsForCategory(r.findings, CATEGORY),
+      );
+      r.record.findings_count = filtered.length;
+      return { record: r.record, findings: filtered };
+    });
+    const allFindings = dedupFindings(scoped.flatMap((r) => r.findings));
+    const coverage = results.map((r) => r.record);
+    const notEvaluated = coverage
+      .filter((c) => c.status === "no_evaluada" || c.status === "error")
+      .map((c) => ({ area: `${c.tool}${c.package ? ` (${c.package})` : ""}`, reason: c.error ?? "falló" }));
+
+    // Conteo fuente por paquete (columna cobertura del resumen).
+    const pkgStats = {};
+    for (const p of packages) {
+      pkgStats[p.label] = await countSourceFiles(path.join(REPO, p.dir));
+    }
+
+    const ts = Date.now();
+    const output = {
+      timestamp: ts,
+      repo: REPO,
+      category: CATEGORY,
+      packages: packages.map((p) => ({ path: p.label, ...pkgStats[p.label] })),
+      findings: allFindings,
+      coverage,
+      not_evaluated: notEvaluated,
+    };
+
+    const findingsPath = path.join(
+      OUT_DIR,
+      `tool-findings-${CATEGORY ? `${CATEGORY}-` : ""}${ts}.json`,
+    );
+    await writeFile(findingsPath, JSON.stringify(output, null, 2));
+
+    // Resumen legible (lo que el usuario me pasa de vuelta).
+    const lines = [];
+    lines.push(`PIPELINE DE DIAGNOSTICO — HERRAMIENTAS DETERMINISTICAS`);
+    lines.push(`repo: ${REPO}`);
+    if (CATEGORY) lines.push(`categoría: ${CATEGORY}`);
+    lines.push(`fecha: ${new Date(ts).toLocaleString("es-AR")}`);
+    lines.push("");
+    lines.push(`Cobertura de archivos fuente por paquete:`);
+    for (const p of packages) {
+      lines.push(`  ${p.label}: ${pkgStats[p.label].files} archivos, ${pkgStats[p.label].lines} líneas`);
+    }
+    lines.push("");
+    lines.push(`Herramienta        | paquete  | estado        | archivos | hallazgos | nota`);
+    lines.push(`-------------------|----------|---------------|----------|-----------|-----`);
+    for (const c of coverage) {
+      const tool = c.tool.padEnd(18);
+      const pkg = (c.package ?? "repo").padEnd(8);
+      const status = c.status.padEnd(13);
+      const files = c.files_scanned != null ? String(c.files_scanned).padEnd(8) : "—".padEnd(8);
+      const count = String(c.findings_count).padEnd(9);
+      const note = c.note ?? c.error ?? "";
+      lines.push(`${tool}| ${pkg} | ${status} | ${files} | ${count} | ${note}`);
+    }
+    lines.push("");
+    lines.push(`TOTAL hallazgos estructurados: ${allFindings.length}`);
+    lines.push(`Áreas no evaluadas: ${notEvaluated.length ? notEvaluated.map((n) => `${n.area} (${n.reason})`).join("; ") : "ninguna"}`);
+    lines.push("");
+    lines.push(`Salidas:`);
+    lines.push(`  ${findingsPath}`);
+    lines.push(`duración total: ${Math.round((Date.now() - started) / 1000)}s`);
+    if (globalTimedOut) lines.push(`(artefacto PARCIAL por timeout global de ${GLOBAL_TIMEOUT_MS / 1000}s)`);
+    lines.push("");
+
+    // Resumen por herramienta detallado (primeros N hallazgos de cada una).
+    for (const r of results) {
+      if (!r.findings.length) continue;
+      lines.push(`[${r.record.tool}${r.record.package ? ` ${r.record.package}` : ""}] ${r.findings.length} hallazgo(s):`);
+      const shown = r.findings.slice(0, 15);
+      for (const f of shown) {
+        const loc = f.file + (f.line != null ? `:${f.line}` : "");
+        lines.push(`   ${f.severity.toUpperCase().padEnd(8)} ${loc}  [${f.rule}] ${f.message}`);
+      }
+      if (r.findings.length > shown.length) lines.push(`   … y ${r.findings.length - shown.length} más (ver JSON)`);
+    }
+
+    const summary = lines.join("\n") + "\n";
+    process.stdout.write(summary);
+  }
+
+  const globalWatchdog = setTimeout(async () => {
+    globalTimedOut = true;
+    process.stderr.write(
+      `[herramientas] TIMEOUT GLOBAL tras ${GLOBAL_TIMEOUT_MS / 1000}s — ${results.length}/${pipeline.length} tools completadas. Escribiendo artefacto parcial…\n`,
+    );
+    // Marcar las tools pendientes como no_evaluada por timeout global
+    for (let i = results.length; i < pipeline.length; i++) {
+      const tool = pipeline[i];
+      results.push({
+        record: {
+          tool: tool.key,
+          package: tool.pkg ?? null,
+          status: "no_evaluada",
+          files_scanned: null,
+          lines_scanned: null,
+          findings_count: 0,
+          duration_ms: 0,
+          error: `no ejecutada: timeout global del pipeline (${GLOBAL_TIMEOUT_MS / 1000}s)`,
+          note: null,
+        },
+        findings: [],
+      });
+    }
+    await writeOutput();
+    process.exit(0);
+  }, GLOBAL_TIMEOUT_MS);
 
   for (const tool of pipeline) {
     const { record, findings } = await runTool(tool, (ctx) => tool.run(ctx));
@@ -992,77 +1192,10 @@ async function main() {
     record.findings_count = deduped.length;
     results.push({ record, findings: deduped });
   }
+  clearTimeout(globalWatchdog);
+  if (globalTimedOut) return;
 
-  const allFindings = dedupFindings(results.flatMap((r) => r.findings));
-  const coverage = results.map((r) => r.record);
-  const notEvaluated = coverage
-    .filter((c) => c.status === "no_evaluada" || c.status === "error")
-    .map((c) => ({ area: `${c.tool}${c.package ? ` (${c.package})` : ""}`, reason: c.error ?? "falló" }));
-
-  // Conteo fuente por paquete (columna cobertura del resumen).
-  const pkgStats = {};
-  for (const p of packages) {
-    pkgStats[p.label] = await countSourceFiles(path.join(REPO, p.dir));
-  }
-
-  const ts = Date.now();
-  const output = {
-    timestamp: ts,
-    repo: REPO,
-    packages: packages.map((p) => ({ path: p.label, ...pkgStats[p.label] })),
-    findings: allFindings,
-    coverage,
-    not_evaluated: notEvaluated,
-  };
-
-  const findingsPath = path.join(OUT_DIR, `tool-findings-${ts}.json`);
-  await writeFile(findingsPath, JSON.stringify(output, null, 2));
-
-  // Resumen legible (lo que el usuario me pasa de vuelta).
-  const lines = [];
-  lines.push(`PIPELINE DE DIAGNOSTICO — HERRAMIENTAS DETERMINISTICAS`);
-  lines.push(`repo: ${REPO}`);
-  lines.push(`fecha: ${new Date(ts).toLocaleString("es-AR")}`);
-  lines.push("");
-  lines.push(`Cobertura de archivos fuente por paquete:`);
-  for (const p of packages) {
-    lines.push(`  ${p.label}: ${pkgStats[p.label].files} archivos, ${pkgStats[p.label].lines} líneas`);
-  }
-  lines.push("");
-  lines.push(`Herramienta        | paquete  | estado        | archivos | hallazgos | nota`);
-  lines.push(`-------------------|----------|---------------|----------|-----------|-----`);
-  for (const c of coverage) {
-    const tool = c.tool.padEnd(18);
-    const pkg = (c.package ?? "repo").padEnd(8);
-    const status = c.status.padEnd(13);
-    const files = c.files_scanned != null ? String(c.files_scanned).padEnd(8) : "—".padEnd(8);
-    const count = String(c.findings_count).padEnd(9);
-    const note = c.note ?? c.error ?? "";
-    lines.push(`${tool}| ${pkg} | ${status} | ${files} | ${count} | ${note}`);
-  }
-  lines.push("");
-  lines.push(`TOTAL hallazgos estructurados: ${allFindings.length}`);
-  lines.push(`Áreas no evaluadas: ${notEvaluated.length ? notEvaluated.map((n) => `${n.area} (${n.reason})`).join("; ") : "ninguna"}`);
-  lines.push("");
-  lines.push(`Salidas:`);
-  lines.push(`  ${findingsPath}`);
-  lines.push(`duración total: ${Math.round((Date.now() - started) / 1000)}s`);
-  lines.push("");
-
-  // Resumen por herramienta detallado (primeros N hallazgos de cada una).
-  for (const r of results) {
-    if (!r.findings.length) continue;
-    lines.push(`[${r.record.tool}${r.record.package ? ` ${r.record.package}` : ""}] ${r.findings.length} hallazgo(s):`);
-    const shown = r.findings.slice(0, 15);
-    for (const f of shown) {
-      const loc = f.file + (f.line != null ? `:${f.line}` : "");
-      lines.push(`   ${f.severity.toUpperCase().padEnd(8)} ${loc}  [${f.rule}] ${f.message}`);
-    }
-    if (r.findings.length > shown.length) lines.push(`   … y ${r.findings.length - shown.length} más (ver JSON)`);
-  }
-
-  const summary = lines.join("\n") + "\n";
-  process.stdout.write(summary);
+  await writeOutput();
 }
 
 // Solo corre como script (la app lo invoca con `node run-diagnostico-tools.mjs`);
@@ -1080,6 +1213,8 @@ if (isMain) {
 
 // Expuestos para los tests (tests/run-diagnostico-tools.test.ts): run() es el
 // corazón de la robustez del pipeline (nunca tira por fallos de ejecución).
+// CATEGORY_TOOLS/CATEGORY_FINDING_FILTERS son el espejo de
+// src/types/diagnosisCategories.ts (sincronización verificada por test).
 export {
   run,
   exitedNormally,
@@ -1088,4 +1223,7 @@ export {
   degradeTool,
   dedupFindings,
   runTool,
+  CATEGORY_TOOLS,
+  CATEGORY_FINDING_FILTERS,
+  filterFindingsForCategory,
 };

@@ -1,8 +1,16 @@
 import type { PlannerMode } from "../types/issuePlanning.ts";
+import type { DiagnosisCategoryId } from "../types/diagnosisCategories.ts";
+import { getDiagnosisCategory, diagnosisFileName, legacyDiagnosisFileName } from "../types/diagnosisCategories.ts";
+import { skillForCategory } from "../skills/registry";
 import { buildRepoContextSection, buildRequirementsSection, buildArchitectureDecisionsSection } from "../utils/repoContext";
 
 export interface PlanningPromptInput {
   mode: PlannerMode;
+  // Categoría del diagnóstico por categorías (solo mode audit): define el
+  // foco del análisis y qué queda fuera de alcance. Con toolFindingsText el
+  // LLM interpreta SOLO esos hallazgos bajo ese foco; sin herramientas, la
+  // exploración dirigida de la categoría reemplaza a la auditoría clásica.
+  category?: DiagnosisCategoryId;
   // Texto del contexto activo del repositorio (brief formateado por el motor
   // de entrevista). Se inyecta inline por buildRepoContextSection; el agente
   // no lee ningún archivo.
@@ -23,10 +31,16 @@ export interface PlanningPromptInput {
   // deja de pedir "leé todo el repo" y pasa a interpretar/deduplicar estos
   // hallazgos + exploración dirigida (pipeline herramientas + LLM).
   toolFindingsText?: string;
-  // Issues abiertos del repo (número | título): el plan marca con
-  // existingIssueNumber a los que repiten un problema ya pedido. Opcional:
-  // si no se pudo leer, el plan simplemente no trae esa marca.
-  openIssues?: Array<{ number: number; title: string }>;
+   // Issues abiertos del repo (número | título): el plan marca con
+   // existingIssueNumber a los que repiten un problema ya pedido. Opcional:
+   // si no se pudo leer, el plan simplemente no trae esa marca.
+   openIssues?: Array<{ number: number; title: string }>;
+   // Nombres de skills vendor descubiertas para la categoría
+   // (vendorSkills.discoverVendorSkills sobre resources/diagnosis-skills).
+   // Se ANUNCIAN por nombre con orden de carga explícita; sus cuerpos NO se
+   // inyectan acá (pueden ser muchas: inflarían el prompt base). Vacío o
+   // ausente = corrida sin vendor, igual que siempre.
+   vendorSkillNames?: string[];
 }
 
 function oneLine(value: string): string {
@@ -60,6 +74,37 @@ function dedent(value: string): string {
 export function buildPlanningPrompt(input: PlanningPromptInput): string {
   const { mode, outputPath } = input;
   const attachments = input.attachmentNames ?? [];
+  const category = input.category ? getDiagnosisCategory(input.category) : undefined;
+
+  // Metodología de la categoría inyectada INLINE (opción B): el cuerpo de la
+  // skill diag-<id> viaja DENTRO del prompt — garantizado en contexto, sin
+  // depender de que el agente decida cargar la herramienta skill. Fuente
+  // única: registry.ts (el MISMO body que scopedSession materializa como
+  // SKILL.md efímero; acá se reusa, no se duplica).
+  const categorySkill = category ? skillForCategory(category.id) : null;
+  const methodologySection = categorySkill
+    ? [
+        ``,
+        `## METODOLOGÍA DE LA CATEGORÍA (incluida acá — no cargues ninguna skill para esto)`,
+        `El cuerpo completo de la skill ${categorySkill.name} está incluido abajo: es tu criterio OBLIGATORIO para este diagnóstico — qué investigar, cómo calibrar severidad, qué falsos positivos descartar y qué evidencia exige cada finding.`,
+        ``,
+        categorySkill.body,
+      ]
+    : [];
+
+  // Skills vendor del usuario (resources/diagnosis-skills): permitidas en la
+  // sesión scopeada pero NO inyectadas al prompt (pueden ser muchas). Se
+  // anuncian por nombre con orden explícita de cargarlas todas.
+  const vendorNames = (input.vendorSkillNames ?? []).filter(Boolean);
+  const vendorSkillsSection =
+    category && vendorNames.length > 0
+      ? [
+          ``,
+          `## SKILLS ADICIONALES DE LA CATEGORÍA (permitidas en esta sesión)`,
+          `Además de la metodología incluida arriba, tu sesión tiene permitidas estas skills provistas para la categoría «${category.label}»: ${vendorNames.join(", ")}.`,
+          `Cargá TODAS con tu herramienta skill ANTES de comenzar el análisis y usalas como criterio complementario. Si alguna falla al cargar, continuá sin ella y seguí la metodología incluida.`,
+        ]
+      : [];
 
   // Contexto del repositorio: el texto del brief ACTIVO del proyecto, que
   // pesa sobre TODOS los hallazgos y propuestas. Se inyecta inline (el agente
@@ -157,14 +202,44 @@ export function buildPlanningPrompt(input: PlanningPromptInput): string {
             input.toolFindingsText,
             ``,
             `## TU TRABAJO (pipeline herramientas + LLM)`,
+            ...(category
+              ? [
+                  `REGLA DE FOCO (categoría «${category.label}»): este plan pertenece ÚNICAMENTE a esta categoría. Entra: ${category.scopeIn}. Queda FUERA DE ALCANCE (${category.scopeOut}): descartalo como ruido aunque lo notes — otro diagnóstico por categoría los cubre.`,
+                  ...methodologySection,
+                  ...vendorSkillsSection,
+                  ``,
+                ]
+              : []),
             `1. Interpretar y priorizar los hallazgos de arriba: cuáles son ruido (falsos positivos, triviales) y cuáles son reales.`,
             `2. Deduplicar: si dos herramientas marcan el mismo problema en el mismo archivo, es UN issue, no dos.`,
             `3. Cruzar contra los REQUERIMIENTOS Y ASR de la sección de arriba: un hallazgo en un dominio gobernado por un ASR sube de prioridad.`,
             `4. Exploración dirigida (acá sí leés código, pero con foco): los archivos marcados con alta duplicación, complejidad o dependencias son candidatos para juicio de diseño (SOLID, cohesión) que ninguna herramienta puede evaluar.`,
             `5. Buscá lo que NINGUNA herramienta cubre: fugas de memoria, condiciones de carrera, consistencia de nombres contra el glosario, calidad semántica del manejo de errores.`,
           ]
-        : [
-            // Sin herramientas: auditoría clásica de "leé el repo".
+        : category
+          ? [
+              // Categoría sin herramientas deterministas (LLM-only): la
+              // exploración dirigida de la categoría reemplaza a la
+              // auditoría clásica de "leé todo el repo".
+              `## DIAGNÓSTICO SIN HERRAMIENTAS DETERMINISTICAS`,
+              `La categoría «${category.label}» NO tiene herramientas estáticas asignadas: tu juicio explorando el código es la única fuente de evidencia.`,
+              ``,
+              `### ENTRA EN ALCANCE`,
+              category.scopeIn,
+              ``,
+              `### QUEDA FUERA DE ALCANCE`,
+              `${category.scopeOut}. Si notás problemas fuera de alcance, NO los reportes como items del plan: otro diagnóstico por categoría los cubre.`,
+              ...methodologySection,
+              ...vendorSkillsSection,
+              ``,
+              `### MÉTODO`,
+              `1. Explorá el repo con foco EXCLUSIVO en el alcance de arriba, módulo por módulo.`,
+              `2. Cada finding necesita evidencia concreta file:line: sin evidencia citable, no es finding.`,
+              `3. Priorizá por impacto real, no por cantidad: pocos findings sólidos valen más que muchos especulativos.`,
+            ]
+          : [
+            // Sin herramientas ni categoría: auditoría clásica de "leé el
+            // repo" (camino defensivo; la app siempre lanza con categoría).
             `## TAREA: AUDITORÍA DE REPOSITORIO`,
             `Analizá el código del repositorio actual y encontrá problemas concretos y reproducibles (bugs, deuda técnica crítica, fugas de memoria, tokens expuestos, errores de concurrencia).`,
             ``,
@@ -191,9 +266,14 @@ export function buildPlanningPrompt(input: PlanningPromptInput): string {
 
   // Veredicto de cumplimiento de requerimientos: se emite solo cuando la
   // síntesis (RFs/ASRs/restricciones) está inyectada — sin ella no hay nada
-  // que evaluar.
-  const verdictSection = input.requirementsText
-    ? [
+  // que evaluar. En el diagnóstico por categorías, SOLO la categoría
+  // «requerimientos» lo emite (responsabilidad única por llamada: las otras
+  // categorías no cargan con el veredicto); el modo roadmap lo mantiene
+  // igual que siempre.
+  const verdictSection =
+    input.requirementsText &&
+    (mode === "roadmap" || input.category === "requerimientos")
+      ? [
         `## VEREDICTO DE REQUERIMIENTOS (OBLIGATORIO)`,
         `Evaluá CADA requerimiento funcional, ASR y restricción de la sección REQUERIMIENTOS RELEVADOS contra el código real del repositorio.`,
         ...(input.requirementsText.includes("HISTORIAS DE USUARIO")
@@ -295,9 +375,21 @@ export function buildPlanningPrompt(input: PlanningPromptInput): string {
   ].join("\n");
 }
 
-export function planningOutputPath(repoPath: string, mode: PlannerMode): string {
-  // El diagnóstico (audit) escribe diagnostico-<ts>.json; el prefijo plan-<ts>
-  // queda reservado para el planning de roadmap.
-  const prefix = mode === "audit" ? "diagnostico" : "plan";
-  return `${repoPath}/.agents/planning/${prefix}-${Date.now()}.json`;
+export function planningOutputPath(
+  repoPath: string,
+  mode: PlannerMode,
+  category?: DiagnosisCategoryId,
+): string {
+  const dir = `${repoPath}/.agents/planning`;
+  if (mode !== "audit") {
+    // El prefijo plan-<ts> queda reservado para el planning de roadmap.
+    return `${dir}/plan-${Date.now()}.json`;
+  }
+  // Diagnóstico por categorías: diagnostico-<categoria>-<ts>.json (una
+  // categoría por archivo, nunca se pisan entre categorías). Sin categoría
+  // (defensivo: la app siempre lanza con una) cae al nombre legacy.
+  const ts = Date.now();
+  return category
+    ? `${dir}/${diagnosisFileName(category, ts)}`
+    : `${dir}/${legacyDiagnosisFileName(ts)}`;
 }

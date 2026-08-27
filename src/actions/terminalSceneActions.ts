@@ -29,6 +29,10 @@ interface CreateTerminalInSceneOptions {
   issueNumber?: number;
   reviewIssueNumber?: number;
   reviewPrNumber?: number;
+  // Env exclusivo del proceso de este terminal (ej: OPENCODE_CONFIG del
+  // scope de skills especializadas). Solo lo pasan los launchers que
+  // prepararon un scope; los terminales manuales nunca lo traen.
+  envOverride?: Record<string, string>;
 }
 
 interface WorktreeGroupMovePreview {
@@ -122,6 +126,7 @@ export function createTerminalInScene({
   issueNumber,
   reviewIssueNumber,
   reviewPrNumber,
+  envOverride,
 }: CreateTerminalInSceneOptions): TerminalData {
   const baseTerminal =
     terminal ??
@@ -168,6 +173,7 @@ export function createTerminalInScene({
     ...(issueNumber !== undefined ? { issueNumber } : {}),
     ...(reviewIssueNumber !== undefined ? { reviewIssueNumber } : {}),
     ...(reviewPrNumber !== undefined ? { reviewPrNumber } : {}),
+    ...(envOverride ? { envOverride } : {}),
   };
 
   // Apply collision-resolved nudges to existing tiles.

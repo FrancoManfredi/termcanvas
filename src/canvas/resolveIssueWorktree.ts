@@ -74,6 +74,7 @@ interface ResolveIssueWorktreeOptions {
     autoApprove: boolean;
     position: { x: number; y: number };
     issueNumber?: number;
+    envOverride?: Record<string, string>;
   }) => Terminal;
   notify: (type: "error" | "warn" | "info", message: string) => void;
   setResolveArrows?: React.Dispatch<React.SetStateAction<Array<{ issueId: string; terminalId: string }>>>;
@@ -81,6 +82,10 @@ interface ResolveIssueWorktreeOptions {
   position: { x: number; y: number };
   initialPrompt: string;
   resumePrompt?: string;
+  // Env del scope de skills (OPENCODE_CONFIG): viaja al TerminalData para
+  // que el proceso de este terminal vea solo las skills permitidas. Ausente
+  // = sesión sin scoping (issue sin categoría o scope no disponible).
+  envOverride?: Record<string, string>;
   isIssueTerminalLive?: (terminalId: string) => boolean;
 }
 
@@ -139,6 +144,7 @@ export async function resolveIssueWorktree(
     position,
     initialPrompt,
     resumePrompt,
+    envOverride,
     isIssueTerminalLive,
   } = opts;
 
@@ -189,6 +195,7 @@ export async function resolveIssueWorktree(
           autoApprove: true,
           position,
           issueNumber: issue.issueNumber,
+          ...(envOverride ? { envOverride } : {}),
         });
       }
     } else {
@@ -216,6 +223,7 @@ export async function resolveIssueWorktree(
         autoApprove: true,
         position,
         issueNumber: issue.issueNumber,
+        ...(envOverride ? { envOverride } : {}),
       });
     }
 

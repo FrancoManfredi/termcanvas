@@ -68,6 +68,10 @@ export function CoreArchitectureModal({
   // Filtro FUENTE — DIAGNÓSTICO compartido con la sección de GitHub Issues.
   const [githubDiagFilter, setGithubDiagFilter] = useState<string>("all");
 
+  // Filtro CATEGORÍA compartido con la sección de GitHub Issues (compone
+  // con el filtro de diagnóstico de origen).
+  const [githubCategoryFilter, setGithubCategoryFilter] = useState<string>("all");
+
   // Colapso compartido del bloque "Eliminados" entre las 4 secciones de curaduría.
   const [curDeletedOpen, setCurDeletedOpen] = useState(false);
 
@@ -172,11 +176,14 @@ export function CoreArchitectureModal({
   const navigate = (sub: CoreSubcategory) => {
     setActiveSubcategory(sub);
     setSearch("");
-    // Si el usuario navega a otra sección, el filtro de GitHub por diagnóstico
-    // no debe quedar colgado apuntando a un diagnóstico ya no visible. Los
-    // estados internos de cada sección (vistas detalle, overlays) se resetean
-    // solos por desmontaje.
-    if (sub !== "github_issues") setGithubDiagFilter("all");
+    // Si el usuario navega a otra sección, los filtros de GitHub (por
+    // diagnóstico y por categoría) no deben quedar colgados apuntando a
+    // algo ya no visible. Los estados internos de cada sección (vistas
+    // detalle, overlays) se resetean solos por desmontaje.
+    if (sub !== "github_issues") {
+      setGithubDiagFilter("all");
+      setGithubCategoryFilter("all");
+    }
     setSecurityOpen(false);
   };
 
@@ -217,6 +224,8 @@ export function CoreArchitectureModal({
     },
     githubDiagFilter,
     setGithubDiagFilter,
+    githubCategoryFilter,
+    setGithubCategoryFilter,
     curDeletedOpen,
     setCurDeletedOpen,
     securityOpen,

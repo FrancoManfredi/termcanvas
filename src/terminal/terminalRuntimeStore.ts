@@ -1675,12 +1675,21 @@ async function spawnPty(
     terminalId: string;
     terminalType: string;
     theme: "dark" | "light";
+    envOverrides?: Record<string, string>;
   } = {
     cwd: runtime.meta.worktreePath,
     terminalId: runtime.meta.terminal.id,
     terminalType: runtime.meta.terminal.type,
     theme: useThemeStore.getState().theme,
   };
+  // Env exclusivo de este proceso (ej: OPENCODE_CONFIG del scope de skills
+  // especializadas). Nunca viaja a otros terminales ni al env global.
+  if (
+    runtime.meta.terminal.envOverride &&
+    Object.keys(runtime.meta.terminal.envOverride).length > 0
+  ) {
+    options.envOverrides = { ...runtime.meta.terminal.envOverride };
+  }
 
   if (launch) {
     // Pin de modelo por fase: los metadatos del terminal viajan solo en las

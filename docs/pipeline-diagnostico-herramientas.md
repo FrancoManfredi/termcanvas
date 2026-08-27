@@ -234,3 +234,83 @@ El flujo real (codigo en `src/planner/toolsSession.ts`, `src/planner/planningSes
 - No implementar todavia el rediseño por lotes (scheduler determinista) que se discutio como alternativa mas robusta al manifiesto de cobertura — esta tarea reemplaza esa necesidad para casi todas las areas, dado que las herramientas ya garantizan cobertura real; si despues de esto todavia sienten falta de cobertura en las areas que quedan como "trabajo del LLM" (fugas de memoria, concurrencia, diseño), ahi si vale la pena retomar esa idea.
 - No instalar herramientas condicionales que no apliquen al repositorio actual (Trivy sin Docker, axe-core sin UI web, etc.) — documentarlas como disponibles para cuando aplique, no instalarlas de mas.
 - No introducir WSL en el pipeline hasta que Fase 0 confirme que una herramienta especifica lo requiere; en ese caso se decide explicitamente y se documenta, no se asume.
+
+---
+
+## Parte 8 — Diagnóstico por categorías (agosto 2026)
+
+El Diagnóstico dejó de ser una única corrida "de todo": ahora se lanza **por
+categoría**. La categoría decide qué herramientas corren en la Fase A y en qué
+se concentra el LLM en la Fase B; cada corrida produce su propio JSON y los
+hallazgos de una categoría jamás contaminan a otra.
+
+### Flujo
+
+1. Botón "+ Nuevo diagnóstico" → selector de categoría (single-select, 8 opciones).
+2. Fase A: SOLO las herramientas mapeadas a la categoría (`--category <id>`).
+   Categorías LLM-only (`proteccion`, `rendimiento`, `requerimientos`) saltan
+   directo a la Fase B.
+3. Fase B: prompt específico con REGLA DE FOCO (alcance explícito dentro/fuera;
+   lo que queda fuera NO se reporta aunque el modelo lo note). El veredicto de
+   requerimientos SOLO lo emite la categoría `requerimientos`. La metodología
+   de la categoría (skill `diag-<id>`) viaja INYECTADA en el prompt — no
+   depende de que el agente cargue la skill; esta queda además disponible
+   scopeada como referencia.
+4. Salida: `diagnostico-<categoria>-<ts>.json` (campo `categoria` a nivel
+   raíz del plan) + `tool-findings-<categoria>-<ts>.json`.
+
+### Skills por categoría
+
+Dos capas complementarias, ambas efímeras (se materializan por corrida en
+`.agents/planning/.scope-<runId>/` y se BORRAN al terminar):
+
+- **Skill interna `diag-<id>`** (`src/skills/content/` + `registry.ts`): la
+  metodología base de la categoría. Su cuerpo viaja INYECTADO dentro del
+  prompt (garantizado en contexto) Y como SKILL.md scopeado (re-lectura).
+- **Skills vendor del usuario** (`resources/diagnosis-skills/<categoria>/<nombre>/SKILL.md`):
+  material descargado del ecosistema o escrito a mano. Se descubren
+  best-effort por corrida, se copian CRUDAS al scope y sus nombres entran al
+  allowlist junto al diag-<id>; el prompt las anuncia con orden explícita de
+  cargarlas TODAS antes de analizar (no se inyectan: pueden ser muchas).
+  Reglas: el nombre final es el frontmatter `name` del SKILL.md (cae al
+  nombre de carpeta si falta); slug `[a-z0-9-]`; el prefijo `diag-` está
+  reservado; v1 solo admite un archivo por skill. Nada de lo que haya en esa
+  carpeta puede romper el lanzamiento. Ver
+  `resources/diagnosis-skills/README.md`.
+
+### Mapeo categoría → herramientas
+
+Fuente de verdad doble con test de sincronización:
+`src/types/diagnosisCategories.ts` (UI/prompt/store) ⇄ `CATEGORY_TOOLS` en
+`scripts/run-diagnostico-tools.mjs` (ejecución). Verificado por
+`tests/diagnosis-categories.test.ts`.
+
+| Categoría | Herramientas | Filtro extra de hallazgos |
+|---|---|---|
+| diseno-patrones | depcruise | — |
+| organizacion | knip, depcruise | — |
+| documentacion | eslint | solo reglas `jsdoc/*` |
+| seguridad | npm-audit, license-checker, semgrep, gitleaks, zizmor | — |
+| proteccion / rendimiento / requerimientos | — (LLM-only) | — |
+| buenas-practicas | eslint, tsc, jscpd, npm-outdated, git-sizer | — |
+
+### Invariantes
+
+- **Deduplicación GLOBAL contra issues abiertos**: la lista de ISSUES YA
+  ABIERTOS que viaja al LLM (y la segunda pasada determinista del parse) sigue
+  siendo la completa del repo, sin filtrar por categoría.
+- **Retención por categoría**: los tool-findings se podan a los N más recientes
+  POR categoría; una categoría muy usada no pisa artefactos de otra.
+- **Cobertura honesta por categoría**: `loadHistory` reconstruye la cobertura
+  desde el tool-findings de la MISMA categoría estrictamente anterior al
+  diagnóstico; si no hay match, muestra "—".
+- **Retrocompatibilidad**: `diagnostico-<ts>.json` y `plan-<ts>.json` legacy con
+  mode audit se muestran como categoría "General" y siguen convertibles a issues.
+- El filtro CATEGORÍA del visor de GitHub Issues compone con el filtro
+  FUENTE — DIAGNÓSTICO existente; cada hallazgo hereda la categoría del JSON
+  que lo emitió.
+- **Prompt trazable por corrida**: cada lanzamiento persiste el prompt
+  completo como `<plan>.json.prompt.md` junto al plan (mismo nombre
+  determinista que usa el modo prompt-file para >12K chars); el detalle del
+  historial lo muestra en "Ver prompt enviado" aunque la app se haya
+  reiniciado. Los legacy prompt-<ts>.md siguen podándose igual.

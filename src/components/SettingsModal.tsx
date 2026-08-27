@@ -27,6 +27,7 @@ import { loadFont } from "../terminal/fontLoader";
 import { useNotificationStore } from "../stores/notificationStore";
 import { PhaseModelsSection } from "./settings/PhaseModelsSection";
 import { McpIntegrationsSection } from "./settings/McpSection";
+import { SkillsSettingsSection } from "./settings/SkillsSettingsSection";
 import { useUpdaterStore } from "../stores/updaterStore";
 
 const platform = window.termcanvas?.app.platform ?? "darwin";
@@ -626,6 +627,7 @@ const TAB_LABEL_KEYS: Record<Tab, string> = {
   agent: "settings_agent",
   integrations: "settings_integrations",
   shortcuts: "settings_shortcuts",
+  skills: "settings_skills",
 };
 
 export function SettingsModal({ onClose }: Props) {
@@ -701,6 +703,7 @@ export function SettingsModal({ onClose }: Props) {
       "agent",
       "integrations",
       "shortcuts",
+      "skills",
     ];
   }, []);
 
@@ -1522,6 +1525,16 @@ export function SettingsModal({ onClose }: Props) {
                     </button>
                   </div>
                 </div>
+              </section>
+            )}
+
+            {tab === "skills" && (
+              <section>
+                <SectionHeader
+                  title={(t as unknown as Record<string, string>).settings_skills ?? "Skills por categoría"}
+                  subtitle={(t as unknown as Record<string, string>).settings_skills_desc ?? "Gestioná skills vendor por categoría de diagnóstico. Se usan temporalmente durante la corrida."}
+                />
+                <SkillsSettingsSection />
               </section>
             )}
 

@@ -4,6 +4,7 @@ import {
   parsePlanningPlan,
   describePlanError,
 } from "../src/planner/parsePlanResult.ts";
+import { isAuditPlan } from "../src/types/issuePlanning.ts";
 
 const ROADMAP_JSON = JSON.stringify({
   mode: "roadmap",
@@ -418,4 +419,37 @@ test("parsePlanningPlan: la marca que ya puso el modelo no se pisa ni se duplica
     !parsed.warnings.some((w) => w.includes("marcó automáticamente")),
     "un item ya marcado no genera warning de auto-marca",
   );
+});
+// ─── Diagnóstico por categorías: campo categoria del plan ─────────────────
+
+test("parsePlanningPlan: categoria válida se conserva en el AuditPlan", () => {
+  const parsed = parsePlanningPlan(
+    JSON.stringify({
+      mode: "audit",
+      repo: "owner/repo",
+      findings: [],
+      categoria: "seguridad",
+    }),
+  );
+  assert.ok(parsed && isAuditPlan(parsed.result));
+  assert.equal(parsed.result.categoria, "seguridad");
+});
+
+test("parsePlanningPlan: categoria inválida o ausente → undefined (la UI la trata como General)", () => {
+  const invalid = parsePlanningPlan(
+    JSON.stringify({
+      mode: "audit",
+      repo: "owner/repo",
+      findings: [],
+      categoria: "categoria-inventada",
+    }),
+  );
+  assert.ok(invalid && isAuditPlan(invalid.result));
+  assert.equal(invalid.result.categoria, undefined);
+
+  const absent = parsePlanningPlan(
+    JSON.stringify({ mode: "audit", repo: "owner/repo", findings: [] }),
+  );
+  assert.ok(absent && isAuditPlan(absent.result));
+  assert.equal(absent.result.categoria, undefined);
 });

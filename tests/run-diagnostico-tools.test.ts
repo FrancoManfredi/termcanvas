@@ -7,6 +7,8 @@ import {
   toolFailureReason,
   degradeTool,
   runTool,
+  CATEGORY_TOOLS,
+  filterFindingsForCategory,
 } from "../scripts/run-diagnostico-tools.mjs";
 
 // El pipeline de herramientas (scripts/run-diagnostico-tools.mjs) NUNCA debe
@@ -218,4 +220,39 @@ test("runTool: throw interno (bug del orquestador) → error, pero NO un 'Comman
   } finally {
     process.stdout.write = origWrite;
   }
+});
+
+// ─── Diagnóstico por categorías: mapeo y filtro de hallazgos ──────────────
+
+test("CATEGORY_TOOLS: LLM-only sin herramientas; seguridad y buenas-practicas con su combo", () => {
+  assert.deepEqual(CATEGORY_TOOLS.proteccion, []);
+  assert.deepEqual(CATEGORY_TOOLS.rendimiento, []);
+  assert.deepEqual(CATEGORY_TOOLS.requerimientos, []);
+  for (const tool of ["gitleaks", "semgrep", "npm-audit", "zizmor"]) {
+    assert.ok(CATEGORY_TOOLS.seguridad.includes(tool), `seguridad debe incluir ${tool}`);
+  }
+  for (const tool of ["eslint", "tsc", "jscpd", "npm-outdated", "git-sizer"]) {
+    assert.ok(
+      CATEGORY_TOOLS["buenas-practicas"].includes(tool),
+      `buenas-practicas debe incluir ${tool}`,
+    );
+  }
+});
+
+test("filterFindingsForCategory: documentacion conserva solo reglas jsdoc/*", () => {
+  const findings = [
+    { rule: "jsdoc/require-jsdoc", message: "3 función(es) pública(s) sin JSDoc" },
+    { rule: "no-empty", message: "catch vacío" },
+    { rule: "complexity", message: "función compleja" },
+  ];
+  const filtered = filterFindingsForCategory(findings, "documentacion");
+  assert.equal(filtered.length, 1);
+  assert.equal(filtered[0].rule, "jsdoc/require-jsdoc");
+});
+
+test("filterFindingsForCategory: sin categoría o sin predicado pasa TODO (misma referencia)", () => {
+  const findings = [{ rule: "a" }, { rule: null }];
+  assert.equal(filterFindingsForCategory(findings, null), findings);
+  // seguridad no define predicado: todos sus hallazgos son relevantes.
+  assert.equal(filterFindingsForCategory(findings, "seguridad"), findings);
 });

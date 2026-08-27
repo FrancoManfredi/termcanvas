@@ -7,9 +7,16 @@ import {
 import {
   launchToolsSession,
   newestToolFindings,
+  parseToolFindingsName,
   type ToolsSessionHandle,
 } from "../planner/toolsSession";
 import { isAuditPlan, type AuditPlan } from "../types/issuePlanning.ts";
+import {
+  getDiagnosisCategory,
+  isDiagnosisCategoryId,
+  parseDiagnosisFileName,
+  LEGACY_CATEGORY_ID,
+} from "../types/diagnosisCategories.ts";
 import { parsePlanningPlan } from "../planner/parsePlanResult.ts";
 import {
   assertPhaseModelAvailable,
@@ -17,6 +24,7 @@ import {
   resolvePhaseModelRef,
   shouldRunPhaseInTui,
 } from "../planner/modelPin";
+import { diagnosisAllowedSkills } from "../skills/registry.ts";
 
 // Registro de un diagnóstico completado (mode audit) para el historial.
 export interface DiagnosisRecord {
@@ -25,6 +33,9 @@ export interface DiagnosisRecord {
   filename: string;
   repo: string;
   data: AuditPlan;
+  // Categoría del diagnóstico (id del registro o "general" para los
+  // previos al feature y los planes legacy plan-<ts> con mode audit).
+  category: string;
   // El prompt EXACTO que se le mandó a la sesión (trazabilidad: el usuario
   // puede verificar qué instrucción corrió). Los registros cargados desde
   // disco no lo traen (el prompt no se persiste junto al plan).
@@ -61,28 +72,40 @@ interface DiagnosisSessionRuntime {
 }
 
 interface DiagnosisStore {
-  // tools = Fase A (herramientas deterministas escaneando el repo);
-  // running = Fase B (LLM interpretando los findings). El paso de tools a
-  // running es MANUAL: el usuario clickea "Continuar al diagnóstico LLM"
-  // cuando toolsDone se habilita (archivo tool-findings + exit 0).
+  // tools = Fase A (herramientas deterministas de LA CATEGORÍA elegida
+  // escaneando el repo); running = Fase B (LLLM interpretando los findings).
+  // Las categorías LLM-only (sin herramientas) saltan directo a running.
+  // El paso de tools a running es MANUAL: el usuario clickea "Continuar al
+  // diagnóstico LLM" cuando toolsDone se habilita (archivo tool-findings +
+  // exit 0).
   phase: "idle" | "tools" | "running";
   sessionRuntime: DiagnosisSessionRuntime | null;
   error: string | null;
   history: DiagnosisRecord[];
+  // Categoría de la corrida en curso (para los labels del modal). Se limpia
+  // al completar, cancelar o fallar la corrida.
+  selectedCategory: string | null;
   // Todas las herramientas terminaron de escanear (gate del botón).
   toolsDone: boolean;
   // Resumen de cobertura de la corrida de herramientas en curso (para el
   // banner del modal). Se limpia al iniciar una corrida nueva.
   toolsSummary: ToolCoverageSummary | null;
+  // Categoría → timestamp del tool-findings MÁS RECIENTE de esa categoría
+  // en .agents/planning (los legacy sin categoría no entran). Alimenta la
+  // habilitación del "→ LLM directo": solo tiene sentido si las herramientas
+  // de ESA categoría corrieron alguna vez, aunque su LLM haya fallado después.
+  toolFindingsByCategory: Record<string, number>;
   // Último diagnóstico completado que la UI todavía no mostró (auto-open
   // del detalle). Se consume con takeLatestId para no repetir el open.
   latestDiagnosisId: string | null;
-  start: () => Promise<void>;
+  // Arranca un diagnóstico POR CATEGORÍA: con herramientas → Fase A solo con
+  // las mapeadas; LLM-only → directo a la Fase B con exploración dirigida.
+  start: (categoryId: string) => Promise<void>;
   continueToLlm: () => Promise<void>;
-  // Salteo de la Fase A: usa el tool-findings MÁS RECIENTE de
-  // .agents/planning y lanza directo la fase LLM, sin re-correr las
+  // Salteo de la Fase A: usa el tool-findings MÁS RECIENTE DE ESA CATEGORÍA
+  // de .agents/planning y lanza directo la fase LLM, sin re-correr las
   // herramientas deterministas (para iterar/testear el LLM).
-  startLlmDirect: () => Promise<void>;
+  startLlmDirect: (categoryId?: string) => Promise<void>;
   cancel: () => void;
   // Elimina un diagnóstico del historial y su JSON del disco.
   removeRecord: (id: string, repoPath: string) => void;
@@ -106,6 +129,10 @@ let activeSession: (ToolsSessionHandle | PlanningSessionHandle) | null = null;
 let pendingFindingsText = "";
 let pendingCoverage: ToolCoverageSummary | undefined;
 let pendingFindingsPath = "";
+
+// Categoría de la corrida en curso (id validado): viaja al record al
+// completar y a los labels del modal vía selectedCategory.
+let activeCategory: string | null = null;
 
 // Cancelar durante la ventana del reintento (entre el exit del LLM y el
 // relanzamiento resumido) no debe resucitar la fase running.
@@ -138,10 +165,13 @@ const MAX_FINDINGS_PER_TOOL = 25;
 const MAX_TOTAL_FINDINGS = 160;
 
 // Política de retención de .agents/planning: cada corrida deja tool-findings
-// (input intermedio del LLM) y prompt-*.md (trazabilidad del prompt). Para
-// que la carpeta no acumule indefinidamente, al iniciar una corrida nueva se
-// borran los que exceden los KEEP_RECENT más recientes por tipo. Los
-// diagnostico-*.json (historial) no se tocan.
+// (input intermedio del LLM), el sidecar del prompt
+// (<plan>.json.prompt.md, trazabilidad que consume el detalle de la UI) y —
+// legacy pre-categorías — prompt-<ts>.md. Para que la carpeta no acumule
+// indefinidamente, al iniciar una corrida nueva se borran los que exceden los
+// KEEP_RECENT más recientes. Los tool-findings se retienen POR CATEGORÍA (una
+// categoría muy usada no pisa artefactos de otra); sidecars y prompts legacy
+// comparten cuota global. Los diagnostico-*.json (historial) no se tocan.
 const KEEP_RECENT_PLANNING_ARTIFACTS = 5;
 
 async function prunePlanningArtifacts(repoPath: string): Promise<void> {
@@ -149,32 +179,49 @@ async function prunePlanningArtifacts(repoPath: string): Promise<void> {
   const entries = await window.termcanvas.fs.listDir(dir).catch(() => null);
   if (!entries) return;
 
-  const kinds = [
-    { prefix: "tool-findings-", ext: "json" },
-    { prefix: "prompt-", ext: "md" },
-  ];
-  const byTs = new Map<string, number>();
-  const kept: string[][] = kinds.map(() => []);
+  // tool-findings agrupados por categoría ("" = legacy sin categoría).
+  const tfGroups = new Map<string, Array<{ name: string; ts: number }>>();
+  const prompts: Array<{ name: string; ts: number }> = [];
   for (const entry of entries) {
     if (entry.isDirectory) continue;
-    kinds.forEach((kind, i) => {
-      const m = new RegExp(`^${kind.prefix}(\\d+)\\.${kind.ext}$`).exec(entry.name);
-      if (!m) return;
-      const ts = Number(m[1]);
-      if (Number.isFinite(ts)) {
-        byTs.set(entry.name, ts);
-        kept[i].push(entry.name);
-      }
+    const tf = parseToolFindingsName(entry.name);
+    if (tf) {
+      const key = tf.category ?? "";
+      const group = tfGroups.get(key) ?? [];
+      group.push({ name: entry.name, ts: tf.ts });
+      tfGroups.set(key, group);
+      continue;
+    }
+    // Sidecar nuevo: <plan>.json.prompt.md — el ts vive dentro del nombre.
+    const sidecar = /^diagnostico-(?:[a-z][a-z-]*-)?(\d+)\.json\.prompt\.md$/.exec(
+      entry.name,
+    );
+    if (sidecar && Number.isFinite(Number(sidecar[1]))) {
+      prompts.push({ name: entry.name, ts: Number(sidecar[1]) });
+      continue;
+    }
+    const pm = /^prompt-(\d+)\.md$/.exec(entry.name);
+    if (pm && Number.isFinite(Number(pm[1]))) {
+      prompts.push({ name: entry.name, ts: Number(pm[1]) });
+    }
+  }
+
+  const stale: string[] = [];
+  for (const group of tfGroups.values()) {
+    group.sort((a, b) => b.ts - a.ts);
+    for (const item of group.slice(KEEP_RECENT_PLANNING_ARTIFACTS)) {
+      stale.push(item.name);
+    }
+  }
+  prompts.sort((a, b) => b.ts - a.ts);
+  for (const item of prompts.slice(KEEP_RECENT_PLANNING_ARTIFACTS)) {
+    stale.push(item.name);
+  }
+  for (const name of stale) {
+    void window.termcanvas.fs.delete(`${dir}/${name}`).catch(() => {
+      // Best-effort: un archivo que no se pudo borrar no rompe la corrida.
     });
   }
-  kept.forEach((names, i) => {
-    names.sort((a, b) => (byTs.get(b) ?? 0) - (byTs.get(a) ?? 0));
-    for (const name of names.slice(KEEP_RECENT_PLANNING_ARTIFACTS)) {
-      void window.termcanvas.fs.delete(`${dir}/${name}`).catch(() => {
-        // Best-effort: un archivo que no se pudo borrar no rompe la corrida.
-      });
-    }
-  });
 }
 
 function formatToolFindingsForPrompt(
@@ -306,9 +353,11 @@ async function launchLlmPhase(options: {
             sessionRuntime: null,
             toolsDone: false,
             toolsSummary: null,
+            selectedCategory: null,
             error: `[diagnosisLlm] ${blockReason}`,
           });
           activeSession = null;
+          activeCategory = null;
           return;
         }
       }
@@ -319,6 +368,14 @@ async function launchLlmPhase(options: {
         worktreeId,
         roadmapText: "",
         attachmentNames: [],
+        // Categoría del diagnóstico: foco del prompt (REGLA DE FOCO) y
+        // filename diagnostico-<categoria>-<ts>.json. La skill especializada
+        // de la categoría es la ÚNICA permitida en esta sesión (scoping por
+        // permission.skill): ni otras categorías ni skills globales.
+        category: activeCategory ?? undefined,
+        allowedSkills: activeCategory
+          ? diagnosisAllowedSkills(activeCategory)
+          : [],
         // Pin por fase (routing): null = sin pin, default global del CLI.
         model: resolvePhaseModelRef("diagnosisLlm"),
         // Headless por defecto (`opencode run --model X --variant Y --auto`):
@@ -335,6 +392,7 @@ async function launchLlmPhase(options: {
               sessionRuntime: null,
               toolsDone: false,
               toolsSummary: null,
+              selectedCategory: null,
               error:
                 "El plan generado no corresponde a una auditoría (mode != audit).",
             });
@@ -350,29 +408,39 @@ async function launchLlmPhase(options: {
               `diagnostico-${now}.json`,
             repo: result.repo,
             data: result,
+            category: activeCategory ?? LEGACY_CATEGORY_ID,
             prompt: handle?.prompt,
             toolCoverage: pendingCoverage,
           };
+          activeCategory = null;
           useDiagnosisStore.setState((state) => ({
             phase: "idle",
             sessionRuntime: null,
             error: null,
             toolsDone: false,
             toolsSummary: null,
+            selectedCategory: null,
             history: [newRecord, ...state.history],
             latestDiagnosisId: newRecord.id,
           }));
           activeSession = null;
+          // Re-sincroniza con disco: el historial queda idéntico (el plan ya
+          // está escrito) y el índice toolFindingsByCategory incorpora el
+          // tool-findings de ESTA corrida — habilita el "→ LLM directo" de la
+          // categoría sin esperar a reabrir el modal.
+          void useDiagnosisStore.getState().loadHistory(repoPath);
         },
         onError: (message) => {
           // El tail del proceso va adjunto: cuando la sesión se corta "de la
           // nada", las últimas líneas dicen por qué (cuota, crash, timeout).
           const tail = handle ? getPhaseOutputTail(handle.terminalId) : "";
+          activeCategory = null;
           useDiagnosisStore.setState({
             phase: "idle",
             sessionRuntime: null,
             toolsDone: false,
             toolsSummary: null,
+            selectedCategory: null,
             error: tail
               ? `${message}\n\nÚltimas líneas del proceso:\n${tail}`
               : message,
@@ -400,12 +468,15 @@ async function launchLlmPhase(options: {
             sessionRuntime: null,
             toolsDone: false,
             toolsSummary: null,
+            selectedCategory: null,
             error:
               (sessionId
                 ? "El LLM terminó sin escribir el plan y el reintento tampoco lo escribió."
                 : "El LLM terminó sin escribir el plan y no se pudo reanudar la sesión.") +
               (tail ? `\n\nÚltimas líneas del proceso:\n${tail}` : ""),
           });
+          activeSession = null;
+          activeCategory = null;
         },
       });
       if (!handle) {
@@ -432,11 +503,13 @@ async function launchLlmPhase(options: {
         },
       });
     } catch (error) {
+      activeCategory = null;
       useDiagnosisStore.setState({
         phase: "idle",
         sessionRuntime: null,
         toolsDone: false,
         toolsSummary: null,
+        selectedCategory: null,
         error: error instanceof Error ? error.message : String(error),
       });
       activeSession = null;
@@ -451,40 +524,68 @@ export const useDiagnosisStore = create<DiagnosisStore>((set, get) => ({
   sessionRuntime: null,
   error: null,
   history: [],
+  selectedCategory: null,
   toolsDone: false,
   toolsSummary: null,
+  toolFindingsByCategory: {},
   latestDiagnosisId: null,
 
-  start: async () => {
+  start: async (categoryId) => {
     if (get().phase !== "idle") return;
-    set({
-      phase: "tools",
-      sessionRuntime: null,
-      error: null,
-      toolsDone: false,
-      toolsSummary: null,
-    });
+    const category = getDiagnosisCategory(categoryId);
+    if (!category) {
+      set({
+        error: `Categoría de diagnóstico desconocida: "${categoryId}".`,
+      });
+      return;
+    }
+
+    const active = resolveActiveWorktree();
+    if (!active) return;
+    const { projectId, worktreeId, path: repoPath } = active;
+
+    activeCategory = category.id;
     pendingFindingsText = "";
     pendingCoverage = undefined;
     pendingFindingsPath = "";
 
-    const active = resolveActiveWorktree();
-    if (!active) {
-      set({ phase: "idle" });
+    // Categoría LLM-only (sin herramientas mapeadas): no hay Fase A que
+    // esperar ni gate manual — directo a la exploración dirigida del LLM.
+    if (category.tools.length === 0) {
+      flowCancelled = false;
+      set({
+        phase: "running",
+        sessionRuntime: null,
+        error: null,
+        selectedCategory: category.id,
+        toolsDone: false,
+        toolsSummary: null,
+      });
+      await launchLlmPhase({ repoPath, projectId, worktreeId });
       return;
     }
-    const { projectId, worktreeId, path: repoPath } = active;
+
+    set({
+      phase: "tools",
+      sessionRuntime: null,
+      error: null,
+      selectedCategory: category.id,
+      toolsDone: false,
+      toolsSummary: null,
+    });
 
     // Retención: borra los tool-findings/prompt que exceden los N más
     // recientes ANTES de escribir los nuevos de esta corrida.
     await prunePlanningArtifacts(repoPath);
 
-    // FASE A — herramientas deterministas (orquestador headless). El paso a
-    // la Fase B es MANUAL (continueToLlm): acá solo se preparan los datos.
+    // FASE A — solo las herramientas de la categoría (orquestador headless).
+    // El paso a la Fase B es MANUAL (continueToLlm): acá solo se preparan
+    // los datos.
     const toolsHandle = await launchToolsSession({
       repoPath,
       projectId,
       worktreeId,
+      categoryId: category.id,
       onReady: (findingsPath) => {
         void (async () => {
           const json = await readToolFindings(findingsPath);
@@ -500,13 +601,20 @@ export const useDiagnosisStore = create<DiagnosisStore>((set, get) => ({
         if (exitCode === 0) set({ toolsDone: true });
       },
       onError: (message) => {
-        set({ phase: "idle", sessionRuntime: null, error: message });
+        set({
+          phase: "idle",
+          sessionRuntime: null,
+          error: message,
+          selectedCategory: null,
+        });
         activeSession = null;
+        activeCategory = null;
       },
     });
     if (!toolsHandle) {
       // launchToolsSession ya notificó el error.
-      set({ phase: "idle" });
+      set({ phase: "idle", selectedCategory: null });
+      activeCategory = null;
       return;
     }
     activeSession = toolsHandle;
@@ -535,7 +643,13 @@ export const useDiagnosisStore = create<DiagnosisStore>((set, get) => ({
 
     const active = resolveActiveWorktree();
     if (!active) {
-      set({ phase: "idle", toolsDone: false, toolsSummary: null });
+      set({
+        phase: "idle",
+        toolsDone: false,
+        toolsSummary: null,
+        selectedCategory: null,
+      });
+      activeCategory = null;
       return;
     }
     const { projectId, worktreeId, path: repoPath } = active;
@@ -543,11 +657,19 @@ export const useDiagnosisStore = create<DiagnosisStore>((set, get) => ({
   },
 
   // Salteo de la Fase A (para testing/iteración del LLM): usa el
-  // tool-findings MÁS RECIENTE de .agents/planning (el de la última corrida
-  // de herramientas) y lanza directo la Fase B sin re-correr el pipeline
-  // determinista. Sin findings previos → error claro, no se inventa nada.
-  startLlmDirect: async () => {
+  // tool-findings MÁS RECIENTE DE ESA CATEGORÍA en .agents/planning (el de
+  // la última corrida de herramientas de esa categoría) y lanza directo la
+  // Fase B sin re-correr el pipeline determinista. Sin findings previos →
+  // error claro, no se inventa nada.
+  startLlmDirect: async (categoryId) => {
     if (get().phase !== "idle") return;
+    if (categoryId && !isDiagnosisCategoryId(categoryId)) {
+      set({
+        phase: "idle",
+        error: `Categoría de diagnóstico desconocida: "${categoryId}".`,
+      });
+      return;
+    }
     const active = resolveActiveWorktree();
     if (!active) {
       set({ phase: "idle" });
@@ -557,12 +679,14 @@ export const useDiagnosisStore = create<DiagnosisStore>((set, get) => ({
 
     const findingsPath = await newestToolFindings(
       `${repoPath.replace(/[\\/]+$/, "")}/.agents/planning`,
+      categoryId,
     );
     if (!findingsPath) {
       set({
         phase: "idle",
-        error:
-          "No hay hallazgos de herramientas previos en .agents/planning — corré primero un diagnóstico completo.",
+        error: categoryId
+          ? `No hay hallazgos previos de la categoría "${categoryId}" en .agents/planning — corré primero ese diagnóstico completo.`
+          : "No hay hallazgos de herramientas previos en .agents/planning — corré primero un diagnóstico completo.",
       });
       return;
     }
@@ -574,6 +698,7 @@ export const useDiagnosisStore = create<DiagnosisStore>((set, get) => ({
       });
       return;
     }
+    activeCategory = categoryId ?? null;
     pendingFindingsPath = findingsPath;
     pendingFindingsText = formatToolFindingsForPrompt(json, findingsPath);
     pendingCoverage = computeToolCoverage(json);
@@ -582,6 +707,7 @@ export const useDiagnosisStore = create<DiagnosisStore>((set, get) => ({
       phase: "running",
       sessionRuntime: null,
       error: null,
+      selectedCategory: categoryId ?? null,
       toolsDone: false,
       toolsSummary: null,
     });
@@ -594,10 +720,12 @@ export const useDiagnosisStore = create<DiagnosisStore>((set, get) => ({
     flowCancelled = true;
     activeSession?.stop();
     activeSession = null;
+    activeCategory = null;
     set({
       phase: "idle",
       sessionRuntime: null,
       error: null,
+      selectedCategory: null,
       toolsDone: false,
       toolsSummary: null,
     });
@@ -633,28 +761,47 @@ export const useDiagnosisStore = create<DiagnosisStore>((set, get) => ({
     const entries = await window.termcanvas.fs.listDir(dir).catch(() => []);
     const records: DiagnosisRecord[] = [];
     // tool-findings ordenados por timestamp, para reconstruir la cobertura
-    // de cada diagnóstico (el más reciente ANTERIOR al diagnóstico).
-    const toolFindingsTs: number[] = [];
+    // de cada diagnóstico (el más reciente ANTERIOR al diagnóstico, de la
+    // MISMA categoría: la cobertura de una corrida de Seguridad no le
+    // corresponde a un diagnóstico de Documentación).
+    const toolFindings: Array<{ ts: number; category: string | null }> = [];
     for (const entry of entries) {
       if (entry.isDirectory) continue;
-      const m = /^tool-findings-(\d+)\.json$/.exec(entry.name);
-      if (m) {
-        const ts = Number(m[1]);
-        if (Number.isFinite(ts)) toolFindingsTs.push(ts);
+      const parsed = parseToolFindingsName(entry.name);
+      if (parsed) toolFindings.push(parsed);
+    }
+    toolFindings.sort((a, b) => a.ts - b.ts);
+    const coverageCache = new Map<string, ToolCoverageSummary>();
+    // Índice para el "→ LLM directo": categoría → ts del tool-findings más
+    // reciente. Los legacy sin categoría no habilitan ninguna categoría nueva.
+    const toolFindingsByCategory: Record<string, number> = {};
+    for (const tf of toolFindings) {
+      if (!tf.category) continue;
+      const current = toolFindingsByCategory[tf.category];
+      if (current === undefined || tf.ts > current) {
+        toolFindingsByCategory[tf.category] = tf.ts;
       }
     }
-    toolFindingsTs.sort((a, b) => a - b);
-    const coverageCache = new Map<number, ToolCoverageSummary>();
 
     for (const entry of entries) {
       if (entry.isDirectory) continue;
-      // diagnostico-<ts>.json (auditorías nuevas) + plan-<ts>.json legacy
-      // con mode audit (las escritas antes del rename). El prefijo plan-<ts>
-      // de roadmap NO entra al historial de diagnósticos.
-      const match = /^(diagnostico|plan)-(\d+)\.json$/.exec(entry.name);
-      if (!match) continue;
-      const ts = Number(match[2]);
-      if (!Number.isFinite(ts)) continue;
+      // diagnostico-<categoria>-<ts>.json (corridas nuevas),
+      // diagnostico-<ts>.json legacy sin categoría y plan-<ts>.json legacy
+      // con mode audit (escritos antes del rename). El prefijo plan-<ts> de
+      // roadmap NO entra al historial de diagnósticos.
+      let ts: number | null = null;
+      let slug: string | null = null;
+      const diagParsed = parseDiagnosisFileName(entry.name);
+      if (diagParsed) {
+        ts = diagParsed.ts;
+        slug = diagParsed.category;
+      } else {
+        const legacyPlan = /^plan-(\d+)\.json$/.exec(entry.name);
+        if (legacyPlan && Number.isFinite(Number(legacyPlan[1]))) {
+          ts = Number(legacyPlan[1]);
+        }
+      }
+      if (ts == null || !Number.isFinite(ts)) continue;
       const read = await window.termcanvas.fs
         .readFile(`${dir}/${entry.name}`)
         .catch(() => null);
@@ -667,24 +814,33 @@ export const useDiagnosisStore = create<DiagnosisStore>((set, get) => ({
         filename: entry.name,
         repo: parsed.result.repo,
         data: parsed.result,
-        toolCoverage: await coverageFor(ts),
+        category:
+          slug && isDiagnosisCategoryId(slug) ? slug : LEGACY_CATEGORY_ID,
+        toolCoverage: await coverageFor(ts, slug),
       });
     }
     records.sort((a, b) => (a.id < b.id ? 1 : -1));
-    set({ history: records });
+    set({ history: records, toolFindingsByCategory });
 
     // El tool-findings con mayor timestamp estrictamente anterior al
-    // diagnóstico es el de su corrida (cada corrida escribe tools → LLM).
-    async function coverageFor(diagTs: number): Promise<ToolCoverageSummary | undefined> {
+    // diagnóstico y de SU MISMA categoría es el de su corrida (cada corrida
+    // escribe tools → LLM). Un slug desconocido (versión futura) no matchea
+    // nada → cobertura undefined → la UI muestra "—", honesto.
+    async function coverageFor(
+      diagTs: number,
+      slug: string | null,
+    ): Promise<ToolCoverageSummary | undefined> {
       let best = -1;
-      for (const tf of toolFindingsTs) {
-        if (tf < diagTs && tf > best) best = tf;
+      for (const tf of toolFindings) {
+        if (tf.category !== slug) continue;
+        if (tf.ts < diagTs && tf.ts > best) best = tf.ts;
       }
       if (best < 0) return undefined;
-      if (coverageCache.has(best)) return coverageCache.get(best);
-      const json = await readToolFindings(`${dir}/tool-findings-${best}.json`);
+      const cacheKey = `${slug ?? ""}:${best}`;
+      if (coverageCache.has(cacheKey)) return coverageCache.get(cacheKey);
+      const json = await readToolFindings(`${dir}/tool-findings-${slug ? `${slug}-` : ""}${best}.json`);
       const summary = json ? computeToolCoverage(json) : undefined;
-      if (summary) coverageCache.set(best, summary);
+      if (summary) coverageCache.set(cacheKey, summary);
       return summary;
     }
   },

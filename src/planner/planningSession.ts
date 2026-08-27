@@ -1,4 +1,6 @@
 import type { PlannerMode, PlanningResult } from "../types/issuePlanning.ts";
+import type { DiagnosisCategoryId } from "../types/diagnosisCategories.ts";
+import { isDiagnosisCategoryId } from "../types/diagnosisCategories.ts";
 import { buildPlanningPrompt, planningOutputPath } from "./planningPrompt.ts";
 import { resolveRepoContextText, resolveRequirementsText, resolveArchitectureDecisionsText } from "../utils/repoContext.ts";
 import { parsePlanningPlan, describePlanError } from "./parsePlanResult.ts";
@@ -11,6 +13,8 @@ import {
 import { useNotificationStore } from "../stores/notificationStore.ts";
 import { runModelFlagArgs } from "./modelPin.ts";
 import { formatModelRef, type ModelRef } from "../../shared/phaseModels";
+import { prepareSkillScope } from "../skills/scopedSession.ts";
+import { discoverVendorSkills } from "../skills/vendorSkills.ts";
 
 // Sesión REAL de planificación: crea un runtime de terminal (el mismo
 // pipeline que usa el canvas: ensureTerminalRuntime spawnea el PTY de
@@ -65,12 +69,22 @@ export interface LaunchPlanningSessionOptions {
   // Diagnóstico). Solo mode audit: cambia el prompt a interpretar esos
   // hallazgos + exploración dirigida en vez de "leé todo el repo".
   toolFindingsText?: string;
+  // Categoría del diagnóstico (solo mode audit): define la REGLA DE FOCO del
+  // prompt y el filename diagnostico-<categoria>-<ts>.json. Un valor que no
+  // pertenece al registro se ignora (queda como corrida legacy) — nunca
+  // rompe el lanzamiento.
+  category?: string;
   // Reintento automático (silencioso): si la sesión headless termina con
   // exit 0 SIN escribir el plan (el modelo se corta a mitad de corrida),
   // el poller busca el sessionId de opencode y lo devuelve acá para que el
   // caller relance la sesión RESUMIDA (`opencode run -s <id>` con un
   // mensaje corto, sin re-pagar el prompt completo).
   onExitedWithoutFile?: (sessionId: string | null) => void;
+  // Nombres de skills especializadas permitidas en ESTA sesión: se genera un
+  // scope efímero (SKILL.md + config opencode con permission.skill) para que
+  // el agente vea EXACTAMENTE esas skills y ninguna otra. Vacío/ausente =
+  // sesión sin scoping (comportamiento previo).
+  allowedSkills?: string[];
   // Si está seteado, la sesión se lanza RESUMIDA (-s <id>): el prompt se
   // reemplaza por un mensaje corto "escribí el plan ahora" porque todo el
   // contexto ya está en la sesión de opencode.
@@ -89,6 +103,8 @@ export type LaunchActivePlanningSessionOptions = Pick<
   | "attachmentNames"
   | "headless"
   | "toolFindingsText"
+  | "category"
+  | "allowedSkills"
   | "resumeSessionId"
   | "model"
   | "onExitedWithoutFile"
@@ -307,7 +323,15 @@ function buildPromptFileInstruction(promptPath: string, outputPath: string): str
 export async function launchPlanningSession(
   options: LaunchPlanningSessionOptions,
 ): Promise<PlanningSessionHandle | null> {
-  const outputPath = planningOutputPath(options.repoPath, options.mode);
+  // Categoría validada contra el registro: un valor desconocido degrada a
+  // corrida legacy (sin foco en el prompt, filename sin slug) en vez de
+  // romper el lanzamiento.
+  const category: DiagnosisCategoryId | undefined = options.category
+    ? isDiagnosisCategoryId(options.category)
+      ? options.category
+      : undefined
+    : undefined;
+  const outputPath = planningOutputPath(options.repoPath, options.mode, category);
   const openIssues = await readOpenIssues(options.repoPath);
   const repoContextText = await resolveRepoContextText(options.repoPath);
   // PLANNING redacta issues para humanos y otros agentes que los leen en
@@ -319,6 +343,16 @@ export async function launchPlanningSession(
   // Las decisiones ADR activas también viajan al planner: un issue que
   // contradiga una decisión aceptada se propaga río abajo a todos los RESOLVE.
   const decisionsText = await resolveArchitectureDecisionsText(options.repoPath);
+  // Skills vendor del usuario para la categoría (per-proyecto):
+  //   <repo>/resources/diagnosis-skills/<categoria>/<nombre>/SKILL.md
+  // Descubrimiento best-effort que NUNCA bloquea el lanzamiento.
+  const vendorSkills = category
+    ? await discoverVendorSkills(
+        typeof window !== "undefined" ? window.termcanvas?.fs : undefined,
+        options.repoPath,
+        category,
+      )
+    : [];
   // Momento de arranque: el poller lo usa para identificar la sesión de
   // opencode de ESTA corrida (findOpenCode) y poder reintentarla resumida.
   const startedAt = new Date().toISOString();
@@ -328,6 +362,7 @@ export async function launchPlanningSession(
       `Continuá la tarea de auditoría. Tu ÚNICA tarea ahora: escribí el archivo ${outputPath} (el plan JSON del contrato del prompt original — mode audit, findings con template por item). NO explores más código: los análisis ya están hechos. Escribí el archivo, validá que parsea y terminá.`
     : buildPlanningPrompt({
         mode: options.mode,
+        category,
         repoContextText,
         requirementsText,
         decisionsText,
@@ -336,27 +371,37 @@ export async function launchPlanningSession(
         outputPath,
         openIssues,
         toolFindingsText: options.toolFindingsText,
+        vendorSkillNames: vendorSkills.map((skill) => skill.name),
       });
 
   // El prompt completo (contexto + requerimientos + findings + veredicto)
   // supera el límite de ~32K de argv de Windows (viaja como UN argumento del
-  // spawn, tanto en `opencode run` como en `--prompt` de la TUI). Cuando es
-  // grande se escribe a .agents/planning/prompt-<ts>.md (artefacto trazable)
-  // y opencode recibe una instrucción corta que le ordena al agente LEER ese
-  // archivo con su herramienta de lectura y ejecutar TODO su contenido.
+  // spawn, tanto en `opencode run` como en `--prompt` de la TUI). Además,
+  // el prompt es trazabilidad: el usuario puede verificar qué instrucción
+  // corrió cada diagnóstico desde la UI ("Ver prompt enviado").
+  //
+  // Por eso el prompt SIEMPRE se persiste como sidecar junto al plan:
+  // <outputPath>.prompt.md (ej. diagnostico-seguridad-123.json.prompt.md) —
+  // nombre determinista derivado del outputPath, así el detalle de un
+  // diagnóstico del historial lo encuentra sin metadatos extra. Cuando además
+  // supera PROMPT_FILE_THRESHOLD, opencode recibe una instrucción corta que
+  // le ordena al agente LEER ese archivo y ejecutar TODO su contenido.
   // NOTA: NO se referencia con "@ruta" — la expansión de @archivo pertenece
   // al sistema de COMMANDS de opencode (tipear /nombre en vivo o
   // `run --command`); el texto que llega por --prompt es literal (verificado:
   // el modelo recibió "@C:/.../prompt-<ts>.md" tal cual, sin expandir).
+  // El caso resume (-s <sessionId>) no escribe sidecar: no hay prompt nuevo.
   const PROMPT_FILE_THRESHOLD = 12000;
   let promptRef = prompt;
-  if (prompt.length > PROMPT_FILE_THRESHOLD && !options.resumeSessionId) {
-    const promptPath = `${options.repoPath.replace(/[\\/]+$/, "")}/.agents/planning/prompt-${Date.now()}.md`;
+  if (!options.resumeSessionId) {
+    const promptPath = `${outputPath}.prompt.md`;
     try {
       await window.termcanvas.fs.writeFile(promptPath, prompt);
-      promptRef = buildPromptFileInstruction(promptPath, outputPath);
+      if (prompt.length > PROMPT_FILE_THRESHOLD) {
+        promptRef = buildPromptFileInstruction(promptPath, outputPath);
+      }
     } catch {
-      promptRef = prompt; // fallback inline
+      promptRef = prompt; // fallback inline: sin sidecar, el flujo sigue igual
     }
   }
 
@@ -364,6 +409,20 @@ export async function launchPlanningSession(
   // (verificados contra la CLI instalada); en TUI viaja por metadatos del
   // terminal y el runtime lo inyecta al spawnear.
   const modelPinFlags = options.model ? runModelFlagArgs(options.model) : [];
+
+  // Scope de skills especializadas: materializa SKILL.md + config opencode
+  // efímeros y devuelve el env con OPENCODE_CONFIG. Con null (allowlist
+  // vacía o bridge ausente) la sesión corre sin scoping, igual que siempre.
+  // El release va atado a destroyRuntime: cubre éxito, error, cancel y
+  // timeout del poller.
+  const skillScope =
+    options.allowedSkills?.length || vendorSkills.length > 0
+      ? await prepareSkillScope({
+          repoPath: options.repoPath,
+          allow: options.allowedSkills ?? [],
+          vendorSkills,
+        })
+      : null;
 
   // TerminalData sintética que solo alimenta al runtime: nunca entra a la
   // escena, así que no hay tile que renderizar ni arrastrar en el canvas.
@@ -382,6 +441,9 @@ export async function launchPlanningSession(
   if (options.model) {
     terminal.modelOverride = formatModelRef(options.model);
     terminal.variantOverride = options.model.variant;
+  }
+  if (skillScope) {
+    terminal.envOverride = skillScope.env;
   }
   if (options.resumeSessionId) {
     // Reintento resumido: `opencode run -s <id> --auto <mensaje corto>`.
@@ -403,18 +465,26 @@ export async function launchPlanningSession(
   // else: TUI interactiva (initialPrompt ya está en el terminal) — el
   // usuario ve la sesión y puede intervenir; el poller la cierra cuando el
   // plan aparece.
-  ensureTerminalRuntime({
-    projectId: options.projectId,
-    worktreeId: options.worktreeId,
-    worktreePath: options.repoPath,
-    terminal,
-  });
+  try {
+    ensureTerminalRuntime({
+      projectId: options.projectId,
+      worktreeId: options.worktreeId,
+      worktreePath: options.repoPath,
+      terminal,
+    });
+  } catch (error) {
+    // El runtime no arrancó: sin sesión que limpiar, pero el scope efímero
+    // sí (y el error sigue su curso hacia onError del caller).
+    void skillScope?.release();
+    throw error;
+  }
 
   // Idempotente: destruir un runtime ya destruido no rompe nada.
   let closed = false;
   const destroyRuntime = () => {
     if (closed) return;
     closed = true;
+    void skillScope?.release();
     destroyTerminalRuntime(terminal.id, {
       caller: "planningSession",
       reason: "planner_session_finished",

@@ -210,15 +210,23 @@ async function runRealCreate(initial: IssuePlannerState) {
     if (store.phase !== "creating") return; // el usuario canceló/reseteó
     store.markCreating(position);
     const body = buildIssueBody(result, index, repoUrl);
+    // Procedencia del issue: los creados desde un diagnóstico por categorías
+    // llevan cat:<category-id> para que la resolución sepa qué skill
+    // especializada scopeada cargar (categoryIdFromLabels al leer).
+    const labels =
+      result.mode === "roadmap"
+        ? result.proposals[index].labels
+        : [
+            ...(result.findings[index].labels ?? []),
+            ...(result.categoria ? [`cat:${result.categoria}`] : []),
+          ];
     const created = await window.termcanvas.github.createIssue(
       cwd,
       result.mode === "roadmap"
         ? result.proposals[index].title
         : result.findings[index].title,
       body,
-      result.mode === "roadmap"
-        ? result.proposals[index].labels
-        : (result.findings[index].labels ?? []),
+      labels,
     );
     if (!created.ok) {
       useNotificationStore.getState().notify(

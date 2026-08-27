@@ -8,6 +8,11 @@
 
 import { useEffect, useState } from "react";
 import { buildFindingIssueBody } from "../../../planner/issueTemplate";
+import {
+  DIAGNOSIS_CATEGORIES,
+  LEGACY_CATEGORY_ID,
+  categoryLabel,
+} from "../../../types/diagnosisCategories";
 import { resolveActiveWorktree } from "../../../planner/planningSession";
 import { useNotificationStore } from "../../../stores/notificationStore";
 import { useCoreModal } from "../context";
@@ -28,6 +33,9 @@ interface ConvertibleItem {
   // archivo/línea del hallazgo (diseño v2).
   diagId?: string;
   fileLine?: string;
+  // Categoría del diagnóstico que emitió el hallazgo ("general" para los
+  // previos al feature): alimenta el filtro CATEGORÍA del visor.
+  diagCategory: string;
 }
 
 type IssueStatus =
@@ -44,6 +52,8 @@ export function GithubIssuesSection() {
     diagHistory,
     githubDiagFilter,
     setGithubDiagFilter,
+    githubCategoryFilter,
+    setGithubCategoryFilter,
   } = useCoreModal();
 
   const [issueState, setIssueState] = useState<Record<string, IssueStatus>>({});
@@ -79,6 +89,7 @@ export function GithubIssuesSection() {
       githubLabels: [`severity: ${finding.severity}`, ...(finding.labels ?? [])],
       diagId: rec.id,
       fileLine: `${finding.file}:${finding.line}`,
+      diagCategory: rec.category ?? rec.data.categoria ?? LEGACY_CATEGORY_ID,
     })),
   );
 
@@ -88,8 +99,21 @@ export function GithubIssuesSection() {
       item.title.toLowerCase().includes(search.toLowerCase());
     const matchesDiag =
       githubDiagFilter === "all" || item.diagId === githubDiagFilter;
-    return matchesSearch && matchesDiag;
+    const matchesCategory =
+      githubCategoryFilter === "all" || item.diagCategory === githubCategoryFilter;
+    return matchesSearch && matchesDiag && matchesCategory;
   });
+
+  // Chips del filtro CATEGORÍA: las del registro en su orden canónico, más
+  // cualquier categoría desconocida (plan de una versión futura) al final.
+  const presentCategories = [
+    ...DIAGNOSIS_CATEGORIES.map((c) => c.id).filter((id) =>
+      convertibleItems.some((i) => i.diagCategory === id),
+    ),
+    ...[...new Set(convertibleItems.map((i) => i.diagCategory))].filter(
+      (id) => !DIAGNOSIS_CATEGORIES.some((c) => c.id === id),
+    ),
+  ];
 
   const allFilteredIds = filteredIssueItems.map((i) => i.id);
   const isAllSelected =
@@ -253,6 +277,56 @@ export function GithubIssuesSection() {
                 </div>
               </div>
             )}
+
+            {/* CATEGORÍA: filtra por la categoría del diagnóstico que emitió
+                cada hallazgo; compone con el filtro de origen de arriba. */}
+            {presentCategories.length > 0 && (
+              <div className="space-y-1.5 pt-1 border-t border-[var(--border)]">
+                <span className="text-[10px] font-mono uppercase tracking-wider text-[var(--text-muted)] font-semibold block">
+                  CATEGORÍA
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  <button
+                    type="button"
+                    className={`px-2.5 py-1 rounded text-[11px] font-mono transition-colors border ${
+                      githubCategoryFilter === "all"
+                        ? "bg-[var(--accent)] text-[var(--accent-foreground)] border-[var(--accent)] font-semibold"
+                        : "bg-[var(--surface)] text-[var(--text-muted)] border-[var(--border)] hover:text-[var(--text-primary)]"
+                    }`}
+                    onClick={() => {
+                      setGithubCategoryFilter("all");
+                      setSelectedForIssue([]);
+                    }}
+                  >
+                    Todas ({convertibleItems.length})
+                  </button>
+                  {presentCategories.map((id) => {
+                    const count = convertibleItems.filter(
+                      (i) => i.diagCategory === id,
+                    ).length;
+                    const isActive = githubCategoryFilter === id;
+                    return (
+                      <button
+                        key={id}
+                        type="button"
+                        className={`px-2.5 py-1 rounded text-[11px] font-mono transition-colors border max-w-[220px] truncate ${
+                          isActive
+                            ? "bg-[var(--accent)] text-[var(--accent-foreground)] border-[var(--accent)] font-semibold"
+                            : "bg-[var(--surface)] text-[var(--text-muted)] border-[var(--border)] hover:text-[var(--text-primary)]"
+                        }`}
+                        onClick={() => {
+                          setGithubCategoryFilter(id);
+                          setSelectedForIssue([]);
+                        }}
+                        title={id}
+                      >
+                        {categoryLabel(id)} · {count}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="flex flex-wrap items-center justify-between gap-3 pb-2 border-b border-[var(--border)]">
@@ -305,7 +379,7 @@ export function GithubIssuesSection() {
                           {item.id}
                         </span>
                         <span className="text-[9.5px] font-semibold px-2 py-0.5 rounded-full border bg-amber-500/15 text-amber-400 border-amber-500/20">
-                          Hallazgo de Diagnóstico
+                          {categoryLabel(item.diagCategory)}
                         </span>
                         <span
                           className={`font-mono text-[9.5px] font-semibold px-1.5 py-0.5 rounded border shrink-0 ${

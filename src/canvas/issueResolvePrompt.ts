@@ -1,4 +1,5 @@
 import { buildRepoContextSection, buildRequirementsSection, buildArchitectureDecisionsSection } from "../utils/repoContext";
+import { specializedSkillName } from "../skills/registry";
 
 export type IssueResolvePromptMode = "new" | "resume";
 
@@ -17,6 +18,23 @@ interface IssueResolvePromptInput {
   // Decisiones de arquitectura activas (ADRs del manifiesto). Inline por
   // buildArchitectureDecisionsSection, tras REQUERIMIENTOS RELEVADOS.
   decisionsText?: string;
+  // Categoría de diagnóstico del issue (label cat:<id> en GitHub). Cuando
+  // está presente, la sesión se lanza con la skill especializada diag-<cat>
+  // como ÚNICA skill de diagnóstico visible y el prompt lo anuncia.
+  category?: string;
+}
+
+// Sección que anuncia la skill especializada scopeada. Sin categoría no se
+// emite: la sesión corre sin scoping, igual que antes del feature.
+function buildCategorySkillSection(category: string | undefined): string[] {
+  if (!category) return [];
+  const name = specializedSkillName(category);
+  return [
+    `## SKILL ESPECIALIZADA DISPONIBLE`,
+    `Este issue proviene de un diagnóstico por categorías. Tu sesión tiene cargada la skill ${name} con la metodología completa de esa categoría: criterios de severidad, falsos positivos a descartar y estándar de evidencia.`,
+    `Cargala con tu herramienta skill ANTES de diseñar la solución y usala como guía de criterio durante todo el trabajo: qué cuenta como bug real, qué es ruido y cuánta evidencia exige cada decisión.`,
+    ``,
+  ];
 }
 
 function issueBody(body: string | undefined): string {
@@ -92,6 +110,7 @@ export function buildIssueResolvePrompt(
     ...buildRepoContextSection(input.repoContextText),
     ...buildRequirementsSection(input.requirementsText),
     ...buildArchitectureDecisionsSection(input.decisionsText),
+    ...buildCategorySkillSection(input.category),
     ...buildSharedSuffix(input),
   ];
   return sections.join("\n");

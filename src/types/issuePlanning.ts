@@ -3,6 +3,8 @@
 // en <repo>/.agents/planning/plan-<timestamp>.json. La UI los consumió
 // directamente para renderizar la lista de resultados.
 
+import type { DiagnosisCategoryId } from "./diagnosisCategories.ts";
+
 export type PlannerMode = "roadmap" | "audit";
 
 export type IssueSeverity = "critical" | "high" | "medium" | "low";
@@ -91,6 +93,11 @@ export interface AuditPlan {
   findings: AuditFinding[];
   // Veredicto de cumplimiento de requerimientos (ver RequisitoVerdict).
   requisitos?: RequisitoVerdict[];
+  // Categoría del diagnóstico por categorías: todo el archivo pertenece a
+  // UNA sola categoría (el campo va a nivel de plan, no por finding — ya es
+  // implícito). Opcional: los diagnósticos previos al feature no lo traen y
+  // la UI los trata como General.
+  categoria?: DiagnosisCategoryId;
 }
 
 export type PlanningResult = RoadmapPlan | AuditPlan;

@@ -6,7 +6,8 @@ type SettingsTab =
   | "features"
   | "agent"
   | "integrations"
-  | "shortcuts";
+  | "shortcuts"
+  | "skills";
 
 interface SettingsModalStore {
   open: boolean;

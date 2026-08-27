@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildPlanningPrompt } from "../src/planner/planningPrompt.ts";
+import {
+  buildPlanningPrompt,
+  planningOutputPath,
+} from "../src/planner/planningPrompt.ts";
 import { parsePlanningPlan } from "../src/planner/parsePlanResult.ts";
 
 const BASE = {
@@ -113,4 +116,113 @@ test("parsePlanningPlan: planes sin requisitos no rompen (campo ausente)", () =>
   );
   assert.ok(parsed);
   assert.equal(parsed.result.requisitos, undefined);
+});
+
+// ─── Diagnóstico por categorías ───────────────────────────────────────────
+
+const AUDIT_BASE = { ...BASE, mode: "audit" as const };
+
+test("categoría con hallazgos: agrega la regla de foco y mantiene la sección de herramientas", () => {
+  const prompt = buildPlanningPrompt({
+    ...AUDIT_BASE,
+    category: "documentacion",
+    toolFindingsText: "### eslint (root) — 2 hallazgo(s)",
+  });
+  assert.match(prompt, /REGLA DE FOCO \(categoría «Documentación»\)/);
+  assert.match(prompt, /FUERA DE ALCANCE/);
+  assert.match(prompt, /otro diagnóstico por categoría los cubre/);
+  assert.match(prompt, /HALLAZGOS DE HERRAMIENTAS DETERMINISTICAS/);
+});
+
+test("categoría LLM-only: exploración dirigida reemplaza a la auditoría clásica", () => {
+  const prompt = buildPlanningPrompt({
+    ...AUDIT_BASE,
+    category: "proteccion",
+  });
+  assert.match(prompt, /DIAGNÓSTICO SIN HERRAMIENTAS DETERMINISTICAS/);
+  assert.match(prompt, /tolerancia a fallos/i);
+  // El camino clásico de "leé todo el repo" NO debe aparecer: sin foco sería
+  // exactamente el ruido que el feature elimina.
+  assert.doesNotMatch(prompt, /TAREA: AUDITORÍA DE REPOSITORIO/);
+});
+
+test("veredicto por categoría: SOLO requerimientos lo emite; roadmap queda igual", () => {
+  const requirementsText = "## REQUERIMIENTOS RELEVADOS\n### RF-001 …";
+
+  const seguridad = buildPlanningPrompt({
+    ...AUDIT_BASE,
+    category: "seguridad",
+    requirementsText,
+  });
+  assert.doesNotMatch(seguridad, /## VEREDICTO DE REQUERIMIENTOS/);
+
+  const requerimientos = buildPlanningPrompt({
+    ...AUDIT_BASE,
+    category: "requerimientos",
+    requirementsText,
+  });
+  assert.match(requerimientos, /## VEREDICTO DE REQUERIMIENTOS \(OBLIGATORIO\)/);
+});
+
+test("metodología inyectada: el cuerpo de diag-<id> viaja INLINE en ambas ramas con categoría", () => {
+  // Rama pipeline (con herramientas): la metodología va junto a la regla de foco.
+  const withTools = buildPlanningPrompt({
+    ...AUDIT_BASE,
+    category: "seguridad",
+    toolFindingsText: "### gitleaks (root) — 1 hallazgo(s)",
+  });
+  assert.match(withTools, /## METODOLOGÍA DE LA CATEGORÍA/);
+  assert.match(withTools, /skill diag-seguridad/);
+  // Contenido DISTINTIVO del body real (no un placeholder): garantiza que se
+  // inyecta el cuerpo del registro y no un stub.
+  assert.match(withTools, /Hardening del BrowserWindow/);
+  assert.match(withTools, /Estándar de evidencia/);
+
+  // Rama LLM-only: misma inyección.
+  const llmOnly = buildPlanningPrompt({
+    ...AUDIT_BASE,
+    category: "proteccion",
+  });
+  assert.match(llmOnly, /## METODOLOGÍA DE LA CATEGORÍA/);
+  assert.match(llmOnly, /skill diag-proteccion/);
+  assert.match(llmOnly, /Idempotencia del retry/);
+
+  // Sin categoría (roadmap o audit legacy) la sección NO existe.
+  assert.doesNotMatch(buildPlanningPrompt(BASE), /METODOLOGÍA DE LA CATEGORÍA/);
+  assert.doesNotMatch(
+    buildPlanningPrompt({ ...AUDIT_BASE }),
+    /METODOLOGÍA DE LA CATEGORÍA/,
+  );
+});
+
+test("skills vendor: anuncio por nombre SOLO cuando la corrida las descubrió", () => {
+  const withVendor = buildPlanningPrompt({
+    ...AUDIT_BASE,
+    category: "rendimiento",
+    vendorSkillNames: ["accelint-ts-performance", "mi-checklist"],
+  });
+  assert.match(withVendor, /## SKILLS ADICIONALES DE LA CATEGORÍA/);
+  assert.match(withVendor, /accelint-ts-performance, mi-checklist/);
+  assert.match(withVendor, /Cargá TODAS con tu herramienta skill ANTES de comenzar/);
+  // El cuerpo vendor NO se inyecta al prompt (van como skills scopeadas).
+  assert.ok(!withVendor.includes("frontmatter crudo"));
+
+  // Sin vendor: ni rastro de la sección.
+  const withoutVendor = buildPlanningPrompt({
+    ...AUDIT_BASE,
+    category: "rendimiento",
+  });
+  assert.doesNotMatch(withoutVendor, /SKILLS ADICIONALES DE LA CATEGORÍA/);
+});
+
+test("planningOutputPath: audit con categoría escribe diagnostico-<categoria>-<ts>.json", () => {
+  const byCategory = planningOutputPath("C:/repo", "audit", "seguridad");
+  assert.ok(/diagnostico-seguridad-\d+\.json$/.test(byCategory));
+
+  const roadmap = planningOutputPath("C:/repo", "roadmap");
+  assert.ok(/plan-\d+\.json$/.test(roadmap));
+
+  // Defensivo: audit sin categoría cae al nombre legacy.
+  const legacy = planningOutputPath("C:/repo", "audit");
+  assert.ok(/diagnostico-\d+\.json$/.test(legacy));
 });

@@ -38,6 +38,26 @@ contextBridge.exposeInMainWorld("termcanvas", {
   paths: {
     scriptsDir: SCRIPTS_DIR,
   },
+  skills: {
+    list: () => ipcRenderer.invoke("skills:list") as Promise<Array<{ categoryId: string; skills: Array<{ name: string; description: string; shared: boolean; dirPath: string }> }>>,
+    listForProject: (repoPath: string) => ipcRenderer.invoke("skills:listForProject", repoPath) as Promise<Array<{ categoryId: string; skills: Array<{ name: string; description: string; shared: boolean; dirPath: string }> }>>,
+    getRoots: () => ipcRenderer.invoke("skills:get-roots") as Promise<{ sharedRoot: string; privateRoot: string }>,
+    getShareAll: (repoPath: string) => ipcRenderer.invoke("skills:getShareAll", repoPath) as Promise<{ shared: boolean }>,
+    setShareAll: (repoPath: string, shared: boolean) => ipcRenderer.invoke("skills:setShareAll", repoPath, shared) as Promise<{ ok: boolean; error?: string }>,
+    copyAll: (fromRepo: string, toRepo: string) => ipcRenderer.invoke("skills:copyAll", fromRepo, toRepo) as Promise<{ ok: boolean; error?: string; copied?: number }>,
+    saveFromContent: (categoryId: string, skillName: string, content: string, shared: boolean) => ipcRenderer.invoke("skills:save-from-content", categoryId, skillName, content, shared) as Promise<{ ok: boolean; error?: string }>,
+    saveFromContentForProject: (repoPath: string, categoryId: string, skillName: string, content: string) => ipcRenderer.invoke("skills:saveFromContentForProject", repoPath, categoryId, skillName, content) as Promise<{ ok: boolean; error?: string }>,
+    saveFromFile: (categoryId: string, filePath: string, shared: boolean) => ipcRenderer.invoke("skills:save-from-file", categoryId, filePath, shared) as Promise<{ ok: boolean; error?: string; skillName?: string }>,
+    saveFromFileForProject: (repoPath: string, categoryId: string, filePath: string) => ipcRenderer.invoke("skills:saveFromFileForProject", repoPath, categoryId, filePath) as Promise<{ ok: boolean; error?: string; skillName?: string }>,
+    fetchBySpec: (spec: string, categoryId: string, shared: boolean) => ipcRenderer.invoke("skills:fetch-by-spec", spec, categoryId, shared) as Promise<{ ok: boolean; error?: string; skillName?: string }>,
+    fetchBySpecForProject: (spec: string, repoPath: string, categoryId: string) => ipcRenderer.invoke("skills:fetchBySpecForProject", spec, repoPath, categoryId) as Promise<{ ok: boolean; error?: string; skillName?: string }>,
+    remove: (categoryId: string, skillName: string) => ipcRenderer.invoke("skills:remove", categoryId, skillName) as Promise<{ ok: boolean; error?: string }>,
+    removeForProject: (repoPath: string, categoryId: string, skillName: string) => ipcRenderer.invoke("skills:removeForProject", repoPath, categoryId, skillName) as Promise<{ ok: boolean; error?: string }>,
+    toggleShare: (categoryId: string, skillName: string) => ipcRenderer.invoke("skills:toggle-share", categoryId, skillName) as Promise<{ ok: boolean; error?: string; shared?: boolean }>,
+  },
+  dialog: {
+    openSkillFile: () => ipcRenderer.invoke("dialog:open-skill-file") as Promise<{ canceled: true } | { canceled: false; filePath: string }>,
+  },
   terminal: {
     create: (options: {
       cwd: string;
@@ -46,6 +66,7 @@ contextBridge.exposeInMainWorld("termcanvas", {
       terminalId?: string;
       terminalType?: string;
       theme?: "dark" | "light";
+      envOverrides?: Record<string, string>;
     }) => ipcRenderer.invoke("terminal:create", options),
     destroy: (ptyId: number) => ipcRenderer.invoke("terminal:destroy", ptyId),
     getPid: (ptyId: number) =>

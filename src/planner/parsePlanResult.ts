@@ -7,6 +7,7 @@ import type {
   RoadmapPlan,
   RoadmapProposal,
 } from "../types/issuePlanning.ts";
+import { isDiagnosisCategoryId } from "../types/diagnosisCategories.ts";
 import { deriveAuditLabels } from "./deriveAuditLabels.ts";
 
 // Parseo y validación del archivo que opencode escribe en
@@ -267,6 +268,16 @@ function parseFinding(raw: unknown): AuditPlan["findings"][number] | null {
   };
 }
 
+// Categoría del diagnóstico por categorías: solo se aceptan ids del
+// registro. Un valor desconocido (plan de una versión futura) o mal formado
+// se descarta en silencio: la UI trata el plan como General, que es el
+// fallback honesto — nunca inventar una categoría que no existe acá.
+function parseCategoria(raw: unknown): AuditPlan["categoria"] {
+  return typeof raw === "string" && isDiagnosisCategoryId(raw)
+    ? raw
+    : undefined;
+}
+
 function parseAudit(raw: Record<string, unknown>, warnings: string[]): AuditPlan {
   const rawFindings = Array.isArray(raw.findings) ? raw.findings : [];
   const findings = rawFindings
@@ -278,7 +289,12 @@ function parseAudit(raw: Record<string, unknown>, warnings: string[]): AuditPlan
   if (findings.length < rawFindings.length) {
     warnings.push(`se descartaron ${rawFindings.length - findings.length} hallazgos inválidos`);
   }
-  return { mode: "audit", repo: readString(raw, "repo"), findings };
+  return {
+    mode: "audit",
+    repo: readString(raw, "repo"),
+    findings,
+    categoria: parseCategoria(raw.categoria),
+  };
 }
 
 // Veredictos de cumplimiento de requerimientos: tolerante a items inválidos

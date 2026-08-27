@@ -41,6 +41,11 @@ export interface CoreModalContextValue {
   // Filtro FUENTE — DIAGNÓSTICO activo en github_issues ("all" = todo).
   githubDiagFilter: string;
   setGithubDiagFilter: (value: string) => void;
+  // Filtro CATEGORÍA activo en github_issues ("all" = todas). Compone con
+  // el filtro de diagnóstico de origen: cada hallazgo hereda la categoría
+  // del diagnostico-<categoria>-*.json que lo emitió.
+  githubCategoryFilter: string;
+  setGithubCategoryFilter: (value: string) => void;
   // Colapso compartido del bloque "Eliminados" entre las 4 secciones de
   // curaduría (en el monolito era un único estado del componente).
   curDeletedOpen: boolean;

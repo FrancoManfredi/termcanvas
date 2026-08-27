@@ -10,7 +10,13 @@ import { useEffect, useState } from "react";
 import { PlannerTerminalPane } from "../../PlannerTerminalPane";
 import { EffectiveModelChip } from "../../ai/EffectiveModelChip";
 import { RepoSecurityFlow } from "../../RepoSecurityFlow";
+import { relativeTimeLabel } from "../../../snapshotHistory";
 import { useDiagnosisStore } from "../../../stores/diagnosisStore";
+import {
+  DIAGNOSIS_CATEGORIES,
+  categoryLabel,
+  getDiagnosisCategory,
+} from "../../../types/diagnosisCategories";
 import { resolveActiveWorktree } from "../../../planner/planningSession";
 import { useCoreModal } from "../context";
 import {
@@ -34,6 +40,14 @@ export function PlanningDiagnosisSection() {
     id: string;
     filename: string;
   } | null>(null);
+  // Categoría elegida en el selector (idle): el botón "+ Nuevo diagnóstico"
+  // la pasa al store. La corrida en curso la expone selectedCategory del
+  // store (sobrevive cerrar/abrir el modal).
+  const [selectedCategoryId, setSelectedCategoryId] = useState<string | null>(null);
+  // Prompt persistido como sidecar (<plan>.json.prompt.md) del diagnóstico
+  // que se está viendo en detalle: los registros cargados desde disco no
+  // traen prompt en memoria, así que se lee lazy al abrir el detalle.
+  const [detailPrompt, setDetailPrompt] = useState<string | null>(null);
 
   const diagPhase = useDiagnosisStore((s) => s.phase);
   const diagSessionRuntime = useDiagnosisStore((s) => s.sessionRuntime);
@@ -42,6 +56,55 @@ export function PlanningDiagnosisSection() {
   const diagLatestId = useDiagnosisStore((s) => s.latestDiagnosisId);
   const diagToolsDone = useDiagnosisStore((s) => s.toolsDone);
   const diagToolsSummary = useDiagnosisStore((s) => s.toolsSummary);
+  const diagSelectedCategory = useDiagnosisStore((s) => s.selectedCategory);
+  const diagToolFindings = useDiagnosisStore((s) => s.toolFindingsByCategory);
+
+  // Último análisis COMPLETADO por categoría (id = diag-<ts>): alimenta el
+  // "Último análisis" de cada tarjeta del selector.
+  const lastRunByCategory = new Map<string, { ts: number; findings: number }>();
+  for (const rec of diagHistory) {
+    const ts = Number(rec.id.slice("diag-".length));
+    if (!Number.isFinite(ts)) continue;
+    const current = lastRunByCategory.get(rec.category);
+    if (!current || ts > current.ts) {
+      lastRunByCategory.set(rec.category, {
+        ts,
+        findings: rec.data.findings.length,
+      });
+    }
+  }
+
+  // Reglas del "→ LLM directo": solo categorías CON herramientas y SOLO si
+  // esas herramientas corrieron alguna vez (tool-findings propio en disco —
+  // aunque su LLM haya fallado después, que es justo el caso de retry).
+  const selectedCat = selectedCategoryId
+    ? getDiagnosisCategory(selectedCategoryId)
+    : undefined;
+  const hasCategoryToolFindings = !!(
+    selectedCategoryId && diagToolFindings[selectedCategoryId] !== undefined
+  );
+  const llmDirectAvailable =
+    !!selectedCat && selectedCat.tools.length > 0 && hasCategoryToolFindings;
+
+  // Sidecar del prompt: se lee al abrir el detalle de un diagnóstico.
+  useEffect(() => {
+    setDetailPrompt(null);
+    if (!viewingDiagId) return;
+    const active = resolveActiveWorktree();
+    if (!active) return;
+    const rec = useDiagnosisStore
+      .getState()
+      .history.find((d) => d.id === viewingDiagId);
+    if (!rec) return;
+    void window.termcanvas.fs
+      .readFile(
+        `${active.path.replace(/[\\/]+$/, "")}/.agents/planning/${rec.filename}.prompt.md`,
+      )
+      .then((read) => {
+        if (read && "content" in read) setDetailPrompt(read.content);
+      })
+      .catch(() => {});
+  }, [viewingDiagId]);
 
   // Un diagnóstico terminado (en primer plano o de fondo) se consume una
   // sola vez: la primera apertura de la sección muestra su detalle.
@@ -93,7 +156,12 @@ export function PlanningDiagnosisSection() {
         <div className="flex items-start gap-3 p-4 rounded-lg bg-emerald-500/8 border border-emerald-500/25">
           <div className="w-6 h-6 rounded-full bg-emerald-500/15 text-emerald-400 flex items-center justify-center text-sm shrink-0 mt-0.5">✓</div>
           <div className="space-y-0.5">
-            <p className="text-xs font-bold text-emerald-400">Diagnóstico completado</p>
+            <div className="flex items-center gap-2 flex-wrap">
+              <p className="text-xs font-bold text-emerald-400">Diagnóstico completado</p>
+              <span className="font-mono text-[9px] font-semibold px-1.5 py-0.5 rounded border text-[var(--accent)] bg-[var(--accent-soft)] border-[var(--accent)]/30">
+                {categoryLabel(rec.category)}
+              </span>
+            </div>
             <p className="text-[10.5px] font-mono text-[var(--text-muted)]">{rec.repo}</p>
             <p className="text-[10px] font-mono text-[var(--text-muted)]">{rec.filename} · {rec.timestamp}</p>
           </div>
@@ -246,14 +314,14 @@ export function PlanningDiagnosisSection() {
           </div>
         )}
 
-        {rec.prompt && (
+        {(rec.prompt ?? detailPrompt) && (
           <details className="rounded-md border border-[var(--border)] bg-[var(--bg)] overflow-hidden">
             <summary className="flex items-center justify-between px-3 py-2 text-[11px] font-mono text-[var(--text-muted)] cursor-pointer hover:text-[var(--text-primary)] transition-colors list-none">
-              <span>Ver prompt enviado a opencode</span>
+              <span>Ver prompt enviado a opencode{categoryLabel(rec.category) !== "General" ? ` · ${categoryLabel(rec.category)}` : ""}</span>
               <span className="text-[10px]">▾</span>
             </summary>
             <pre className="p-3 border-t border-[var(--border)] bg-[var(--surface)] text-[10px] font-mono text-[var(--text-secondary)] whitespace-pre-wrap max-h-48 overflow-y-auto">
-              {rec.prompt}
+              {rec.prompt ?? detailPrompt}
             </pre>
           </details>
         )}
@@ -277,6 +345,11 @@ export function PlanningDiagnosisSection() {
                     : "Herramientas deterministas — escaneando el repositorio"
                   : "Sesión opencode activa — diagnóstico en curso"}
               </span>
+              {diagSelectedCategory && (
+                <span className="font-mono text-[9px] font-semibold px-1.5 py-0.5 rounded border shrink-0 text-[var(--accent)] bg-[var(--accent-soft)] border-[var(--accent)]/30">
+                  {categoryLabel(diagSelectedCategory)}
+                </span>
+              )}
               {diagPhase === "running" && (
                 <EffectiveModelChip phaseId="diagnosisLlm" />
               )}
@@ -384,31 +457,101 @@ export function PlanningDiagnosisSection() {
               <div className="space-y-1 flex-1">
                 <h3 className="text-xs font-bold text-[var(--text-primary)]">Diagnóstico del Repositorio</h3>
                 <p className="text-[11px] text-[var(--text-secondary)] leading-relaxed">
-                  Ejecuta una sesión de opencode que examina la estructura de archivos, dependencias y cobertura para detectar issues reproducibles y brechas de arquitectura.
-                </p>
-                <p className="text-[10.5px] font-mono text-[var(--text-muted)] pt-0.5">
-                  Resultado guardado en{" "}
+                  Elegí una categoría: corren solo sus herramientas deterministas y el LLM analiza con foco exclusivo en esa área. Cada corrida guarda su propio JSON en{" "}
                   <code className="text-[var(--text-secondary)] bg-[var(--surface)] px-1 rounded border border-[var(--border)]">
-                    .agents/planning/diagnostico-*.json
+                    .agents/planning/diagnostico-&lt;categoría&gt;-*.json
                   </code>
                 </p>
               </div>
               <div className="flex items-center gap-2 shrink-0">
+                {/* LLM directo: solo para categorías CON herramientas y solo
+                    si esas herramientas corrieron alguna vez (tool-findings
+                    propio en disco). En categorías LLM-only no hay Fase A que
+                    saltear: se oculta. */}
+                {(!selectedCat || selectedCat.tools.length > 0) && (
+                  <button
+                    type="button"
+                    className="btn btn-ghost text-[11px] py-2 px-3 border border-[var(--border)] shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                    disabled={!llmDirectAvailable}
+                    title={
+                      llmDirectAvailable
+                        ? "Saltea las herramientas y lanza el LLM con el tool-findings más reciente de esta categoría"
+                        : selectedCat
+                          ? "Todavía no corrieron las herramientas de esta categoría — lanzá primero el diagnóstico completo"
+                          : "Elegí una categoría primero"
+                    }
+                    onClick={() => {
+                      if (selectedCategoryId) {
+                        void useDiagnosisStore.getState().startLlmDirect(selectedCategoryId);
+                      }
+                    }}
+                  >
+                    → LLM directo
+                  </button>
+                )}
                 <button
                   type="button"
-                  className="btn btn-ghost text-[11px] py-2 px-3 border border-[var(--border)] shrink-0"
-                  onClick={() => void useDiagnosisStore.getState().startLlmDirect()}
-                  title="Saltea el análisis de herramientas y lanza el LLM con el tool-findings más reciente"
-                >
-                  → LLM directo
-                </button>
-                <button
-                  type="button"
-                  className="btn btn-primary text-xs py-2 px-4 font-semibold shadow-xs shrink-0"
-                  onClick={() => void useDiagnosisStore.getState().start()}
+                  className="btn btn-primary text-xs py-2 px-4 font-semibold shadow-xs shrink-0 disabled:opacity-50 disabled:cursor-not-allowed"
+                  disabled={!selectedCategoryId}
+                  title={selectedCategoryId ? undefined : "Elegí una categoría primero"}
+                  onClick={() => {
+                    if (selectedCategoryId) void useDiagnosisStore.getState().start(selectedCategoryId);
+                  }}
                 >
                   + Nuevo diagnóstico
                 </button>
+              </div>
+            </div>
+
+            {/* Selector de categoría (single-select): la categoría decide qué
+                herramientas corren en la Fase A y en qué se concentra el LLM. */}
+            <div className="space-y-2">
+              <span className="text-[10px] font-mono uppercase tracking-wider text-[var(--text-muted)] font-semibold block">
+                CATEGORÍA DEL DIAGNÓSTICO
+              </span>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {DIAGNOSIS_CATEGORIES.map((cat) => {
+                  const isSelected = selectedCategoryId === cat.id;
+                  const lastRun = lastRunByCategory.get(cat.id);
+                  return (
+                    <button
+                      key={cat.id}
+                      type="button"
+                      className={`text-left p-3 rounded-md border transition-all space-y-1 ${
+                        isSelected
+                          ? "border-[var(--accent)] ring-1 ring-[var(--accent)] bg-[var(--accent-soft)]"
+                          : "border-[var(--border)] bg-[var(--bg)] hover:border-[var(--accent)]/50 hover:bg-[var(--surface)]"
+                      }`}
+                      onClick={() => setSelectedCategoryId(isSelected ? null : cat.id)}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <p className={`text-[11.5px] font-bold leading-tight ${isSelected ? "text-[var(--accent)]" : "text-[var(--text-primary)]"}`}>
+                          {cat.label}
+                        </p>
+                        {isSelected && (
+                          <span className="font-mono text-[9px] font-semibold px-1 py-0.5 rounded border shrink-0 text-[var(--accent)] bg-[var(--accent-soft)] border-[var(--accent)]/30">
+                            ✓
+                          </span>
+                        )}
+                      </div>
+                      <p className="text-[10px] text-[var(--text-muted)] leading-snug">{cat.description}</p>
+                      <p className="font-mono text-[9px] text-[var(--text-faint)] leading-snug">
+                        {cat.tools.length > 0
+                          ? `Herramientas: ${cat.tools.join(", ")}`
+                          : "Sin herramientas — solo análisis del modelo"}
+                      </p>
+                      <p
+                        className={`font-mono text-[9px] leading-snug ${lastRun ? "text-[var(--text-muted)]" : "text-[var(--text-faint)] italic"}`}
+                        title={lastRun ? new Date(lastRun.ts).toLocaleString("es-AR") : undefined}
+                      >
+                        Último análisis:{" "}
+                        {lastRun
+                          ? `${relativeTimeLabel(lastRun.ts)} · ${lastRun.findings} hallazgo${lastRun.findings !== 1 ? "s" : ""}`
+                          : "nunca"}
+                      </p>
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
@@ -441,6 +584,12 @@ export function PlanningDiagnosisSection() {
                       >
                         <div className="flex items-center gap-3 min-w-0 flex-1">
                           <span className="font-mono text-[10.5px] text-[var(--text-muted)] shrink-0">{rec.timestamp}</span>
+                          <span
+                            className="font-mono text-[9px] font-semibold px-1.5 py-0.5 rounded border shrink-0 max-w-[150px] truncate text-[var(--accent)] bg-[var(--accent-soft)] border-[var(--accent)]/25"
+                            title={categoryLabel(rec.category)}
+                          >
+                            {categoryLabel(rec.category)}
+                          </span>
                           <span className="font-mono text-[10px] text-[var(--text-muted)] truncate">{rec.repo}</span>
                         </div>
                         <div className="flex items-center gap-2 shrink-0">
