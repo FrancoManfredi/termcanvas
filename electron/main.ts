@@ -2107,6 +2107,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         const existing = fs.readFileSync(filePath, "utf-8");
         if (existing === content) return { changed: false };
       } catch {}
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
       fs.writeFileSync(filePath, content, "utf-8");
       return { changed: true };
     },
@@ -2409,6 +2410,9 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/master/skills/${variant}/SKILL.md`);
         candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/main/${variant}/SKILL.md`);
         candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/master/${variant}/SKILL.md`);
+        // nested category folders like claude-dev-suite/skills/best-practices/solid-principles
+        candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/main/skills/best-practices/${variant}/SKILL.md`);
+        candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/master/skills/best-practices/${variant}/SKILL.md`);
       }
       candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/main/SKILL.md`);
       candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/master/SKILL.md`);
@@ -2439,7 +2443,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         if (text.includes("---") && text.length > 50) { content = text; break; }
       } catch (e) { lastErr = String(e); }
     }
-    // Fallback: try npx skills add to temp and copy
+    // Fallback: try npx skills add to temp and copy (handles nested paths like best-practices/solid-principles)
     if (!content) {
       try {
         const { execFile } = await import("child_process");
@@ -2448,13 +2452,36 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         const targetSpec = skillPart ? `${ownerRepo}@${skillPart}` : ownerRepo;
         const isWin = process.platform === "win32";
         await new Promise<void>((resolve, reject) => {
-          const child = execFile(isWin ? "npx.cmd" : "npx", ["-y", "skills", "add", targetSpec, "-y", "--copy"], { cwd: tmp, timeout: 45000, shell: isWin, windowsHide: true } as never, (err: Error | null) => err ? reject(err) : resolve());
+          const child = execFile(isWin ? "npx.cmd" : "npx", ["-y", "skills", "add", targetSpec, "-y", "--copy"], { cwd: tmp, timeout: 60000, shell: isWin, windowsHide: true } as never, (err: Error | null) => err ? reject(err) : resolve());
           child.on?.("error", reject);
         });
-        // try to locate SKILL.md in tmp or global
+        const findSkillMd = (root: string): string | null => {
+          const stack = [root];
+          while (stack.length) {
+            const dir = stack.pop()!;
+            let entries: fs.Dirent[] = [];
+            try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+            for (const e of entries) {
+              const p = path.join(dir, e.name);
+              if (e.isDirectory()) stack.push(p);
+              else if (e.isFile() && e.name === "SKILL.md") {
+                try {
+                  const c = fs.readFileSync(p, "utf-8");
+                  // match by skillPart in frontmatter or folder name
+                  if (skillPart && (c.includes(`name: ${skillPart}`) || p.toLowerCase().includes(skillPart.toLowerCase()))) return p;
+                  if (!skillPart) return p;
+                } catch {}
+              }
+            }
+          }
+          return null;
+        };
         const probeRoots = [tmp, path.join(os.homedir(), ".agents", "skills"), path.join(os.homedir(), ".config", "opencode", "skills")];
         for (const pr of probeRoots) {
-          const tryPaths = skillPart ? [path.join(pr, skillPart, "SKILL.md"), path.join(pr, skillPart.toLowerCase(), "SKILL.md")] : [];
+          const found = findSkillMd(pr);
+          if (found && fs.existsSync(found)) { content = fs.readFileSync(found, "utf-8"); break; }
+          // also try direct paths as fallback
+          const tryPaths = skillPart ? [path.join(pr, skillPart, "SKILL.md"), path.join(pr, skillPart.toLowerCase(), "SKILL.md"), path.join(pr, "best-practices", skillPart, "SKILL.md")] : [];
           for (const tp of tryPaths) {
             if (fs.existsSync(tp)) { content = fs.readFileSync(tp, "utf-8"); break; }
           }
@@ -2483,25 +2510,34 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
 
   // ─── Diagnosis Skills — per-project (valija por repo) ───────────────────────
   ipcMain.handle("skills:listForProject", async (_event, repoPath: string) => {
-    const baseRoot = path.join(repoPath.replace(/[\\/]+$/, ""), "resources", "diagnosis-skills");
+    const clean = repoPath.replace(/[\\/]+$/, "");
+    const primaryRoot = path.join(clean, ".agents", "diagnosis-skills");
+    const legacyRoot = path.join(clean, "resources", "diagnosis-skills");
     const out: Array<{ categoryId: string; skills: Array<{ name: string; description: string; shared: boolean; dirPath: string }> }> = [];
     for (const cat of DIAGNOSIS_CATEGORIES) {
-      const base = path.join(baseRoot, cat);
-      let entries: fs.Dirent[] = [];
-      try { entries = fs.readdirSync(base, { withFileTypes: true }); } catch { out.push({ categoryId: cat, skills: [] }); continue; }
+      const bases = [path.join(primaryRoot, cat), path.join(legacyRoot, cat)];
+      const seen = new Set<string>();
       const catSkills: Array<{ name: string; description: string; shared: boolean; dirPath: string }> = [];
-      for (const e of entries) {
-        if (!e.isDirectory() || e.name === ".gitkeep") continue;
-        const p = path.join(base, e.name, "SKILL.md");
-        if (!fs.existsSync(p)) continue;
-        let content = "";
-        try { content = fs.readFileSync(p, "utf-8"); } catch { continue; }
-        const name = parseSkillNameFromContent(content, e.name);
-        let description = "";
-        const dm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content);
-        if (dm) { for (const line of dm[1].split(/\r?\n/)) { const kv = /^\s*description:\s*(.*)$/.exec(line); if (kv) { description = kv[1].trim(); break; } } }
-        if (!description) description = "Skill del proyecto";
-        catSkills.push({ name, description: description.slice(0, 200), shared: true, dirPath: path.join(base, e.name) });
+      for (const base of bases) {
+        let entries: fs.Dirent[] = [];
+        try { entries = fs.readdirSync(base, { withFileTypes: true }); } catch { continue; }
+        for (const e of entries) {
+          if (!e.isDirectory() || e.name === ".gitkeep") continue;
+          if (seen.has(e.name)) continue;
+          const p = path.join(base, e.name, "SKILL.md");
+          if (!fs.existsSync(p)) continue;
+          let content = "";
+          try { content = fs.readFileSync(p, "utf-8"); } catch { continue; }
+          const name = parseSkillNameFromContent(content, e.name);
+          if (seen.has(name)) continue;
+          let description = "";
+          const dm = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content);
+          if (dm) { for (const line of dm[1].split(/\r?\n/)) { const kv = /^\s*description:\s*(.*)$/.exec(line); if (kv) { description = kv[1].trim(); break; } } }
+          if (!description) description = "Skill del proyecto";
+          seen.add(e.name);
+          seen.add(name);
+          catSkills.push({ name, description: description.slice(0, 200), shared: true, dirPath: path.join(base, e.name) });
+        }
       }
       catSkills.sort((a, b) => a.name.localeCompare(b.name));
       out.push({ categoryId: cat, skills: catSkills });
@@ -2513,7 +2549,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
     if (!DIAGNOSIS_CATEGORIES.includes(categoryId as never)) return { ok: false, error: "Categoría inválida" };
     if (!/^[a-z][a-z0-9-]*$/.test(skillName) || skillName.startsWith("diag-")) return { ok: false, error: "Nombre inválido" };
     if (!content.trim()) return { ok: false, error: "Contenido vacío" };
-    const dest = path.join(repoPath.replace(/[\\/]+$/, ""), "resources", "diagnosis-skills", categoryId, skillName);
+    const dest = path.join(repoPath.replace(/[\\/]+$/, ""), ".agents", "diagnosis-skills", categoryId, skillName);
     try {
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       if (fs.existsSync(dest)) return { ok: false, error: "Ya existe" };
@@ -2532,7 +2568,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
       skillName = path.basename(filePath, path.extname(filePath)).toLowerCase().replace(/[^a-z0-9-]/g, "-");
       if (!skillName || skillName.startsWith("diag-")) skillName = `skill-${Date.now()}`;
     }
-    const dest = path.join(repoPath.replace(/[\\/]+$/, ""), "resources", "diagnosis-skills", categoryId, skillName);
+    const dest = path.join(repoPath.replace(/[\\/]+$/, ""), ".agents", "diagnosis-skills", categoryId, skillName);
     try {
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       if (fs.existsSync(dest)) return { ok: false, error: `Ya existe ${skillName}` };
@@ -2587,10 +2623,15 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
           candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/main/skills/${v}/SKILL.md`);
           candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/master/skills/${v}/SKILL.md`);
           candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/main/${v}/SKILL.md`);
+          candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/master/${v}/SKILL.md`);
+          candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/main/skills/best-practices/${v}/SKILL.md`);
+          candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/master/skills/best-practices/${v}/SKILL.md`);
         }
         candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/main/SKILL.md`);
+        candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/master/SKILL.md`);
       } else {
         candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/main/SKILL.md`);
+        candidates.push(`https://raw.githubusercontent.com/${ownerRepo}/master/SKILL.md`);
       }
       const fetchWithTimeout = (url: string, ms = 10000) => new Promise<Buffer>((resolve, reject) => {
         const req = https.get(url, { headers: { "User-Agent": "termcanvas-skills" } }, (res) => {
@@ -2620,12 +2661,34 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
           const targetSpec = skillPart ? `${ownerRepo}@${skillPart}` : ownerRepo;
           const isWin = process.platform === "win32";
           await new Promise<void>((resolve, reject) => {
-            const child = execFile(isWin ? "npx.cmd" : "npx", ["-y", "skills", "add", targetSpec, "-y", "--copy"], { cwd: tmp, timeout: 45000, shell: isWin, windowsHide: true } as never, (err: Error | null) => err ? reject(err) : resolve());
+            const child = execFile(isWin ? "npx.cmd" : "npx", ["-y", "skills", "add", targetSpec, "-y", "--copy"], { cwd: tmp, timeout: 60000, shell: isWin, windowsHide: true } as never, (err: Error | null) => err ? reject(err) : resolve());
             child.on?.("error", reject);
           });
+          const findSkillMd = (root: string): string | null => {
+            const stack = [root];
+            while (stack.length) {
+              const dir = stack.pop()!;
+              let entries: fs.Dirent[] = [];
+              try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+              for (const e of entries) {
+                const p = path.join(dir, e.name);
+                if (e.isDirectory()) stack.push(p);
+                else if (e.isFile() && e.name === "SKILL.md") {
+                  try {
+                    const c = fs.readFileSync(p, "utf-8");
+                    if (skillPart && (c.includes(`name: ${skillPart}`) || p.toLowerCase().includes(skillPart.toLowerCase()))) return p;
+                    if (!skillPart) return p;
+                  } catch {}
+                }
+              }
+            }
+            return null;
+          };
           const probeRoots = [tmp, path.join(os.homedir(), ".agents", "skills"), path.join(os.homedir(), ".config", "opencode", "skills")];
           for (const pr of probeRoots) {
-            const tryPaths = skillPart ? [path.join(pr, skillPart, "SKILL.md"), path.join(pr, skillPart.toLowerCase(), "SKILL.md")] : [];
+            const found = findSkillMd(pr);
+            if (found && fs.existsSync(found)) { content = fs.readFileSync(found, "utf-8"); break; }
+            const tryPaths = skillPart ? [path.join(pr, skillPart, "SKILL.md"), path.join(pr, skillPart.toLowerCase(), "SKILL.md"), path.join(pr, "best-practices", skillPart, "SKILL.md")] : [];
             for (const tp of tryPaths) if (fs.existsSync(tp)) { content = fs.readFileSync(tp, "utf-8"); break; }
             if (content) break;
           }
@@ -2636,7 +2699,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
       let folderName = skillPart || ownerRepo.split("/").pop() || `skill-${Date.now()}`;
       folderName = folderName.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/^-+|-+$/g, "");
       if (!folderName || !/^[a-z][a-z0-9-]*$/.test(folderName) || folderName.startsWith("diag-")) folderName = `skill-${Date.now()}`;
-      const dest = path.join(repoPath.replace(/[\\/]+$/, ""), "resources", "diagnosis-skills", categoryId, folderName);
+      const dest = path.join(repoPath.replace(/[\\/]+$/, ""), ".agents", "diagnosis-skills", categoryId, folderName);
       try {
         fs.mkdirSync(path.dirname(dest), { recursive: true });
         if (fs.existsSync(dest)) return { ok: false as const, error: `Ya existe ${folderName} en ${categoryId}` };
@@ -2649,27 +2712,44 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
   });
 
   ipcMain.handle("skills:removeForProject", async (_event, repoPath: string, categoryId: string, skillName: string) => {
-    const base = path.join(repoPath.replace(/[\\/]+$/, ""), "resources", "diagnosis-skills", categoryId);
-    let entries: fs.Dirent[] = [];
-    try { entries = fs.readdirSync(base, { withFileTypes: true }); } catch { return { ok: false, error: "Categoría no encontrada" }; }
-    for (const e of entries) {
-      if (!e.isDirectory() || e.name === ".gitkeep") continue;
-      const p = path.join(base, e.name, "SKILL.md");
-      if (!fs.existsSync(p)) continue;
-      let content = "";
-      try { content = fs.readFileSync(p, "utf-8"); } catch { continue; }
-      const resolved = parseSkillNameFromContent(content, e.name);
-      if (resolved === skillName || e.name === skillName) {
-        fs.rmSync(path.join(base, e.name), { recursive: true, force: true });
-        return { ok: true };
+    const candidates = [
+      path.join(repoPath.replace(/[\\/]+$/, ""), ".agents", "diagnosis-skills", categoryId),
+      path.join(repoPath.replace(/[\\/]+$/, ""), "resources", "diagnosis-skills", categoryId),
+    ];
+    for (const base of candidates) {
+      let entries: fs.Dirent[] = [];
+      try { entries = fs.readdirSync(base, { withFileTypes: true }); } catch { continue; }
+      for (const e of entries) {
+        if (!e.isDirectory() || e.name === ".gitkeep") continue;
+        const p = path.join(base, e.name, "SKILL.md");
+        if (!fs.existsSync(p)) continue;
+        let content = "";
+        try { content = fs.readFileSync(p, "utf-8"); } catch { continue; }
+        const resolved = parseSkillNameFromContent(content, e.name);
+        if (resolved === skillName || e.name === skillName) {
+          fs.rmSync(path.join(base, e.name), { recursive: true, force: true });
+          return { ok: true };
+        }
       }
     }
     return { ok: false, error: "Skill no encontrada" };
   });
 
   ipcMain.handle("skills:copyAll", async (_event, fromRepo: string, toRepo: string) => {
-    const fromRoot = path.join(fromRepo.replace(/[\\/]+$/, ""), "resources", "diagnosis-skills");
-    const toRoot = path.join(toRepo.replace(/[\\/]+$/, ""), "resources", "diagnosis-skills");
+    const resolveRoot = (rp: string, preferAgents: boolean) => {
+      const agents = path.join(rp.replace(/[\\/]+$/, ""), ".agents", "diagnosis-skills");
+      const legacy = path.join(rp.replace(/[\\/]+$/, ""), "resources", "diagnosis-skills");
+      if (preferAgents) return fs.existsSync(agents) ? agents : legacy;
+      return fs.existsSync(legacy) ? legacy : agents;
+    };
+    const fromRoot = (() => {
+      const a = path.join(fromRepo.replace(/[\\/]+$/, ""), ".agents", "diagnosis-skills");
+      const l = path.join(fromRepo.replace(/[\\/]+$/, ""), "resources", "diagnosis-skills");
+      if (fs.existsSync(a)) return a;
+      if (fs.existsSync(l)) return l;
+      return a;
+    })();
+    const toRoot = path.join(toRepo.replace(/[\\/]+$/, ""), ".agents", "diagnosis-skills");
     if (!fs.existsSync(fromRoot)) return { ok: false, error: "Origen sin skills" };
     let copied = 0;
     for (const cat of DIAGNOSIS_CATEGORIES) {

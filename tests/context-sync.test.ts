@@ -184,7 +184,7 @@ test("push desde A → pull en B trae el contexto", async () => {
   const fx = makeTwoMachines();
   try {
     writeAgent(fx.projectA, "interview/requerimientos/entrevista-1.json", '{"a":1}');
-    writeAgent(fx.projectA, "repo-context.md", "# contexto\n");
+    writeAgent(fx.projectA, "interview/contexto/contexto-1.json", '{"c":1}');
 
     // init en A: agrega .agents/ al .gitignore
     const initA = await contextInit(fx.projectA, fx.depA);

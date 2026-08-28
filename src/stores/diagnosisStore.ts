@@ -174,21 +174,42 @@ const MAX_TOTAL_FINDINGS = 160;
 // comparten cuota global. Los diagnostico-*.json (historial) no se tocan.
 const KEEP_RECENT_PLANNING_ARTIFACTS = 5;
 
+async function listPlanningEntriesWithFallback(
+  repoPath: string,
+): Promise<Array<{ name: string; dir: string; isDirectory: boolean }>> {
+  const base = `${repoPath.replace(/[\\/]+$/, "")}/.agents/planning`;
+  const subdirs = ["", "diagnostics", "findings", "prompts", "security"];
+  const all: Array<{ name: string; dir: string; isDirectory: boolean }> = [];
+  const seen = new Set<string>();
+  for (const sub of subdirs) {
+    const dir = sub ? `${base}/${sub}` : base;
+    const entries = await window.termcanvas.fs.listDir(dir).catch(() => null);
+    if (!entries) continue;
+    for (const e of entries) {
+      const key = sub ? `${sub}/${e.name}` : e.name;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      all.push({ name: e.name, dir, isDirectory: e.isDirectory });
+    }
+  }
+  return all;
+}
+
 async function prunePlanningArtifacts(repoPath: string): Promise<void> {
-  const dir = `${repoPath.replace(/[\\/]+$/, "")}/.agents/planning`;
-  const entries = await window.termcanvas.fs.listDir(dir).catch(() => null);
-  if (!entries) return;
+  const base = `${repoPath.replace(/[\\/]+$/, "")}/.agents/planning`;
+  const entries = await listPlanningEntriesWithFallback(repoPath);
+  if (!entries.length) return;
 
   // tool-findings agrupados por categoría ("" = legacy sin categoría).
-  const tfGroups = new Map<string, Array<{ name: string; ts: number }>>();
-  const prompts: Array<{ name: string; ts: number }> = [];
+  const tfGroups = new Map<string, Array<{ name: string; dir: string; ts: number }>>();
+  const prompts: Array<{ name: string; dir: string; ts: number }> = [];
   for (const entry of entries) {
     if (entry.isDirectory) continue;
     const tf = parseToolFindingsName(entry.name);
     if (tf) {
       const key = tf.category ?? "";
       const group = tfGroups.get(key) ?? [];
-      group.push({ name: entry.name, ts: tf.ts });
+      group.push({ name: entry.name, dir: entry.dir, ts: tf.ts });
       tfGroups.set(key, group);
       continue;
     }
@@ -197,28 +218,28 @@ async function prunePlanningArtifacts(repoPath: string): Promise<void> {
       entry.name,
     );
     if (sidecar && Number.isFinite(Number(sidecar[1]))) {
-      prompts.push({ name: entry.name, ts: Number(sidecar[1]) });
+      prompts.push({ name: entry.name, dir: entry.dir, ts: Number(sidecar[1]) });
       continue;
     }
     const pm = /^prompt-(\d+)\.md$/.exec(entry.name);
     if (pm && Number.isFinite(Number(pm[1]))) {
-      prompts.push({ name: entry.name, ts: Number(pm[1]) });
+      prompts.push({ name: entry.name, dir: entry.dir, ts: Number(pm[1]) });
     }
   }
 
-  const stale: string[] = [];
+  const stale: Array<{ name: string; dir: string }> = [];
   for (const group of tfGroups.values()) {
     group.sort((a, b) => b.ts - a.ts);
     for (const item of group.slice(KEEP_RECENT_PLANNING_ARTIFACTS)) {
-      stale.push(item.name);
+      stale.push({ name: item.name, dir: item.dir });
     }
   }
   prompts.sort((a, b) => b.ts - a.ts);
   for (const item of prompts.slice(KEEP_RECENT_PLANNING_ARTIFACTS)) {
-    stale.push(item.name);
+    stale.push({ name: item.name, dir: item.dir });
   }
-  for (const name of stale) {
-    void window.termcanvas.fs.delete(`${dir}/${name}`).catch(() => {
+  for (const item of stale) {
+    void window.termcanvas.fs.delete(`${item.dir}/${item.name}`).catch(() => {
       // Best-effort: un archivo que no se pudo borrar no rompe la corrida.
     });
   }
@@ -739,13 +760,16 @@ export const useDiagnosisStore = create<DiagnosisStore>((set, get) => ({
     if (!rec) return;
     set({ history: history.filter((r) => r.id !== id) });
     if (typeof window !== "undefined") {
-      const dir = `${repoPath.replace(/[\\/]+$/, "")}/.agents/planning`;
-      void window.termcanvas.fs
-        .delete(`${dir}/${rec.filename}`)
-        .catch(() => {
-          // El archivo ya no existe o no se pudo borrar: el registro sale
-          // igual del historial, no es un error que deba molestar.
-        });
+      const base = `${repoPath.replace(/[\\/]+$/, "")}/.agents/planning`;
+      const candidates = [
+        `${base}/${rec.filename}`,
+        `${base}/diagnostics/${rec.filename}`,
+        `${base}/findings/${rec.filename}`,
+        `${base}/security/${rec.filename}`,
+      ];
+      for (const p of candidates) {
+        void window.termcanvas.fs.delete(p).catch(() => {});
+      }
     }
   },
 
@@ -757,23 +781,22 @@ export const useDiagnosisStore = create<DiagnosisStore>((set, get) => ({
 
   loadHistory: async (repoPath: string) => {
     if (typeof window === "undefined") return;
-    const dir = `${repoPath.replace(/[\\/]+$/, "")}/.agents/planning`;
-    const entries = await window.termcanvas.fs.listDir(dir).catch(() => []);
+    const base = `${repoPath.replace(/[\\/]+$/, "")}/.agents/planning`;
+    const dirs = [base, `${base}/diagnostics`, `${base}/findings`, `${base}/prompts`, `${base}/security`];
+    const allEntries: Array<{ name: string; dir: string; isDirectory: boolean }> = [];
+    for (const d of dirs) {
+      const entries = await window.termcanvas.fs.listDir(d).catch(() => []);
+      for (const e of entries) allEntries.push({ name: e.name, dir: d, isDirectory: e.isDirectory });
+    }
     const records: DiagnosisRecord[] = [];
-    // tool-findings ordenados por timestamp, para reconstruir la cobertura
-    // de cada diagnóstico (el más reciente ANTERIOR al diagnóstico, de la
-    // MISMA categoría: la cobertura de una corrida de Seguridad no le
-    // corresponde a un diagnóstico de Documentación).
     const toolFindings: Array<{ ts: number; category: string | null }> = [];
-    for (const entry of entries) {
+    for (const entry of allEntries) {
       if (entry.isDirectory) continue;
       const parsed = parseToolFindingsName(entry.name);
       if (parsed) toolFindings.push(parsed);
     }
     toolFindings.sort((a, b) => a.ts - b.ts);
     const coverageCache = new Map<string, ToolCoverageSummary>();
-    // Índice para el "→ LLM directo": categoría → ts del tool-findings más
-    // reciente. Los legacy sin categoría no habilitan ninguna categoría nueva.
     const toolFindingsByCategory: Record<string, number> = {};
     for (const tf of toolFindings) {
       if (!tf.category) continue;
@@ -783,12 +806,8 @@ export const useDiagnosisStore = create<DiagnosisStore>((set, get) => ({
       }
     }
 
-    for (const entry of entries) {
+    for (const entry of allEntries) {
       if (entry.isDirectory) continue;
-      // diagnostico-<categoria>-<ts>.json (corridas nuevas),
-      // diagnostico-<ts>.json legacy sin categoría y plan-<ts>.json legacy
-      // con mode audit (escritos antes del rename). El prefijo plan-<ts> de
-      // roadmap NO entra al historial de diagnósticos.
       let ts: number | null = null;
       let slug: string | null = null;
       const diagParsed = parseDiagnosisFileName(entry.name);
@@ -803,7 +822,7 @@ export const useDiagnosisStore = create<DiagnosisStore>((set, get) => ({
       }
       if (ts == null || !Number.isFinite(ts)) continue;
       const read = await window.termcanvas.fs
-        .readFile(`${dir}/${entry.name}`)
+        .readFile(`${entry.dir}/${entry.name}`)
         .catch(() => null);
       if (!read || !("content" in read)) continue;
       const parsed = parsePlanningPlan(read.content);
@@ -838,7 +857,15 @@ export const useDiagnosisStore = create<DiagnosisStore>((set, get) => ({
       if (best < 0) return undefined;
       const cacheKey = `${slug ?? ""}:${best}`;
       if (coverageCache.has(cacheKey)) return coverageCache.get(cacheKey);
-      const json = await readToolFindings(`${dir}/tool-findings-${slug ? `${slug}-` : ""}${best}.json`);
+      const candidates = [
+        `${base}/tool-findings-${slug ? `${slug}-` : ""}${best}.json`,
+        `${base}/findings/tool-findings-${slug ? `${slug}-` : ""}${best}.json`,
+      ];
+      let json: Record<string, unknown> | null = null;
+      for (const p of candidates) {
+        json = await readToolFindings(p);
+        if (json) break;
+      }
       const summary = json ? computeToolCoverage(json) : undefined;
       if (summary) coverageCache.set(cacheKey, summary);
       return summary;

@@ -62,7 +62,7 @@ function sessionTimeoutFor(categoryId?: string): number {
 }
 
 function toolsOutputDir(repoPath: string): string {
-  return `${repoPath.replace(/[\\/]+$/, "")}/.agents/planning`;
+  return `${repoPath.replace(/[\\/]+$/, "")}/.agents/planning/findings`;
 }
 
 // Nombre de una corrida de herramientas: tool-findings-<categoria>-<ts>.json
@@ -89,27 +89,36 @@ export async function newestToolFindings(
   dir: string,
   categoryId?: string,
 ): Promise<string | null> {
-  try {
-    const entries = await window.termcanvas.fs.listDir(dir);
-    let best: string | null = null;
-    let bestTs = -1;
-    for (const entry of entries) {
-      if (entry.isDirectory) continue;
-      const parsed = parseToolFindingsName(entry.name);
-      if (!parsed) continue;
-      const matchesCategory = categoryId
-        ? parsed.category === categoryId
-        : parsed.category === null;
-      if (!matchesCategory) continue;
-      if (parsed.ts > bestTs) {
-        bestTs = parsed.ts;
-        best = entry.name;
+  const norm = dir.replace(/[\\/]+$/, "");
+  const isFindings = /[\\/]findings$/.test(norm);
+  const base = isFindings ? norm.replace(/[\\/]findings$/, "") : norm;
+  const candidates = isFindings ? [norm, base] : [norm, `${base}/findings`];
+  const uniq = [...new Set(candidates)];
+  let best: string | null = null;
+  let bestTs = -1;
+  let bestDir = dir;
+  for (const d of uniq) {
+    try {
+      const entries = await window.termcanvas.fs.listDir(d);
+      for (const entry of entries) {
+        if (entry.isDirectory) continue;
+        const parsed = parseToolFindingsName(entry.name);
+        if (!parsed) continue;
+        const matchesCategory = categoryId
+          ? parsed.category === categoryId
+          : parsed.category === null;
+        if (!matchesCategory) continue;
+        if (parsed.ts > bestTs) {
+          bestTs = parsed.ts;
+          best = entry.name;
+          bestDir = d;
+        }
       }
+    } catch {
+      continue;
     }
-    return best ? `${dir}/${best}` : null;
-  } catch {
-    return null; // carpeta aún no existe
   }
+  return best ? `${bestDir}/${best}` : null;
 }
 
 export async function launchToolsSession(

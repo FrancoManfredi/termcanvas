@@ -625,8 +625,9 @@ const TAB_LABEL_KEYS: Record<Tab, string> = {
   appearance: "settings_appearance",
   features: "settings_features",
   agent: "settings_agent",
-  integrations: "settings_integrations",
   shortcuts: "settings_shortcuts",
+  mcps: "settings_mcps",
+  integrations: "settings_mcps",
   skills: "settings_skills",
 };
 
@@ -701,8 +702,8 @@ export function SettingsModal({ onClose }: Props) {
       "appearance",
       "features",
       "agent",
-      "integrations",
       "shortcuts",
+      "mcps",
       "skills",
     ];
   }, []);
@@ -1466,13 +1467,6 @@ export function SettingsModal({ onClose }: Props) {
               </section>
             )}
 
-            {tab === "integrations" && (
-              <section>
-                <SectionHeader title={t.settings_integrations ?? "Integrations"} />
-                <McpIntegrationsSection />
-              </section>
-            )}
-
             {tab === "shortcuts" && (
               <section>
                 <SectionHeader title={t.settings_shortcuts} />
@@ -1525,6 +1519,13 @@ export function SettingsModal({ onClose }: Props) {
                     </button>
                   </div>
                 </div>
+              </section>
+            )}
+
+            {(tab === "mcps" || tab === ("integrations" as SettingsTab)) && (
+              <section>
+                <SectionHeader title={(t as unknown as Record<string,string>).settings_mcps ?? "MCPs"} subtitle="Connectors per project — every LLM in this project sees them." />
+                <McpIntegrationsSection />
               </section>
             )}
 

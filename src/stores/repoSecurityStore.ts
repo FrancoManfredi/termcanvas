@@ -135,7 +135,7 @@ export const useRepoSecurityStore = create<RepoSecurityStore>((set, get) => ({
       return;
     }
 
-    const outDir = `${repoPath.replace(/[\\/]+$/, "")}/.agents/planning`;
+    const outDir = `${repoPath.replace(/[\\/]+$/, "")}/.agents/planning/security`;
 
     set({ phase: "running", result: null, resultPath: null, error: null, sessionRuntime: null });
 

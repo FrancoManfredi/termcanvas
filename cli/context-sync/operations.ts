@@ -23,7 +23,6 @@ import {
 } from "./identity.ts";
 import {
   copyFileEnsuring,
-  copyTreeMirror,
   diffTrees,
   listFilesRecursive,
 } from "./fs-utils.ts";
@@ -75,6 +74,143 @@ function agentsDirOf(projectPath: string): string {
 
 function projectSubtree(repoDir: string, slug: RepoSlug): string {
   return path.join(repoDir, "projects", slug.owner, slug.name);
+}
+
+// ─── Sync-config por proyecto (4 switches en Sincronización) ───────────────
+
+export interface SyncConfig {
+  entrevistas: boolean;
+  diagnosticos: boolean;
+  mcp: boolean;
+  skills: boolean;
+}
+
+export function defaultSyncConfig(): SyncConfig {
+  return { entrevistas: true, diagnosticos: true, mcp: true, skills: true };
+}
+
+export function sanitizeSyncConfig(raw: unknown): SyncConfig {
+  const def = defaultSyncConfig();
+  if (!raw || typeof raw !== "object") return def;
+  const r = raw as Record<string, unknown>;
+  return {
+    entrevistas: typeof r.entrevistas === "boolean" ? r.entrevistas : def.entrevistas,
+    diagnosticos: typeof r.diagnosticos === "boolean" ? r.diagnosticos : def.diagnosticos,
+    mcp: typeof r.mcp === "boolean" ? r.mcp : def.mcp,
+    skills: typeof r.skills === "boolean" ? r.skills : def.skills,
+  };
+}
+
+function syncConfigPath(projectPath: string): string {
+  return path.join(projectPath, ".agents", "sync-config.json");
+}
+
+function legacyDiagnosisSkillsShared(projectPath: string): boolean | null {
+  try {
+    const p = path.join(projectPath, ".agents", "diagnosis-skills.json");
+    if (!fs.existsSync(p)) return null;
+    const raw = JSON.parse(fs.readFileSync(p, "utf-8"));
+    if (typeof raw.shared === "boolean") return raw.shared;
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export function readSyncConfig(projectPath: string): SyncConfig {
+  try {
+    const p = syncConfigPath(projectPath);
+    if (!fs.existsSync(p)) {
+      const legacy = legacyDiagnosisSkillsShared(projectPath);
+      if (legacy !== null) {
+        const cfg = { ...defaultSyncConfig(), skills: legacy };
+        return cfg;
+      }
+      return defaultSyncConfig();
+    }
+    const raw = JSON.parse(fs.readFileSync(p, "utf-8"));
+    return sanitizeSyncConfig(raw);
+  } catch {
+    return defaultSyncConfig();
+  }
+}
+
+export function writeSyncConfig(projectPath: string, config: SyncConfig): void {
+  const sanitized = sanitizeSyncConfig(config);
+  const p = syncConfigPath(projectPath);
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify(sanitized, null, 2), "utf-8");
+}
+
+function isKeyEnabledForSync(key: string, cfg: SyncConfig): boolean {
+  if (key === "sync-config.json") return true;
+  if (key === "diagnosis-skills.json") return true;
+  if (key.startsWith(".conflicts/") || key.includes(".conflict-")) return false;
+  if (key === "README.md" || key === ".gitignore") return false;
+  if (key.startsWith("interview/")) return cfg.entrevistas;
+  if (key.startsWith("planning/") || key === "planner-results.json" || key === "activity.json") return cfg.diagnosticos;
+  if (key === "mcp.json") return cfg.mcp;
+  if (key.startsWith("diagnosis-skills/")) return cfg.skills;
+  if (key === "repo-context.md") return false;
+  return true;
+}
+
+function filterKeysBySyncConfig(keys: string[], cfg: SyncConfig): string[] {
+  return keys.filter((k) => isKeyEnabledForSync(k, cfg));
+}
+
+function filteredCopyTreeMirror(
+  srcRoot: string,
+  dstRoot: string,
+  cfg: SyncConfig,
+): { copied: string[]; deleted: string[] } {
+  const copied: string[] = [];
+  const deleted: string[] = [];
+  fs.mkdirSync(dstRoot, { recursive: true });
+  const rawSrcKeys = listFilesRecursive(srcRoot);
+  const srcKeys = new Set(filterKeysBySyncConfig(rawSrcKeys, cfg));
+  // Borrado: solo para keys habilitadas
+  for (const key of listFilesRecursive(dstRoot)) {
+    if (!isKeyEnabledForSync(key, cfg)) continue;
+    if (!srcKeys.has(key)) {
+      const full = path.join(dstRoot, ...key.split("/"));
+      fs.rmSync(full, { force: true });
+      deleted.push(key);
+    }
+  }
+  // prune after deletes
+  // reuse pruneEmptyDirs from fs-utils via direct fs logic (avoid import cycle)
+  const pruneEmptyDirsLocal = (root: string): void => {
+    const visit = (dir: string): boolean => {
+      let entries: fs.Dirent[];
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return false; }
+      let isEmpty = true;
+      for (const e of entries) {
+        if (e.isDirectory()) { if (!visit(path.join(dir, e.name))) isEmpty = false; } else isEmpty = false;
+      }
+      if (isEmpty && dir !== root) { try { fs.rmdirSync(dir); return true; } catch { return false; } }
+      return false;
+    };
+    visit(root);
+  };
+  pruneEmptyDirsLocal(dstRoot);
+  for (const key of srcKeys) {
+    const src = path.join(srcRoot, ...key.split("/"));
+    const dst = path.join(dstRoot, ...key.split("/"));
+    const srcHash = hashFile(src);
+    const dstHash = fs.existsSync(dst) ? hashFile(dst) : null;
+    if (!fs.existsSync(dst) || srcHash !== dstHash) {
+      copyFileEnsuring(src, dst);
+      copied.push(key);
+    }
+  }
+  return { copied, deleted };
+}
+
+function hashFile(p: string): string | null {
+  try {
+    return crypto.createHash("sha256").update(fs.readFileSync(p)).digest("hex");
+  } catch { return null; }
 }
 
 const GITIGNORE_MARKER = /^\s*\.agents\/?\s*$/m;
@@ -155,7 +291,8 @@ export async function contextPush(
     }
   }
 
-  const mirror = copyTreeMirror(agentsDir, subtree);
+  const syncCfg = readSyncConfig(projectPath);
+  const mirror = filteredCopyTreeMirror(agentsDir, subtree, syncCfg);
 
   await deps.run("git", ["add", "-A", "--", "projects/"], {
     cwd: sidecar.repoDir,
@@ -234,15 +371,19 @@ export async function contextPull(
   }
 
   const agentsDir = agentsDirOf(projectPath);
+  const syncCfg = readSyncConfig(projectPath);
   const diff = diffTrees(subtree, agentsDir);
+  const filteredOnlyA = filterKeysBySyncConfig(diff.onlyA, syncCfg);
+  const filteredChanged = filterKeysBySyncConfig(diff.changed, syncCfg);
+  const filteredOnlyB = filterKeysBySyncConfig(diff.onlyB, syncCfg);
 
-  for (const key of diff.onlyA) {
+  for (const key of filteredOnlyA) {
     copyFileEnsuring(path.join(subtree, ...key.split("/")), path.join(agentsDir, ...key.split("/")));
   }
 
   const stamp = conflictStamp(deps.now);
   const conflicts: PullConflict[] = [];
-  for (const key of diff.changed) {
+  for (const key of filteredChanged) {
     const src = path.join(subtree, ...key.split("/"));
     const dst = path.join(agentsDir, ...key.split("/"));
     const incomingPath = `${dst}.conflict-${stamp}`;
@@ -252,9 +393,9 @@ export async function contextPull(
 
   return {
     pulled: true,
-    addedKeys: diff.onlyA,
+    addedKeys: filteredOnlyA,
     conflicts,
-    onlyLocalCount: diff.onlyB.length,
+    onlyLocalCount: filteredOnlyB.length,
   };
 }
 
@@ -268,6 +409,7 @@ export interface StatusResult {
   onlyLocal: string[];
   onlyRemote: string[];
   changed: string[];
+  syncConfig: SyncConfig;
 }
 
 /**
@@ -282,6 +424,7 @@ export async function contextStatus(
   const slug = await resolveProjectIdentity(projectPath, deps.run);
   const home = resolveHome(deps);
   const config: ContextSyncConfig | null = readConfig(home);
+  const syncCfg = readSyncConfig(projectPath);
   const result: StatusResult = {
     initialized: false,
     slug: config?.slug,
@@ -291,6 +434,7 @@ export async function contextStatus(
     onlyLocal: [],
     onlyRemote: [],
     changed: [],
+    syncConfig: syncCfg,
   };
   if (!config) return result;
 
@@ -353,6 +497,7 @@ export async function contextStatus(
   // sha1("blob <len>\0" + contenido).
   const localFiles = new Map<string, string>();
   for (const key of listFilesRecursive(agentsDir)) {
+    if (!isKeyEnabledForSync(key, syncCfg)) continue;
     try {
       const content = fs.readFileSync(path.join(agentsDir, ...key.split("/")));
       const sha = crypto
@@ -365,6 +510,10 @@ export async function contextStatus(
       // Ilegible: se trata como distinto para que el usuario lo vea.
       localFiles.set(key, "unreadable");
     }
+  }
+  // Filtrar remoto también por categoría
+  for (const k of [...remoteFiles.keys()]) {
+    if (!isKeyEnabledForSync(k, syncCfg)) remoteFiles.delete(k);
   }
 
   const onlyLocal: string[] = [];
@@ -390,5 +539,6 @@ export async function contextStatus(
     onlyLocal,
     onlyRemote,
     changed,
+    syncConfig: syncCfg,
   };
 }

@@ -380,14 +380,10 @@ export function planningOutputPath(
   mode: PlannerMode,
   category?: DiagnosisCategoryId,
 ): string {
-  const dir = `${repoPath}/.agents/planning`;
+  const dir = `${repoPath}/.agents/planning/diagnostics`;
   if (mode !== "audit") {
-    // El prefijo plan-<ts> queda reservado para el planning de roadmap.
     return `${dir}/plan-${Date.now()}.json`;
   }
-  // Diagnóstico por categorías: diagnostico-<categoria>-<ts>.json (una
-  // categoría por archivo, nunca se pisan entre categorías). Sin categoría
-  // (defensivo: la app siempre lanza con una) cae al nombre legacy.
   const ts = Date.now();
   return category
     ? `${dir}/${diagnosisFileName(category, ts)}`

@@ -664,6 +664,10 @@ contextBridge.exposeInMainWorld("termcanvas", {
       ipcRenderer.invoke("context-sync:push", repoPath),
     sync: (repoPath: string) =>
       ipcRenderer.invoke("context-sync:sync", repoPath),
+    getConfig: (repoPath: string) =>
+      ipcRenderer.invoke("context-sync:get-config", repoPath),
+    setConfig: (repoPath: string, cfg: unknown) =>
+      ipcRenderer.invoke("context-sync:set-config", repoPath, cfg),
   },
   mcp: {
     status: (projectId: string, projectPath: string) =>
@@ -692,6 +696,10 @@ contextBridge.exposeInMainWorld("termcanvas", {
       ipcRenderer.invoke("mcp:update-custom", projectId, projectPath, id, patch),
     removeCustom: (projectId: string, projectPath: string, id: string) =>
       ipcRenderer.invoke("mcp:remove-custom", projectId, projectPath, id),
+    hideBuiltIn: (projectId: string, projectPath: string, id: string) =>
+      ipcRenderer.invoke("mcp:hide-built-in", projectId, projectPath, id),
+    restoreBuiltIn: (projectId: string, projectPath: string, id: string) =>
+      ipcRenderer.invoke("mcp:restore-built-in", projectId, projectPath, id),
   },
   fs: {
     listDir: (dirPath: string) =>

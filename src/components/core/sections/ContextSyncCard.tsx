@@ -13,6 +13,7 @@ import { useNotificationStore } from "../../../stores/notificationStore";
 import { ConfirmDialog } from "../../ui/ConfirmDialog";
 import type {
   ContextSyncStatus,
+  ContextSyncConfig,
   IpcEnvelope,
 } from "../../../types";
 
@@ -43,21 +44,29 @@ export function ContextSyncCard() {
   const [statusError, setStatusError] = useState<string | null>(null);
   const [lastSyncSummary, setLastSyncSummary] = useState<string | null>(null);
   const [confirmInitOpen, setConfirmInitOpen] = useState(false);
+  const [syncConfig, setSyncConfig] = useState<ContextSyncConfig | null>(null);
+  const [cfgBusy, setCfgBusy] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     if (!repoPath) return;
     setPhase("loading");
     setStatusError(null);
     try {
-      const res: IpcEnvelope<ContextSyncStatus> =
-        await window.termcanvas.contextSync.status(repoPath);
+      const [res, cfgRes] = await Promise.all([
+        window.termcanvas.contextSync.status(repoPath) as Promise<IpcEnvelope<ContextSyncStatus>>,
+        (window.termcanvas.contextSync.getConfig?.(repoPath) as Promise<IpcEnvelope<ContextSyncConfig>> | undefined)?.catch(() => null),
+      ]);
       if (!res.ok) {
         setStatus(null);
         setStatusError(res.error);
         setPhase("ready");
+        if (cfgRes && cfgRes.ok) setSyncConfig(cfgRes.result);
         return;
       }
       setStatus(res.result);
+      // cfgRes tiene prioridad, si no viene usamos status.syncConfig
+      if (cfgRes && cfgRes.ok) setSyncConfig(cfgRes.result);
+      else if (res.result.syncConfig) setSyncConfig(res.result.syncConfig);
       setPhase("ready");
     } catch (err) {
       setStatus(null);
@@ -82,6 +91,25 @@ export function ContextSyncCard() {
     } catch (err) {
       setStatusError(err instanceof Error ? err.message : String(err));
       setPhase("ready");
+    }
+  };
+
+  const toggleCfg = async (key: keyof ContextSyncConfig) => {
+    if (!repoPath || !syncConfig) return;
+    const next = { ...syncConfig, [key]: !syncConfig[key] };
+    setSyncConfig(next);
+    setCfgBusy(key);
+    try {
+      const res = await window.termcanvas.contextSync.setConfig(repoPath, next);
+      if (!res.ok) throw new Error(res.error);
+      setSyncConfig(res.result);
+      void refresh();
+      notify("info", `${key} ${res.result[key] ? "activado" : "pausado"} para sincronización`);
+    } catch (err) {
+      setSyncConfig(syncConfig);
+      notify("error", err instanceof Error ? err.message : String(err));
+    } finally {
+      setCfgBusy(null);
     }
   };
 
@@ -112,15 +140,22 @@ export function ContextSyncCard() {
   const needsInit = status !== null && !status.initialized;
   const hasLocalAgents = statusError === null || !/no hay contexto/.test(statusError);
 
+  const cfgItems: Array<{ key: keyof ContextSyncConfig; label: string; hint: string }> = [
+    { key: "entrevistas", label: "Entrevistas", hint: ".agents/interview" },
+    { key: "diagnosticos", label: "Diagnósticos", hint: ".agents/planning" },
+    { key: "mcp", label: "MCPs", hint: "mcp.json · sin secretos" },
+    { key: "skills", label: "Skills", hint: ".agents/diagnosis-skills" },
+  ];
+
   return (
-    <div className="p-3 rounded-lg border border-[var(--border)] bg-[var(--bg)] space-y-2">
+    <div className="p-3 rounded-lg border border-[var(--border)] bg-[var(--bg)] space-y-3">
       <div className="flex items-center justify-between gap-2">
         <div className="min-w-0 self-center">
           <p className="text-[11px] font-semibold text-[var(--text-primary)]">
             Sincronización entre máquinas
           </p>
           <p className="text-[10px] text-[var(--text-muted)] truncate">
-            Contexto .agents en un repo privado único (termcanvas-context)
+            .agents en repo privado termcanvas-context · elegí qué sincronizar
           </p>
         </div>
         {needsInit ? (
@@ -144,6 +179,34 @@ export function ContextSyncCard() {
           </button>
         )}
       </div>
+
+      {/* Switches: qué se sincroniza */}
+      {syncConfig && (
+        <div className="rounded-lg border border-[var(--border)] bg-[var(--surface)]/40 divide-y divide-[var(--border)]">
+          {cfgItems.map((it) => {
+            const on = syncConfig[it.key];
+            const disabled = cfgBusy !== null || busy;
+            return (
+              <div key={it.key} className="flex items-center justify-between gap-3 px-3 py-2">
+                <div className="min-w-0">
+                  <p className="text-[11px] font-medium text-[var(--text-primary)] leading-none">{it.label}</p>
+                  <p className="text-[10px] font-mono text-[var(--text-muted)] truncate">{it.hint}</p>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={on}
+                  disabled={disabled}
+                  onClick={() => void toggleCfg(it.key)}
+                  className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer items-center rounded-full border transition-colors duration-200 ${on ? "bg-[var(--accent)] border-[var(--accent)]" : "bg-[var(--surface)] border-[var(--border)]"} ${disabled ? "opacity-60 cursor-not-allowed" : ""}`}
+                >
+                  <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform duration-200 ${on ? "translate-x-4" : "translate-x-1"}`} />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {busy && phase === "loading" && (
         <p className="text-[10px] text-[var(--text-muted)]">Consultando estado…</p>

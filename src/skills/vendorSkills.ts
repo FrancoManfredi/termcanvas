@@ -1,9 +1,9 @@
 // Skills "vendor" por categoría: carpetas con SKILL.md que el usuario baja
 // del ecosistema (o escribe a mano) y suelta en
 //
-//   <app>/resources/diagnosis-skills/<category-id>/<nombre>/SKILL.md            (compartido, git-tracked)
-//   <userData>/diagnosis-skills/<category-id>/<nombre>/SKILL.md                 (privado, por instalación)
-//   <repo>/resources/diagnosis-skills/<category-id>/<nombre>/SKILL.md           (per-repo, legacy override)
+//   <repo>/.agents/diagnosis-skills/<category-id>/<nombre>/SKILL.md             (per-repo, sincronizado vía sidecar)
+//   <app>/resources/diagnosis-skills/<category-id>/<nombre>/SKILL.md            (fallback legacy, git-tracked, migrado on-demand)
+//   <userData>/diagnosis-skills/<category-id>/<nombre>/SKILL.md                 (privado, por instalación — deprecado, fallback)
 //
 // Cada corrida de esa categoría las materializa DENTRO del scope efímero
 // (scopedSession) junto a la skill diag-<id>: visibles SOLO durante la
@@ -42,8 +42,10 @@ export interface VendorFsLike {
   >;
 }
 
-const VENDOR_SKILLS_ROOT = "resources/diagnosis-skills";
-// Subcarpeta bajo userData para skills privadas (no compartidas con el equipo).
+const VENDOR_SKILLS_ROOT = ".agents/diagnosis-skills";
+// Roots legacy para migración transparente
+const LEGACY_VENDOR_SKILLS_ROOT = "resources/diagnosis-skills";
+// Subcarpeta bajo userData para skills privadas (no compartidas con el equipo — legacy).
 const VENDOR_SKILLS_PRIVATE_ROOT = "diagnosis-skills";
 
 export function vendorCategoryDir(
@@ -59,9 +61,7 @@ export function vendorCategoryDirForRoot(
   categoryId: string,
 ): string {
   const root = rootDir.replace(/[\\/]+$/, "");
-  // rootDir ya es el root de vendor (ej. appResources/diagnosis-skills o userData/diagnosis-skills)
-  // Si rootDir termina en diagnosis-skills, solo agregamos categoría; si no, agregamos el root.
-  if (root.endsWith(VENDOR_SKILLS_ROOT) || root.endsWith(VENDOR_SKILLS_PRIVATE_ROOT)) {
+  if (root.endsWith(VENDOR_SKILLS_ROOT) || root.endsWith(LEGACY_VENDOR_SKILLS_ROOT) || root.endsWith(VENDOR_SKILLS_PRIVATE_ROOT)) {
     return `${root}/${categoryId}`;
   }
   return `${root}/${VENDOR_SKILLS_ROOT}/${categoryId}`;
@@ -155,6 +155,10 @@ export function normalizeVendorSkill(
  * roto → se omite y la categoría corre sin él. NUNCA lanza ni bloquea el
  * lanzamiento del diagnóstico. Determinista: orden alfabético por carpeta,
  * primer nombre gana ante duplicados.
+ *
+ * Lee primero desde .agents/diagnosis-skills (canónico sincronizado) y hace
+ * fallback a resources/diagnosis-skills (legacy git-tracked) para migración
+ * transparente: si una skill existe en ambos, gana .agents.
  */
 export async function discoverVendorSkills(
   io: VendorFsLike | null | undefined,
@@ -163,30 +167,35 @@ export async function discoverVendorSkills(
 ): Promise<VendorSkill[]> {
   if (!io) return [];
   const baseDir = vendorCategoryDir(repoPath, categoryId);
-  let entries: { name: string; isDirectory: boolean }[];
-  try {
-    entries = await io.listDir(baseDir);
-  } catch {
-    return [];
-  }
+  const legacyBaseDir = `${repoPath.replace(/[\\/]+$/, "")}/${LEGACY_VENDOR_SKILLS_ROOT}/${categoryId}`;
+  const dirs = baseDir === legacyBaseDir ? [baseDir] : [baseDir, legacyBaseDir];
   const seen = new Set<string>();
   const skills: VendorSkill[] = [];
-  for (const entry of [...entries].sort((a, b) =>
-    a.name.localeCompare(b.name),
-  )) {
-    if (!entry.isDirectory) continue;
-    let read: Awaited<ReturnType<VendorFsLike["readFile"]>>;
+  for (const dir of dirs) {
+    let entries: { name: string; isDirectory: boolean }[];
     try {
-      read = await io.readFile(`${baseDir}/${entry.name}/SKILL.md`);
+      entries = await io.listDir(dir);
     } catch {
       continue;
     }
-    if ("error" in read || typeof read.content !== "string") continue;
-    const normalized = normalizeVendorSkill(entry.name, read.content);
-    if (!normalized.ok || seen.has(normalized.skill.name)) continue;
-    seen.add(normalized.skill.name);
-    skills.push(normalized.skill);
+    for (const entry of [...entries].sort((a, b) => a.name.localeCompare(b.name))) {
+      if (!entry.isDirectory) continue;
+      if (seen.has(entry.name)) continue;
+      let read: Awaited<ReturnType<VendorFsLike["readFile"]>>;
+      try {
+        read = await io.readFile(`${dir}/${entry.name}/SKILL.md`);
+      } catch {
+        continue;
+      }
+      if ("error" in read || typeof read.content !== "string") continue;
+      const normalized = normalizeVendorSkill(entry.name, read.content);
+      if (!normalized.ok || seen.has(normalized.skill.name)) continue;
+      seen.add(entry.name);
+      seen.add(normalized.skill.name);
+      skills.push(normalized.skill);
+    }
   }
+  skills.sort((a, b) => a.name.localeCompare(b.name));
   return skills;
 }
 

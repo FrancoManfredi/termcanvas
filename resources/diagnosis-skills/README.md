@@ -10,7 +10,7 @@ válido (`src/types/diagnosisCategories.ts`).
    carpeta con un `SKILL.md` adentro (frontmatter con `name` y
    `description` + cuerpo markdown).
 2. Creá la carpeta de la categoría si no existe (ej. `seguridad/`).
-3. Meté tu skill adentro: `resources/diagnosis-skills/seguridad/mi-skill/SKILL.md`.
+3. Meté tu skill adentro: `.agents/diagnosis-skills/seguridad/mi-skill/SKILL.md` — queda sincronizada vía **Sincronización** (switch Skills). El path legacy `resources/diagnosis-skills/...` sigue leyéndose para migración.
 
 Eso es todo — cero código, cero instalación global.
 
@@ -40,7 +40,7 @@ Eso es todo — cero código, cero instalación global.
 ## Ejemplo
 
 ```
-resources/diagnosis-skills/
+.agents/diagnosis-skills/
   seguridad/
     owasp-checklist/
       SKILL.md          ← descargada de skills.sh, tal cual

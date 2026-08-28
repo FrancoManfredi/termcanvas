@@ -9,6 +9,9 @@ import {
   contextPull,
   contextPush,
   contextStatus,
+  readSyncConfig,
+  writeSyncConfig,
+  type SyncConfig,
   realDeps,
 } from "../cli/context-sync/operations.ts";
 import type { CommandRunner } from "../cli/context-sync/types.ts";
@@ -60,5 +63,14 @@ export function registerContextSyncIpc(runner?: CommandRunner): void {
   );
   ipcMain.handle("context-sync:sync", (_event, repoPath: string) =>
     wrap(() => smartSync(repoPath)),
+  );
+  ipcMain.handle("context-sync:get-config", (_event, repoPath: string) =>
+    wrap(async () => readSyncConfig(repoPath)),
+  );
+  ipcMain.handle("context-sync:set-config", (_event, repoPath: string, cfg: SyncConfig) =>
+    wrap(async () => {
+      writeSyncConfig(repoPath, cfg);
+      return readSyncConfig(repoPath);
+    }),
   );
 }

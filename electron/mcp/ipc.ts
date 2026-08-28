@@ -191,6 +191,28 @@ export function registerMcpIpc(manager: McpManager): void {
     }),
   );
 
+  ipcMain.handle("mcp:hide-built-in", (_event, projectId: string, projectPath: string, id: string) =>
+    wrap(async () => {
+      const res = await manager.hideBuiltIn(projectId, id);
+      if (!res.ok) throw new Error(res.error);
+      const cfg = manager.getRawConfig(projectId);
+      writeMcpToAgentsDir(projectPath, cfg);
+      const { removeTermCanvasMcpFromOpencode } = await import("./opencode-sync.ts");
+      removeTermCanvasMcpFromOpencode(projectPath, id as McpServerId);
+      return res;
+    }),
+  );
+
+  ipcMain.handle("mcp:restore-built-in", (_event, projectId: string, projectPath: string, id: string) =>
+    wrap(async () => {
+      const res = await manager.restoreBuiltIn(projectId, id);
+      if (!res.ok) throw new Error(res.error);
+      const cfg = manager.getRawConfig(projectId);
+      writeMcpToAgentsDir(projectPath, cfg);
+      return res;
+    }),
+  );
+
   // Push de cambios al renderer (cuando cambia estado interno)
   manager.setChangeListener((projectId) => {
     // No podemos broadcast sin window; el renderer hace polling o escucha evento.

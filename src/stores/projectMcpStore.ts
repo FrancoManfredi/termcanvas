@@ -10,6 +10,8 @@ interface ProjectMcpStore {
   setEnabled: (projectId: string, projectPath: string, serverId: McpServerId, enabled: boolean) => Promise<void>;
   setSecret: (projectId: string, projectPath: string, serverId: McpServerId, token: string | null) => Promise<void>;
   connect: (projectId: string, projectPath: string, serverId: McpServerId) => Promise<void>;
+  hideBuiltIn: (projectId: string, projectPath: string, serverId: McpServerId) => Promise<void>;
+  restoreBuiltIn: (projectId: string, projectPath: string, serverId: McpServerId) => Promise<void>;
 }
 
 export const useProjectMcpStore = create<ProjectMcpStore>((set, get) => ({
@@ -95,6 +97,32 @@ export const useProjectMcpStore = create<ProjectMcpStore>((set, get) => ({
     set((s) => ({ loading: { ...s.loading, [projectId]: true } }));
     try {
       const res = await window.termcanvas.mcp.connect(projectId, serverId);
+      if (!res.ok) throw new Error(res.error);
+      await get().refresh(projectId, projectPath);
+    } catch (e) {
+      set((s) => ({ error: { ...s.error, [projectId]: e instanceof Error ? e.message : String(e) } }));
+    } finally {
+      set((s) => ({ loading: { ...s.loading, [projectId]: false } }));
+    }
+  },
+
+  hideBuiltIn: async (projectId, projectPath, serverId) => {
+    set((s) => ({ loading: { ...s.loading, [projectId]: true } }));
+    try {
+      const res = await (window as any).termcanvas.mcp.hideBuiltIn(projectId, projectPath, serverId);
+      if (!res.ok) throw new Error(res.error);
+      await get().refresh(projectId, projectPath);
+    } catch (e) {
+      set((s) => ({ error: { ...s.error, [projectId]: e instanceof Error ? e.message : String(e) } }));
+    } finally {
+      set((s) => ({ loading: { ...s.loading, [projectId]: false } }));
+    }
+  },
+
+  restoreBuiltIn: async (projectId, projectPath, serverId) => {
+    set((s) => ({ loading: { ...s.loading, [projectId]: true } }));
+    try {
+      const res = await (window as any).termcanvas.mcp.restoreBuiltIn(projectId, projectPath, serverId);
       if (!res.ok) throw new Error(res.error);
       await get().refresh(projectId, projectPath);
     } catch (e) {

@@ -5,9 +5,11 @@ type SettingsTab =
   | "appearance"
   | "features"
   | "agent"
-  | "integrations"
   | "shortcuts"
-  | "skills";
+  | "mcps"
+  | "skills"
+  // legacy alias — Integrations was renamed to MCPs, keep it so old callers still work
+  | "integrations";
 
 interface SettingsModalStore {
   open: boolean;
@@ -18,9 +20,14 @@ interface SettingsModalStore {
 
 export type { SettingsTab };
 
+function normalizeTab(tab: SettingsTab): SettingsTab {
+  if (tab === "integrations") return "mcps";
+  return tab;
+}
+
 export const useSettingsModalStore = create<SettingsModalStore>((set) => ({
   open: false,
   initialTab: "general",
-  openSettings: (tab = "general") => set({ open: true, initialTab: tab }),
+  openSettings: (tab = "general") => set({ open: true, initialTab: normalizeTab(tab) }),
   closeSettings: () => set({ open: false }),
 }));

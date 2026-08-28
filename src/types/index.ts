@@ -5,6 +5,7 @@ import type {
   PullResult as ContextSyncPull,
   PushResult as ContextSyncPush,
   StatusResult as ContextSyncStatus,
+  SyncConfig as ContextSyncConfig,
 } from "../../cli/context-sync/operations.ts";
 import type {
   TelemetryEventPage,
@@ -632,6 +633,7 @@ export type {
   ContextSyncPull,
   ContextSyncPush,
   ContextSyncStatus,
+  ContextSyncConfig,
 };
 
 export type { ProjectMcpConfig, ProjectMcpStatus, McpServerState, McpCatalogEntry } from "../../shared/mcp.ts";
@@ -654,6 +656,8 @@ export interface TermCanvasAPI {
     sync: (
       repoPath: string,
     ) => Promise<IpcEnvelope<{ pulled: ContextSyncPull; pushed: ContextSyncPush }>>;
+    getConfig: (repoPath: string) => Promise<IpcEnvelope<ContextSyncConfig>>;
+    setConfig: (repoPath: string, cfg: ContextSyncConfig) => Promise<IpcEnvelope<ContextSyncConfig>>;
   };
   mcp: {
     status: (projectId: string, projectPath: string) => Promise<IpcEnvelope<import("../../shared/mcp.ts").ProjectMcpStatus>>;

@@ -150,6 +150,8 @@ export interface ProjectMcpConfig {
   servers: ProjectMcpServerConfig[];
   /** Definiciones de MCPs personalizados (agregados por el usuario). */
   customServers?: McpCatalogEntry[];
+  /** Built-ins que el usuario ocultó (no se muestran en el catálogo). */
+  hiddenServers?: McpServerId[];
 }
 
 export function defaultProjectMcpConfig(): ProjectMcpConfig {
@@ -161,6 +163,7 @@ export function defaultProjectMcpConfig(): ProjectMcpConfig {
       updatedAt: 0,
     })),
     customServers: [],
+    hiddenServers: [],
   };
 }
 
@@ -210,12 +213,21 @@ export function sanitizeProjectMcpConfig(raw: unknown): ProjectMcpConfig {
   const r = raw as Record<string, unknown>;
   const serversRaw = Array.isArray(r.servers) ? r.servers : [];
   const customRaw = Array.isArray(r.customServers) ? r.customServers : [];
+  const hiddenRaw = Array.isArray(r.hiddenServers) ? r.hiddenServers : [];
   const customServers: McpCatalogEntry[] = [];
   for (const c of customRaw) {
     const s = sanitizeCatalogEntry(c);
     if (s) customServers.push(s);
   }
   const customIds = new Set(customServers.map((c) => c.id));
+  const builtInIds = new Set(MCP_CATALOG.map((e) => e.id));
+  const hiddenServers: McpServerId[] = [];
+  for (const h of hiddenRaw) {
+    if (typeof h !== "string") continue;
+    if (!builtInIds.has(h)) continue;
+    if (hiddenServers.includes(h as McpServerId)) continue;
+    hiddenServers.push(h as McpServerId);
+  }
   const allowedIds = new Set([...MCP_CATALOG.map((e) => e.id), ...customIds]);
 
   const servers: ProjectMcpServerConfig[] = [];
@@ -224,6 +236,8 @@ export function sanitizeProjectMcpConfig(raw: unknown): ProjectMcpConfig {
     const ss = s as Record<string, unknown>;
     if (typeof ss.id !== "string" || !allowedIds.has(ss.id)) continue;
     if (typeof ss.enabled !== "boolean") continue;
+    // Si está oculto, no lo restauramos en servers (queda escondido)
+    if (hiddenServers.includes(ss.id as McpServerId)) continue;
     servers.push({
       id: ss.id as McpServerId,
       enabled: ss.enabled,
@@ -233,8 +247,9 @@ export function sanitizeProjectMcpConfig(raw: unknown): ProjectMcpConfig {
       updatedAt: typeof ss.updatedAt === "number" ? ss.updatedAt : 0,
     });
   }
-  // Asegurar que todos los ids del catálogo existan (migración aditiva)
+  // Asegurar que todos los ids del catálogo existan (migración aditiva) salvo ocultos
   for (const cat of MCP_CATALOG) {
+    if (hiddenServers.includes(cat.id as McpServerId)) continue;
     if (!servers.find((s) => s.id === cat.id)) {
       servers.push({ id: cat.id, enabled: false, updatedAt: 0 });
     }
@@ -244,7 +259,7 @@ export function sanitizeProjectMcpConfig(raw: unknown): ProjectMcpConfig {
       servers.push({ id: custom.id, enabled: false, updatedAt: 0 });
     }
   }
-  return { version: 1, servers, customServers };
+  return { version: 1, servers, customServers, hiddenServers };
 }
 
 /** Estado por servidor expuesto al renderer (config + conexión + auth). */

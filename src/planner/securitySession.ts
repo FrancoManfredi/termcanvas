@@ -44,24 +44,33 @@ const POLL_INTERVAL_MS = 1000;
 const SESSION_TIMEOUT_MS = 3 * 60 * 1000;
 
 export async function newestSecurityResult(dir: string): Promise<string | null> {
-  try {
-    const entries = await window.termcanvas.fs.listDir(dir);
-    let best: string | null = null;
-    let bestTs = -1;
-    for (const entry of entries) {
-      if (entry.isDirectory) continue;
-      const match = /^security-result-(\d+)\.json$/.exec(entry.name);
-      if (!match) continue;
-      const ts = Number(match[1]);
-      if (Number.isFinite(ts) && ts > bestTs) {
-        bestTs = ts;
-        best = entry.name;
+  const norm = dir.replace(/[\\/]+$/, "");
+  const isSec = /[\\/]security$/.test(norm);
+  const base = isSec ? norm.replace(/[\\/]security$/, "") : norm;
+  const candidates = isSec ? [norm, base] : [norm, `${base}/security`];
+  const uniq = [...new Set(candidates)];
+  let best: string | null = null;
+  let bestTs = -1;
+  let bestDir = dir;
+  for (const d of uniq) {
+    try {
+      const entries = await window.termcanvas.fs.listDir(d);
+      for (const entry of entries) {
+        if (entry.isDirectory) continue;
+        const match = /^security-result-(\d+)\.json$/.exec(entry.name);
+        if (!match) continue;
+        const ts = Number(match[1]);
+        if (Number.isFinite(ts) && ts > bestTs) {
+          bestTs = ts;
+          best = entry.name;
+          bestDir = d;
+        }
       }
+    } catch {
+      continue;
     }
-    return best ? `${dir}/${best}` : null;
-  } catch {
-    return null;
   }
+  return best ? `${bestDir}/${best}` : null;
 }
 
 export async function launchSecuritySession(

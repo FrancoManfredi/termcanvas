@@ -99,10 +99,14 @@ export class McpManager {
 
   private getAllCatalogForProject(projectId: string): McpCatalogEntry[] {
     const cfg = this.getConfig(projectId);
-    // Merge built-in + custom
+    const hidden = new Set(cfg.hiddenServers ?? []);
+    // Merge built-in + custom, filtrando ocultos
     const custom = cfg.customServers ?? [];
     const map = new Map<string, McpCatalogEntry>();
-    for (const e of MCP_CATALOG) map.set(e.id, e);
+    for (const e of MCP_CATALOG) {
+      if (hidden.has(e.id as McpServerId)) continue;
+      map.set(e.id, e);
+    }
     for (const e of custom) map.set(e.id, e);
     return [...map.values()];
   }
@@ -541,6 +545,39 @@ export class McpManager {
     this.errors.delete(key);
     this.toolCounts.delete(key);
     try { await this.vault.setSecret(projectId, id as McpServerId, null); } catch {}
+    this.onChange?.(projectId);
+    return { ok: true };
+  }
+
+  async hideBuiltIn(projectId: string, id: string): Promise<{ ok: boolean; error?: string }> {
+    const { isBuiltInMcpId } = await import("../../shared/mcp.ts");
+    if (!isBuiltInMcpId(id)) return { ok: false, error: `Solo se pueden ocultar MCPs del catálogo` };
+    const cfg = this.getConfig(projectId);
+    cfg.hiddenServers = cfg.hiddenServers ?? [];
+    if (cfg.hiddenServers.includes(id as McpServerId)) return { ok: true };
+    cfg.hiddenServers.push(id as McpServerId);
+    // Quitar de servers para que no reaparezca como disabled
+    cfg.servers = cfg.servers.filter((s) => s.id !== id);
+    const key = mapKey(projectId, id as McpServerId);
+    this.statuses.delete(key);
+    this.errors.delete(key);
+    this.toolCounts.delete(key);
+    try { await this.vault.setSecret(projectId, id as McpServerId, null); } catch {}
+    this.onChange?.(projectId);
+    return { ok: true };
+  }
+
+  async restoreBuiltIn(projectId: string, id: string): Promise<{ ok: boolean; error?: string }> {
+    const cfg = this.getConfig(projectId);
+    const hidden = cfg.hiddenServers ?? [];
+    const idx = hidden.indexOf(id as McpServerId);
+    if (idx === -1) return { ok: false, error: `MCP no está oculto: ${id}` };
+    hidden.splice(idx, 1);
+    cfg.hiddenServers = hidden;
+    if (!cfg.servers.find((s) => s.id === id)) {
+      cfg.servers.push({ id: id as McpServerId, enabled: false, updatedAt: Date.now() });
+    }
+    this.statuses.set(mapKey(projectId, id as McpServerId), "disconnected");
     this.onChange?.(projectId);
     return { ok: true };
   }

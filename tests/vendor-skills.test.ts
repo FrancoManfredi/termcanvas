@@ -44,11 +44,11 @@ const REPO = "C:/repo";
 test("vendorCategoryDir: arma la ruta y tolera slashes finales", () => {
   assert.equal(
     vendorCategoryDir("C:/repo/", "seguridad"),
-    "C:/repo/resources/diagnosis-skills/seguridad",
+    "C:/repo/.agents/diagnosis-skills/seguridad",
   );
   assert.equal(
     vendorCategoryDir("C:\\repo\\", "seguridad"),
-    "C:\\repo/resources/diagnosis-skills/seguridad",
+    "C:\\repo/.agents/diagnosis-skills/seguridad",
   );
 });
 
