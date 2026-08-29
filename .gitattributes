@@ -1,3 +1,4 @@
 # Los forks públicos de GitHub no permiten subir objetos LFS: los PNG se
 # guardan como blobs normales de git (override del filtro lfs global).
 *.png -filter -diff -merge -text
+figma/Crear[[:space:]]panel[[:space:]]lateral[[:space:]]interactivo/** !text !filter !merge !diff
