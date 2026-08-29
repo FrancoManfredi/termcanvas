@@ -153,6 +153,12 @@ contextBridge.exposeInMainWorld("termcanvas", {
         filePath: string;
         confidence: "medium" | "weak";
       } | null>,
+    findCodebuddy: (cwd: string, startedAt?: string) =>
+      ipcRenderer.invoke("session:find-codebuddy", cwd, startedAt) as Promise<{
+        sessionId: string;
+        filePath: string;
+        confidence: "medium" | "weak";
+      } | null>,
     watch: (type: string, sessionId: string, cwd: string) =>
       ipcRenderer.invoke("session:watch", type, sessionId, cwd) as Promise<{
         ok: boolean;
@@ -768,26 +774,33 @@ contextBridge.exposeInMainWorld("termcanvas", {
     },
   },
   models: {
-    listAvailable: (force?: boolean) =>
-      ipcRenderer.invoke("models:list-available", force) as Promise<
+    listAvailable: (force?: boolean, cli?: string) =>
+      ipcRenderer.invoke("models:list-available", force, cli) as Promise<
         CatalogResult<ModelCatalog>
       >,
     validatePhase: (
       phaseId: PhaseId,
       overrides?: Partial<Record<PhaseId, ModelRef>> | null,
+      cli?: string,
     ) =>
       ipcRenderer.invoke(
         "models:validate-phase",
         phaseId,
         overrides,
+        cli,
       ) as Promise<CatalogResult<PhaseValidation>>,
-    invalidate: () =>
-      ipcRenderer.invoke("models:invalidate") as Promise<
+    invalidate: (cli?: string) =>
+      ipcRenderer.invoke("models:invalidate", cli) as Promise<
         CatalogResult<{ invalidated: true }>
       >,
     setPhaseOverrides: (overrides: Partial<Record<PhaseId, ModelRef>> | null) =>
       ipcRenderer.invoke(
         "models:set-phase-overrides",
+        overrides,
+      ) as Promise<CatalogResult<{ applied: number }>>,
+    setPhaseClis: (overrides: Partial<Record<PhaseId, string | null>> | null) =>
+      ipcRenderer.invoke(
+        "models:set-phase-clis",
         overrides,
       ) as Promise<CatalogResult<{ applied: number }>>,
   },

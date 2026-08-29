@@ -33,6 +33,7 @@ import {
   CLAUDE_PRE_TOOL_USE_FALLBACK_MS,
   CODEX_PRE_TOOL_USE_AWAITING_INPUT_MS,
   DEFAULT_CLAUDE_STALL_MS,
+  DEFAULT_CODEBUDDY_STALL_MS,
   DEFAULT_CODEX_STALL_MS,
   DEFAULT_KIMI_STALL_MS,
   DEFAULT_PROCESS_POLL_INTERVAL_MS,
@@ -212,13 +213,14 @@ function shouldMarkClaudeNotificationAwaitingInput(
 
 function toSessionProvider(
   provider: TelemetryProvider,
-): "claude" | "codex" | "kimi" | "wuu" | "opencode" | null {
+): "claude" | "codex" | "kimi" | "wuu" | "opencode" | "codebuddy" | null {
   if (
     provider === "claude" ||
     provider === "codex" ||
     provider === "kimi" ||
     provider === "wuu" ||
-    provider === "opencode"
+    provider === "opencode" ||
+    provider === "codebuddy"
   ) {
     return provider;
   }
@@ -237,7 +239,9 @@ export function deriveTelemetryStatus(
       ? DEFAULT_CODEX_STALL_MS
       : snapshot.provider === "kimi"
         ? DEFAULT_KIMI_STALL_MS
-        : DEFAULT_CLAUDE_STALL_MS);
+        : snapshot.provider === "codebuddy"
+          ? DEFAULT_CODEBUDDY_STALL_MS
+          : DEFAULT_CLAUDE_STALL_MS);
 
   if (!snapshot.pty_alive) {
     return "exited";
@@ -350,7 +354,8 @@ export function deriveTelemetryStatus(
     snapshot.provider === "codex" ||
     snapshot.provider === "kimi" ||
     snapshot.provider === "wuu" ||
-    snapshot.provider === "opencode";
+    snapshot.provider === "opencode" ||
+    snapshot.provider === "codebuddy";
   const hasAgentActivity =
     !!snapshot.last_session_event_at ||
     snapshot.active_tool_calls > 0 ||
@@ -623,7 +628,8 @@ export class TelemetryService {
           input.provider === "codex" ||
           input.provider === "kimi" ||
           input.provider === "wuu" ||
-          input.provider === "opencode");
+          input.provider === "opencode" ||
+          input.provider === "codebuddy");
       state.snapshot.provider = input.provider;
       if (upgradingToAgent) {
         // Between terminal creation (provider "unknown") and CLI
@@ -1081,8 +1087,10 @@ export class TelemetryService {
     const isAgentTerminal =
       provider === "claude" ||
       provider === "codex" ||
+      provider === "kimi" ||
       provider === "wuu" ||
-      provider === "opencode";
+      provider === "opencode" ||
+      provider === "codebuddy";
     const hasActiveHookTool = state.pendingPreToolUse;
     const hasActiveSessionTool =
       state.activeToolCalls.size > 0 ||

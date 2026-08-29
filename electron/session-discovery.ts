@@ -823,6 +823,238 @@ export function findBestKimiSession(
   };
 }
 
+function toCodebuddyProjectKey(cwd: string): string {
+  let key = cwd;
+  if (/^[A-Za-z]:[\\/]/.test(key)) {
+    key = key[0].toLowerCase() + key.slice(1);
+  }
+  key = key.replace(/:/g, "").replace(/[/\\]/g, "-");
+  return key;
+}
+
+function cwdEqual(a: string, b: string): boolean {
+  const norm = (s: string): string => s.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  return norm(a) === norm(b);
+}
+
+function readCodebuddySessionMeta(filePath: string): {
+  sessionId: string | null;
+  cwd: string | null;
+  timestampMs: number | null;
+} {
+  try {
+    const raw = fs.readFileSync(filePath, "utf-8");
+    const lines = raw.split("\n");
+    const limit = Math.min(lines.length, 20);
+    for (let i = 0; i < limit; i++) {
+      const line = lines[i]?.trim();
+      if (!line) continue;
+      try {
+        const parsed = JSON.parse(line) as Record<string, unknown>;
+        if (typeof parsed.cwd === "string") {
+          let timestampMs: number | null = null;
+          const ts = parsed.timestamp;
+          if (typeof ts === "number" && Number.isFinite(ts)) {
+            timestampMs = ts;
+          } else if (typeof ts === "string") {
+            const t = new Date(ts).getTime();
+            if (Number.isFinite(t)) timestampMs = t;
+          }
+          return {
+            sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : null,
+            cwd: parsed.cwd,
+            timestampMs,
+          };
+        }
+      } catch {
+        continue;
+      }
+    }
+    for (let i = 0; i < limit; i++) {
+      const line = lines[i]?.trim();
+      if (!line) continue;
+      try {
+        const parsed = JSON.parse(line) as Record<string, unknown>;
+        if (typeof parsed.sessionId === "string") {
+          let timestampMs: number | null = null;
+          const ts = parsed.timestamp;
+          if (typeof ts === "number" && Number.isFinite(ts)) timestampMs = ts;
+          else if (typeof ts === "string") {
+            const t = new Date(ts).getTime();
+            if (Number.isFinite(t)) timestampMs = t;
+          }
+          return {
+            sessionId: parsed.sessionId,
+            cwd: typeof parsed.cwd === "string" ? parsed.cwd : null,
+            timestampMs,
+          };
+        }
+      } catch {
+        continue;
+      }
+    }
+  } catch {}
+  return { sessionId: null, cwd: null, timestampMs: null };
+}
+
+function collectCodebuddyCandidates(
+  cwd: string,
+  homeDir: string,
+): Array<{ sessionId: string; filePath: string; anchorMs: number }> {
+  const result: Array<{ sessionId: string; filePath: string; anchorMs: number }> = [];
+  const seen = new Set<string>();
+  const projectKey = toCodebuddyProjectKey(cwd);
+  const projectDir = path.join(homeDir, ".codebuddy", "projects", projectKey);
+  const sessionsDir = path.join(homeDir, ".codebuddy", "sessions");
+
+  const scanDir = (dir: string, isProjectDirForCwd: boolean): void => {
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith(".jsonl")) continue;
+      if (entry === "storage.json") continue;
+      const filePath = path.join(dir, entry);
+      if (seen.has(filePath)) continue;
+      seen.add(filePath);
+      try {
+        const stat = fs.statSync(filePath);
+        if (!stat.isFile()) continue;
+        if (stat.size === 0) continue;
+        const meta = readCodebuddySessionMeta(filePath);
+        const fileCwd = meta.cwd;
+        let isMatch = false;
+        if (isProjectDirForCwd) {
+          if (fileCwd === null) {
+            isMatch = true;
+          } else {
+            isMatch = cwdEqual(fileCwd, cwd);
+          }
+        } else {
+          if (fileCwd === null) {
+            isMatch = false;
+          } else {
+            isMatch = cwdEqual(fileCwd, cwd);
+          }
+        }
+        if (!isMatch) continue;
+        const sessionId = meta.sessionId ?? path.basename(entry, ".jsonl");
+        if (!sessionId) continue;
+        const anchorMs = stat.mtimeMs;
+        result.push({ sessionId, filePath, anchorMs });
+      } catch {
+        continue;
+      }
+    }
+  };
+
+  scanDir(projectDir, true);
+
+  const projSessions = path.join(projectDir, "sessions");
+  if (fs.existsSync(projSessions)) {
+    scanDir(projSessions, true);
+    try {
+      const subdirs = fs.readdirSync(projSessions);
+      for (const sub of subdirs) {
+        const subPath = path.join(projSessions, sub);
+        try {
+          if (fs.statSync(subPath).isDirectory()) scanDir(subPath, true);
+        } catch {}
+      }
+    } catch {}
+  }
+
+  if (fs.existsSync(sessionsDir)) {
+    scanDir(sessionsDir, false);
+    try {
+      const subdirs = fs.readdirSync(sessionsDir);
+      for (const sub of subdirs) {
+        const subPath = path.join(sessionsDir, sub);
+        try {
+          if (fs.statSync(subPath).isDirectory()) {
+            scanDir(subPath, false);
+            try {
+              const sub2 = fs.readdirSync(subPath);
+              for (const s2 of sub2) {
+                const p2 = path.join(subPath, s2);
+                try {
+                  if (fs.statSync(p2).isDirectory()) scanDir(p2, false);
+                } catch {}
+              }
+            } catch {}
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+
+  if (result.length === 0) {
+    const projectsRoot = path.join(homeDir, ".codebuddy", "projects");
+    try {
+      const projectDirs = fs.readdirSync(projectsRoot);
+      for (const dir of projectDirs) {
+        const full = path.join(projectsRoot, dir);
+        if (full === projectDir) continue;
+        try {
+          if (!fs.statSync(full).isDirectory()) continue;
+        } catch {
+          continue;
+        }
+        scanDir(full, false);
+        const sess = path.join(full, "sessions");
+        if (fs.existsSync(sess)) {
+          scanDir(sess, false);
+          try {
+            const subs = fs.readdirSync(sess);
+            for (const s of subs) {
+              const sp = path.join(sess, s);
+              try {
+                if (fs.statSync(sp).isDirectory()) scanDir(sp, false);
+              } catch {}
+            }
+          } catch {}
+        }
+      }
+    } catch {}
+  }
+
+  return result.sort((a, b) => b.anchorMs - a.anchorMs).slice(0, 32);
+}
+
+export function findBestCodebuddySession(
+  cwd: string,
+  startedAt?: string,
+  homeDir = os.homedir(),
+): FoundSession | null {
+  const startedMs = startedAt ? new Date(startedAt).getTime() : NaN;
+  const lowerBoundMs = Number.isFinite(startedMs) ? startedMs - 1_000 : Number.NEGATIVE_INFINITY;
+
+  const candidates = collectCodebuddyCandidates(cwd, homeDir).filter(
+    (entry) => entry.anchorMs >= lowerBoundMs,
+  );
+
+  if (candidates.length === 0) return null;
+
+  if (Number.isFinite(startedMs)) {
+    candidates.sort((a, b) => {
+      const distA = Math.abs(a.anchorMs - startedMs);
+      const distB = Math.abs(b.anchorMs - startedMs);
+      if (distA !== distB) return distA - distB;
+      return b.anchorMs - a.anchorMs;
+    });
+  }
+
+  const best = candidates[0];
+  return {
+    sessionId: best.sessionId,
+    filePath: best.filePath,
+    confidence: Number.isFinite(startedMs) ? "medium" : "weak",
+  };
+}
+
 export { findBestOpenCodeSession };
 
 const CHUNK_BYTES = 64 * 1024;

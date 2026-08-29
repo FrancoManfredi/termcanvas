@@ -273,9 +273,14 @@ export function registerXtermWheelFallback(
 
 function isSessionTelemetryProvider(
   type: TerminalType,
-): type is "claude" | "codex" | "kimi" | "wuu" | "opencode" {
+): type is "claude" | "codex" | "kimi" | "wuu" | "opencode" | "codebuddy" {
   return (
-    type === "claude" || type === "codex" || type === "kimi" || type === "wuu" || type === "opencode"
+    type === "claude" ||
+    type === "codex" ||
+    type === "kimi" ||
+    type === "wuu" ||
+    type === "opencode" ||
+    type === "codebuddy"
   );
 }
 
@@ -442,17 +447,21 @@ async function pollSessionId(
       ? SESSION_POLL_MAX_ATTEMPTS.codex
       : cliType === "opencode"
         ? SESSION_POLL_MAX_ATTEMPTS.opencode
-      : cliType === "wuu"
-        ? SESSION_POLL_MAX_ATTEMPTS.wuu
-        : SESSION_POLL_MAX_ATTEMPTS.default;
+        : cliType === "wuu"
+          ? SESSION_POLL_MAX_ATTEMPTS.wuu
+          : cliType === "codebuddy"
+            ? SESSION_POLL_MAX_ATTEMPTS.codebuddy
+            : SESSION_POLL_MAX_ATTEMPTS.default;
   const interval =
     cliType === "codex"
       ? SESSION_POLL_INTERVAL_MS.codex
       : cliType === "opencode"
         ? SESSION_POLL_INTERVAL_MS.opencode
-      : cliType === "wuu"
-        ? SESSION_POLL_INTERVAL_MS.wuu
-        : SESSION_POLL_INTERVAL_MS.default;
+        : cliType === "wuu"
+          ? SESSION_POLL_INTERVAL_MS.wuu
+          : cliType === "codebuddy"
+            ? SESSION_POLL_INTERVAL_MS.codebuddy
+            : SESSION_POLL_INTERVAL_MS.default;
 
   let cachedPid: number | null = detectedCliPid ?? null;
   if (!cachedPid && cliType === "claude") {
@@ -521,6 +530,19 @@ async function pollSessionId(
         worktreePath,
         startedAt,
       );
+      sessionId = candidate?.sessionId ?? null;
+      confidence = candidate?.confidence;
+    } else if (cliType === "codebuddy") {
+      const candidate = await (window.termcanvas.session as unknown as {
+        findCodebuddy: (
+          cwd: string,
+          startedAt?: string,
+        ) => Promise<{
+          sessionId: string;
+          filePath: string;
+          confidence: "medium" | "weak";
+        } | null>;
+      }).findCodebuddy(worktreePath, startedAt);
       sessionId = candidate?.sessionId ?? null;
       confidence = candidate?.confidence;
     }
@@ -1693,12 +1715,14 @@ async function spawnPty(
 
   if (launch) {
     // Pin de modelo por fase: los metadatos del terminal viajan solo en las
-    // sesiones de planificación/diagnóstico que lo fijaron. La TUI de
-    // opencode acepta -m/--model pero NO --variant (es flag exclusiva de
-    // `run`): el pin de variante solo viaja en las ramas headless.
-    const isOpencode = runtime.meta.terminal.type === "opencode";
-    const pinModel = isOpencode ? runtime.meta.terminal.modelOverride : undefined;
-    const pinVariant = isOpencode ? runtime.meta.terminal.variantOverride : undefined;
+    // sesiones de planificación/diagnóstico que lo fijaron. Generalizado para
+    // cualquier CLI (codebuddy, claude, codex, etc.) — cada CLI define sus
+    // flags en TERMINAL_CONFIG / CLI_LAUNCH. Si el CLI soporta --model/--variant,
+    // el pin viaja; si no, se dropea silenciosamente (no rompe).
+    // La TUI acepta --model pero NO --variant para algunos CLIs (ej. opencode TUI).
+    const pinModel = runtime.meta.terminal.modelOverride;
+    const pinVariant = runtime.meta.terminal.variantOverride;
+    // Use per-CLI model flag if available, otherwise generic --model
     const tuiPinArgs = pinModel ? ["--model", pinModel] : [];
     const runPinArgs = [
       ...tuiPinArgs,

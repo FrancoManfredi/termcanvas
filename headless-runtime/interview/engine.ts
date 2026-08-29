@@ -26,7 +26,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { createOpencodeClient, createOpencodeServer, type OpencodeClient } from "@opencode-ai/sdk/v2";
+import type { OpencodeClient } from "@opencode-ai/sdk/v2";
 import {
   AsrReviewVerdictSchema,
   GapCheckResultSchema,
@@ -43,18 +43,24 @@ import {
   type SynthesisResult,
 } from "./schema.ts";
 
-// Routing de modelo por fase: tipos/defaults del contrato compartido y el
+// Routing de modelo y CLI por fase: tipos/defaults del contrato compartido y el
 // catálogo de disponibilidad (server efímero propio, cache TTL) para el gate.
 import {
+  DEFAULT_PHASE_CLIS,
   DEFAULT_PHASE_MODELS,
+  resolveCliForPhase,
   type PhaseActivityEvent,
+  type PhaseCli,
   type PhaseId,
 } from "../../shared/phaseModels.ts";
 import {
   fetchModelCatalog,
   validatePhaseAgainstCatalog,
 } from "../../electron/model-catalog.ts";
-import { encontrarPuertoServidor } from "./puerto-libre.ts";
+import { getInterviewHarness as getHarness, closeAllHarnesses, __setTestHarness } from "./harness/index.ts";
+import { opencodeHarness, setTestClient as setOpencodeTestClient, ensureClient as ensureOpencodeClient, closeInterviewServer as closeOpencodeServer } from "./harness/opencode.ts";
+import type { HarnessInterviewAdapter } from "../../shared/neutral/interview.ts";
+import type { CliCatalogSource } from "../../shared/modelCatalog.ts";
 
 export { QUESTION_SCHEMA, GAP_CHECK_SCHEMA, ASR_REVIEW_SCHEMA, SYNTHESIS_SCHEMA, QuestionOutputSchema, GapCheckResultSchema, AsrReviewVerdictSchema, SynthesisSchema } from "./schema.ts";
 export type { QuestionOutput, GapCheckResult, GapRecord, AsrReviewVerdict, SynthesisResult } from "./schema.ts";
@@ -122,12 +128,23 @@ export class ModelUnavailableError extends Error {
 }
 
 let phaseModelOverrides: Partial<Record<PhaseId, ModelRef>> = {};
+let phaseCliOverrides: Partial<Record<PhaseId, PhaseCli>> = {};
 
 /** Inyecta los overrides resueltos en preferences (null limpia todo). */
 export function setPhaseModelOverrides(
   overrides: Partial<Record<PhaseId, ModelRef>> | null | undefined,
 ): void {
   phaseModelOverrides = overrides ? { ...overrides } : {};
+}
+
+export function setPhaseCliOverrides(
+  overrides: Partial<Record<PhaseId, PhaseCli>> | null | undefined,
+): void {
+  phaseCliOverrides = overrides ? { ...overrides } : {};
+}
+
+export function phaseCliRef(phaseId: PhaseId): PhaseCli {
+  return resolveCliForPhase(phaseId, phaseCliOverrides);
 }
 
 // ─── Feed de actividad ("IA actuando") ───────────────────────────────────
@@ -198,7 +215,11 @@ export function phaseModelRef(phaseId: PhaseId): ModelRef {
 // propio camino de reintentos/mensajes accionables.
 async function gateModeloDeFase(phaseId: PhaseId, ref: ModelRef): Promise<void> {
   try {
-    const catalog = await fetchModelCatalog();
+    const cli = phaseCliRef(phaseId);
+    // Si la fase tiene CLI = null (default global), el gate valida contra opencode
+    // (comportamiento histórico). Si la fase eligió otro CLI, se valida contra su catálogo.
+    const catalogSource = (cli ?? "opencode") as import("../../shared/modelCatalog.ts").CliCatalogSource;
+    const catalog = await fetchModelCatalog(false, catalogSource);
     const veredicto = validatePhaseAgainstCatalog(phaseId, catalog, {
       [phaseId]: ref,
     });
@@ -379,70 +400,56 @@ export type TurnResult =
     }
   | { done: true; reason: "all_topics_closed"; usage: ModelUsage };
 
-// ─── Server + cliente (singleton del proceso) ───────────────────────────
+// ─── Server + cliente — DELEGADO A HARNESS NEUTRO ───────────────────
+// Si opencode muere mañana, el próximo harness entra sin tocar este archivo.
+// El engine resuelve el harness vía phaseCliRef(phaseId) → getInterviewHarness.
+// Para backward compat con tests que usan setTestClient(OpencodeClient mock),
+// seguimos exponiendo esa función pero delega al opencode harness.
 
-interface ServerHandle {
-  url: string;
-  close: () => void;
+function getHarnessForPhase(phaseId?: PhaseId): HarnessInterviewAdapter {
+  const cli = (phaseId ? phaseCliRef(phaseId) : null) as CliCatalogSource | null;
+  const harnessId = (cli ?? "opencode") as CliCatalogSource;
+  try {
+    return getHarness(harnessId);
+  } catch {
+    return getHarness("opencode");
+  }
 }
 
-let runningServer: ServerHandle | null = null;
-let runningClient: OpencodeClient | null = null;
-
-// Seam de TESTS: inyecta un cliente mockeado (sin server real). Pasar null
-// restaura el comportamiento normal (y cierra el server real si estaba
-// levantado). NO es parte del contrato de runtime de la app.
+// Seam de TESTS: inyecta un cliente mockeado de opencode (sin server real).
+// Para tests de harness neutro usar __setTestHarness en su lugar.
 export function setTestClient(client: OpencodeClient | null): void {
-  if (runningServer) {
-    runningServer.close();
-    runningServer = null;
-  }
-  runningClient = client;
+  setOpencodeTestClient(client);
 }
 
-// Exportada para los módulos hermanos del motor (ej: brief.ts).
+// Nuevo seam neutro para tests que quieran mockear cualquier harness
+export function __setTestHarnessForInterview(harnessId: CliCatalogSource, harness: HarnessInterviewAdapter | null): void {
+  __setTestHarness(harnessId, harness);
+}
+
+export function __resetTestHarnessesForInterview(): void {
+  // Limpia overrides de todos los harnesses (usado en beforeEach)
+  __setTestHarness("opencode", null);
+  __setTestHarness("codebuddy", null);
+  __setTestHarness("claude", null);
+  __setTestHarness("codex", null);
+  __setTestHarness("gemini", null);
+  __setTestHarness("kimi", null);
+  __setTestHarness("wuu", null);
+}
+
+// Exportada para módulos hermanos (brief/requirements/tactics) — hoy siempre opencode.
+// Queda como alias para no romper imports, pero el engine ya no la usa directo.
 export async function ensureClient(): Promise<OpencodeClient> {
-  if (!runningClient) {
-    let lastError: unknown;
-    for (let attempt = 0; attempt < SERVER_START_RETRIES; attempt++) {
-      try {
-        // Puerto VALIDADO (bind real) y fuera del rango dinámico de Windows:
-        // el sorteo crudo [20000,65000) pisa a veces puertos efímeros en uso
-        // por conexiones salientes y `opencode serve` crashea con un
-        // críptico "Server exited with code 1 — Unexpected error/ServeError"
-        // (bun no reporta EADDRINUSE legible). Reproducido 1/8 veces.
-        const port = await encontrarPuertoServidor(20000, 45000);
-        const server = await createOpencodeServer({
-          hostname: "127.0.0.1",
-          port,
-          timeout: SERVER_START_TIMEOUT_MS,
-        });
-        runningServer = server;
-        runningClient = createOpencodeClient({ baseUrl: server.url });
-        return runningClient;
-      } catch (err) {
-        lastError = err;
-        console.warn(
-          `[interview] no se pudo arrancar el server de opencode (intento ${attempt + 1}/${SERVER_START_RETRIES}): ${err instanceof Error ? err.message : String(err)}`,
-        );
-        // Backoff: los fallos transitorios (puerto recién liberado, estado
-        // del SO) no se repiten necesariamente al instante.
-        if (attempt < SERVER_START_RETRIES - 1) {
-          await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
-        }
-      }
-    }
-    throw lastError instanceof Error ? lastError : new Error("No se pudo arrancar el server de opencode.");
-  }
-  return runningClient;
+  return ensureOpencodeClient();
 }
 
 export function closeInterviewServer(): void {
-  if (runningServer) {
-    runningServer.close();
-    runningServer = null;
-  }
-  runningClient = null;
+  closeOpencodeServer();
+  // También cierra otros harnesses por si alguno levanta recursos
+  try {
+    closeAllHarnesses();
+  } catch {}
 }
 
 // ─── Ledger (persistencia) ───────────────────────────────────────────────
@@ -821,16 +828,22 @@ export async function startInterview(
   projectPath: string,
 ): Promise<{ ledgerPath: string; ledger: InterviewLedger }> {
   ensureInterviewLayout(projectPath);
-  const client = await ensureClient();
-  const sesion = await client.session.create({
-    title: "Entrevista de requerimientos",
-    directory: projectPath,
-  });
-  if (sesion.error || !sesion.data) {
-    throw new Error(`No se pudo crear la sesión: ${JSON.stringify(sesion.error)}`);
+  // Usa el harness de la fase requirements (default opencode) para crear la sesión.
+  // Si el usuario eligió codebuddy para requirements, la sesión será de codebuddy.
+  const harness = getHarnessForPhase("requirements");
+  await harness.ensureReady();
+  let sesion: { id: string };
+  try {
+    sesion = await harness.createSession({
+      projectPath,
+      title: "Entrevista de requerimientos",
+    });
+  } catch (err) {
+    throw new Error(`No se pudo crear la sesión (${harness.harnessId}): ${err instanceof Error ? err.message : String(err)}`);
   }
+  if (!sesion?.id) throw new Error(`No se pudo crear la sesión (${harness.harnessId}): id vacío`);
   const ledger: InterviewLedger = {
-    session_id: sesion.data.id,
+    session_id: sesion.id,
     project_path: projectPath,
     topics: [...TOPICS],
     answers: [],
@@ -1019,7 +1032,6 @@ export async function promptStructuredInner<T>(
   model?: ModelRef,
   phaseId?: PhaseId,
 ): Promise<{ data: T; usage: ModelUsage }> {
-  const client = await ensureClient();
   // Resolución ÚNICA acá adentro: si llega phaseId sin model explícito, el
   // modelo efectivo sale de phaseModelRef (override del usuario > default).
   // Ningún call site puede "olvidarse" del routing por descuido.
@@ -1029,9 +1041,12 @@ export async function promptStructuredInner<T>(
   const variant = efectivo?.variant !== undefined ? efectivo.variant : DEFAULT_MODEL_VARIANT;
   // Gate temprano con el ref RESUELTO (override del usuario o default):
   // un modelo inexistente falla acá, no a mitad de la entrevista.
+  // Ahora respeta el harness elegido por fase (opencode vs codebuddy).
   if (phaseId) {
     await gateModeloDeFase(phaseId, { providerID, modelID, ...(variant ? { variant } : {}) });
   }
+  const harness = getHarnessForPhase(phaseId);
+  await harness.ensureReady();
   let lastRaw: unknown;
   // Marca si ya se recreó la sesión por overflow de contexto en ESTA llamada:
   // el reintento tras recrear es ÚNICO (si vuelve a desbordar, es un error
@@ -1056,92 +1071,93 @@ export async function promptStructuredInner<T>(
   };
   try {
     ensureNotCancelled();
-  for (let attempt = 0; attempt <= MAX_STRUCTURED_RETRIES; attempt++) {
-    ensureNotCancelled();
-    const respuesta = await client.session.prompt(
-      {
-        sessionID: ledger.session_id,
-        model: { providerID, modelID },
-        // Solo se manda variant cuando hay una configurada: cualquier
-        // variante de thinking rompía json_schema en deepseek-v4-flash con
-        // servidores viejos (ver comentario de configuración arriba).
-        ...(variant ? { variant } : {}),
-        tools: {},
-        parts: [{ type: "text", text }],
-        format: { type: "json_schema", schema },
-      },
-      { signal: callSignal },
-    );
-    ensureNotCancelled();
-    if (respuesta.error || !respuesta.data) {
-      // Error de API/timeout: transitorio — se reintenta igual que un
-      // output fuera de contrato. Solo se rinde tras agotar los intentos.
-      const serializado = JSON.stringify(respuesta.error);
-      const esSesionPerdida = serializado.includes("Session not found");
-      if (esSesionPerdida) {
-        // La sesión original ya no existe (expiró o se limpió al cerrar el
-        // server). La re-síntesis NO la necesita: el contexto completo viaja
-        // en el prompt. Se crea una sesión nueva como canal para el modelo.
-        const sesion = await client.session.create({
-          title: `${context} (sesión recreada)`,
-          directory: ledger.project_path,
+    for (let attempt = 0; attempt <= MAX_STRUCTURED_RETRIES; attempt++) {
+      ensureNotCancelled();
+      try {
+        const result = await harness.promptStructuredRaw({
+          sessionId: ledger.session_id,
+          projectPath: ledger.project_path,
+          model: { providerID, modelID, ...(variant ? { variant } : {}) },
+          text,
+          schema,
+          timeoutMs,
+          signal: callSignal,
         });
-        if (sesion.error || !sesion.data) {
-          throw new Error(`${context}: no se pudo recrear la sesión: ${JSON.stringify(sesion.error)}`);
+        ensureNotCancelled();
+        modelCallCountValue += 1;
+        const raw = result.raw as T;
+        if (validate(raw)) {
+          return {
+            data: raw,
+            usage: result.usage,
+          };
         }
-        ledger.session_id = sesion.data.id;
-        console.warn(`[interview] ${context}: sesión original no encontrada; recreada como ${sesion.data.id}`);
-        continue;
-      }
-      if (attempt < MAX_STRUCTURED_RETRIES) {
-        console.warn(`[interview] ${context}: error de llamada (${serializado}); reintentando`);
-        continue;
-      }
-      throw new Error(`${context} falló: ${serializado}`);
-    }
-    const info = respuesta.data.info;
-    if (info.error?.name === "StructuredOutputError") {
-      throw new Error(`${context}: el modelo no cumplió el schema (${info.error.name})`);
-    }
-    if (info.error) {
-      // Overflow de contexto: el contexto pedido excede la ventana del
-      // modelo. Regla del dueño: si se excede, se prueba UNA vez en una
-      // sesión nueva (el historial acumulado puede ser el que desborda; el
-      // contexto de la llamada ya viaja inline). Si re-desborda, es
-      // determinista y se falla (no los 3 reintentos de 6 min).
-      if (!recreadaPorOverflow && esOverflowDeContexto(info.error)) {
-        const sesion = await client.session.create({
-          title: `${context} (sesión nueva por overflow)`,
-          directory: ledger.project_path,
-        });
-        if (sesion.error || !sesion.data) {
-          throw new Error(`${context}: no se pudo crear sesión por overflow: ${JSON.stringify(sesion.error)}`);
-        }
-        ledger.session_id = sesion.data.id;
-        recreadaPorOverflow = true;
+        lastRaw = raw;
+        structuredRetryCountValue += 1;
         console.warn(
-          `[interview] ${context}: overflow de contexto (${info.error.name}); reintento único en sesión nueva ${sesion.data.id}`,
+          `[interview] ${context}: output fuera de contrato (intento ${attempt + 1}/${MAX_STRUCTURED_RETRIES + 1}, harness=${harness.harnessId}); reintentando`,
         );
         continue;
+      } catch (err) {
+        ensureNotCancelled();
+        // Session not found → recrear sesión vía harness (opencode: server, codebuddy: id efímero)
+        const serializado = err instanceof Error ? err.message : String(err);
+        const esSesionPerdida = serializado.includes("Session not found");
+        if (esSesionPerdida) {
+          try {
+            const sesion = await harness.createSession({
+              projectPath: ledger.project_path,
+              title: `${context} (sesión recreada)`,
+            });
+            ledger.session_id = sesion.id;
+            console.warn(`[interview] ${context}: sesión original no encontrada; recreada como ${sesion.id} (harness=${harness.harnessId})`);
+          } catch (createErr) {
+            throw new Error(`${context}: no se pudo recrear la sesión: ${String(createErr)}`);
+          }
+          continue;
+        }
+        // Distingue error del modelo (info.error) vs error transitorio (respuesta.error / red)
+        const infoError = (err as Record<string, unknown>)?._infoError as
+          | { name?: string; message?: string }
+          | undefined;
+        const hasInfoError = !!infoError;
+        const errName = infoError?.name ?? (err as Error).name;
+        const errMsg = infoError?.message ?? serializado;
+        // Overflow — reintento único en sesión nueva (solo para infoError)
+        if (hasInfoError && !recreadaPorOverflow && esOverflowDeContexto({ name: errName, message: errMsg })) {
+          try {
+            const sesion = await harness.createSession({
+              projectPath: ledger.project_path,
+              title: `${context} (sesión nueva por overflow)`,
+            });
+            ledger.session_id = sesion.id;
+            recreadaPorOverflow = true;
+            console.warn(
+              `[interview] ${context}: overflow de contexto (${errName}); reintento único en sesión nueva ${sesion.id} (harness=${harness.harnessId})`,
+            );
+          } catch (createErr) {
+            throw new Error(`${context}: no se pudo crear sesión por overflow: ${String(createErr)}`);
+          }
+          continue;
+        }
+        if (hasInfoError) {
+          // Error del modelo (info.error) — falla directo, no se reintenta como transitorio
+          // (salvo overflow ya manejado arriba). Incluye StructuredOutputError y APIError.
+          if (errName === "StructuredOutputError") {
+            throw new Error(`${context}: el modelo no cumplió el schema (${errName})`);
+          }
+          throw new Error(`${context}: error del modelo (${errName ?? "Unknown"})`);
+        }
+        if (err instanceof InterviewCancelledError || errName === "InterviewCancelledError") throw err;
+        // Transitorio (respuesta.error, timeout, red) — reintentar si quedan intentos
+        if (attempt < MAX_STRUCTURED_RETRIES) {
+          console.warn(`[interview] ${context}: error de llamada (${serializado}); reintentando (harness=${harness.harnessId})`);
+          continue;
+        }
+        throw new Error(`${context} falló: ${serializado}`);
       }
-      throw new Error(`${context}: error del modelo (${info.error.name})`);
     }
-    modelCallCountValue += 1;
-    const raw = info.structured as T;
-    if (validate(raw)) {
-      return {
-        data: raw,
-        usage: {
-          input_tokens: info.tokens?.input ?? 0,
-          output_tokens: info.tokens?.output ?? 0,
-        },
-      };
-    }
-    lastRaw = raw;
-    structuredRetryCountValue += 1;
-    console.warn(`[interview] ${context}: output fuera de contrato (intento ${attempt + 1}/${MAX_STRUCTURED_RETRIES + 1}); reintentando`);
-  }
-  throw new Error(`${context} fuera de contrato tras ${MAX_STRUCTURED_RETRIES + 1} intentos: ${JSON.stringify(lastRaw)}`);
+    throw new Error(`${context} fuera de contrato tras ${MAX_STRUCTURED_RETRIES + 1} intentos: ${JSON.stringify(lastRaw)}`);
   } finally {
     activeBySession.delete(ledger.session_id);
     abortedSessions.delete(ledger.session_id);
@@ -1741,15 +1757,15 @@ export async function synthesizeInterview(
 
 // Limpieza best-effort al terminar la entrevista: borra la sesión (si el
 // server ya no está, la deja huérfana) y apaga el server dedicado.
+// Ahora harness-agnóstica: intenta borrar vía el harness que creó la sesión
+// y vía opencode como fallback; el close cierra todos los harnesses.
 export async function cleanupInterview(ledger: InterviewLedger): Promise<void> {
-  if (runningClient && ledger.session_id) {
-    try {
-      const result = await runningClient.session.delete({ sessionID: ledger.session_id });
-      if (result.error) {
-        // Sesión huérfana tolerable.
-      }
-    } catch {
-      // Idem: el cleanup nunca bloquea el flujo.
+  if (ledger.session_id) {
+    // Best-effort: intenta borrar vía todos los harnesses conocidos (id efímero de codebuddy es no-op)
+    for (const hid of ["opencode", "codebuddy"] as CliCatalogSource[]) {
+      try {
+        await getHarness(hid).deleteSession(ledger.session_id);
+      } catch {}
     }
   }
   closeInterviewServer();

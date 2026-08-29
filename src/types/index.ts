@@ -125,6 +125,7 @@ export type TerminalType =
   | "kimi"
   | "gemini"
   | "opencode"
+  | "codebuddy"
   | "wuu"
   | "lazygit"
   | "tmux";
@@ -743,6 +744,14 @@ export interface TermCanvasAPI {
       confidence: "medium" | "weak";
     } | null>;
     findOpenCode: (
+      cwd: string,
+      startedAt?: string,
+    ) => Promise<{
+      sessionId: string;
+      filePath: string;
+      confidence: "medium" | "weak";
+    } | null>;
+    findCodebuddy: (
       cwd: string,
       startedAt?: string,
     ) => Promise<{

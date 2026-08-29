@@ -181,6 +181,7 @@ import { isSafeExternalUrl } from "./external-url";
 import { WorkspaceSavePathRegistry } from "./workspace-save-path";
 import {
   findBestClaudeSession,
+  findBestCodebuddySession,
   findBestCodexSession,
   findBestKimiSession,
   findBestOpenCodeSession,
@@ -199,6 +200,8 @@ import { McpVault } from "./mcp/vault.ts";
 import { registerMcpIpc } from "./mcp/ipc.ts";
 import { writeMcpToAgentsDir } from "./mcp/sync.ts";
 import { getMcpEnvForCwd, registerMcpProject } from "./mcp/project-env.ts";
+import { syncGlobalMcpToCodebuddy } from "./mcp/adapters/codebuddy.ts";
+import { syncGlobalSkillsToCodebuddy } from "./skills/codebuddy-sync.ts";
 import type { RenderDiagnosticEventInput } from "../shared/render-diagnostics";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -533,6 +536,7 @@ function createWindow() {
   });
 
   mainWindow.once("ready-to-show", () => {
+    mainWindow?.maximize();
     mainWindow?.show();
   });
   mainWindow.on("closed", () => {
@@ -682,6 +686,13 @@ function setupIpc() {
         `terminal:create shell=${options.shell ?? "(default)"} args=${JSON.stringify(options.args)} cwd=${options.cwd}`,
       );
       const cliDir = getCliDir();
+      // Asegurar que CodeBuddy vea skills globales en cualquier proyecto donde se abra una shell
+      // (ej. education-games). Es idempotente y no bloquea — si falla, la shell igual abre.
+      try {
+        const { syncGlobalSkillsToCodebuddy } = await import("./skills/codebuddy-sync.ts");
+        // Fire-and-forget, no await para no demorar la creación del PTY
+        void syncGlobalSkillsToCodebuddy(options.cwd).catch(() => {});
+      } catch {}
       // Inyectar tokens MCP del proyecto como env vars para que `opencode` los vea vía {env:VAR}
       // Los tokens quedan en vault cifrado, no en opencode.json del proyecto.
       let mcpEnv: Record<string, string> = {};
@@ -867,6 +878,13 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
     "session:find-opencode",
     (_event, cwd: string, startedAt?: string) => {
       return findBestOpenCodeSession(cwd, startedAt);
+    },
+  );
+
+  ipcMain.handle(
+    "session:find-codebuddy",
+    (_event, cwd: string, startedAt?: string) => {
+      return findBestCodebuddySession(cwd, startedAt);
     },
   );
 
@@ -1796,7 +1814,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
       _event,
       input: {
         terminalId: string;
-        provider: "claude" | "codex" | "kimi" | "wuu" | "opencode";
+        provider: "claude" | "codex" | "kimi" | "wuu" | "opencode" | "codebuddy";
         sessionId: string;
         cwd: string;
         confidence: "strong" | "medium" | "weak";
@@ -1847,7 +1865,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
       input: {
         terminalId: string;
         worktreePath?: string;
-        provider?: "claude" | "codex" | "wuu" | "unknown";
+        provider?: "claude" | "codex" | "kimi" | "wuu" | "opencode" | "codebuddy" | "unknown";
         ptyId?: number | null;
         shellPid?: number | null;
       },
@@ -5824,6 +5842,31 @@ app.whenReady().then(async () => {
   setupIpc();
   registerContextSyncIpc();
   registerMcpIpc(mcpManager);
+  // Sync global opencode MCPs (context7, engram, codegraph) to CodeBuddy user scope
+  // and global skills to .codebuddy/skills so `codebuddy` in any shell sees them
+  // without per-project toggle. Run after window creation and non-blocking.
+  setTimeout(() => {
+    try {
+      syncGlobalMcpToCodebuddy();
+    } catch (err) {
+      console.warn("[mcp:codebuddy] global sync on startup failed:", err);
+    }
+    const defaultProject = "C:\\Users\\Estudiante UCU\\OneDrive\\Escritorio\\termcanvas";
+    void syncGlobalSkillsToCodebuddy(defaultProject).catch(() => {});
+    void syncGlobalSkillsToCodebuddy(process.cwd()).catch(() => {});
+    try {
+      const statePath = path.join(TERMCANVAS_DIR, "state.json");
+      if (fs.existsSync(statePath)) {
+        const raw = JSON.parse(fs.readFileSync(statePath, "utf-8"));
+        const projects = Array.isArray(raw) ? raw : (raw as { projects?: unknown[] }).projects ?? [];
+        for (const p of projects as Array<{ path?: unknown }>) {
+          if (p?.path && typeof p.path === "string") {
+            void syncGlobalSkillsToCodebuddy(p.path).catch(() => {});
+          }
+        }
+      }
+    } catch {}
+  }, 1000);
   registerInterviewIpc();
   // Catálogo de modelos + routing por fase (models:*).
   registerModelCatalogIpc();

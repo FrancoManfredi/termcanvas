@@ -30,6 +30,8 @@ const CLI_PATTERNS: [RegExp, string][] = [
   [/\bkimi\b/, "kimi"],
   [/\bgemini\b/, "gemini"],
   [/\bopencode\b/, "opencode"],
+  [/\bcodebuddy\b/, "codebuddy"],
+  [/\bcbc\b/, "codebuddy"],
   [/\bwuu\b/, "wuu"],
   [/\blazygit\b/, "lazygit"],
   [/\btmux\b/, "tmux"],
@@ -38,6 +40,8 @@ const CLI_PATTERNS: [RegExp, string][] = [
 const AUTO_APPROVE_PATTERNS: Record<string, RegExp> = {
   claude: /--dangerously-skip-permissions/,
   codex: /--dangerously-bypass-approvals-and-sandbox/,
+  opencode: /--auto/,
+  codebuddy: /--dangerously-skip-permissions/,
 };
 
 // Wrappers that delegate to another binary — check subsequent args for the real CLI

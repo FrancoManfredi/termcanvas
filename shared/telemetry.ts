@@ -1,4 +1,4 @@
-export type TelemetryProvider = "claude" | "codex" | "kimi" | "wuu" | "opencode" | "unknown";
+export type TelemetryProvider = "claude" | "codex" | "kimi" | "wuu" | "opencode" | "codebuddy" | "unknown";
 
 export type TelemetrySource =
   | "session"

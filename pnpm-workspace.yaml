@@ -4,6 +4,7 @@ packages:
   - eval
   - hydra
   - website
+  - web
 
 allowBuilds:
   electron: true

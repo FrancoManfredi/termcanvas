@@ -98,26 +98,54 @@ function StatusBadge({ status, detail, t }: { status: "checking" | "available" |
 export function PhaseModelsSection() {
   const t = useT();
   const phaseModels = usePreferencesStore((s) => s.phaseModels);
+  const phaseClis = usePreferencesStore((s) => s.phaseClis);
   const phaseCliTui = usePreferencesStore((s) => s.phaseCliTui);
   const setPhaseModel = usePreferencesStore((s) => s.setPhaseModel);
-  const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
+  const setPhaseCli = usePreferencesStore((s) => s.setPhaseCli);
+  const [catalogs, setCatalogs] = useState<Record<string, ModelCatalog | null>>({});
   const [loadError, setLoadError] = useState<string | null>(null);
   const [validations, setValidations] = useState<
     Partial<Record<PhaseId, PhaseValidation>>
   >({});
+  const [dryRun, setDryRun] = useState<Partial<Record<PhaseId, string>>>({});
 
   const api =
     typeof window !== "undefined" ? window.termcanvas?.models : undefined;
 
+  // Fetch catalogs per CLI that is actually selected in any phase (plus opencode default).
+  // This ensures the ModelCombobox shows the correct provider/model for the selected CLI.
   useEffect(() => {
     if (!api?.listAvailable) return;
+    const needed = new Set<string>(["opencode"]);
+    for (const cli of Object.values(phaseClis)) {
+      if (cli) needed.add(cli);
+    }
+    // Also include all PHASE_CLIS that are known to be installed? No, only needed + opencode to avoid hammering.
+    // For the playground, we fetch on demand when user changes CLI, but for now fetch needed.
     let cancelled = false;
     void (async () => {
       try {
-        const res: CatalogResult<ModelCatalog> = await api.listAvailable!(true);
+        const results = await Promise.all(
+          Array.from(needed).map(async (cli) => {
+            const res: CatalogResult<ModelCatalog> = await (api.listAvailable as unknown as (force: boolean, cli: string) => Promise<CatalogResult<ModelCatalog>>)(true, cli);
+            return [cli, res.ok ? res.data : null] as const;
+          }),
+        );
         if (cancelled) return;
-        if (res.ok) setCatalog(res.data);
-        else setLoadError(res.error);
+        const next: Record<string, ModelCatalog | null> = {};
+        for (const [cli, data] of results) {
+          next[cli] = data;
+          if (data === null) {
+            // Try to get error for that CLI
+          }
+        }
+        setCatalogs(next);
+        // Also set legacy single catalog for header meta row (use opencode)
+        const opencodeData = next["opencode"];
+        if (!opencodeData) {
+          const first = results.find(([, d]) => d !== null)?.[1];
+          if (first) setCatalogs((prev) => ({ ...prev, opencode: first }));
+        }
       } catch (err) {
         if (!cancelled) {
           setLoadError(err instanceof Error ? err.message : String(err));
@@ -127,10 +155,9 @@ export function PhaseModelsSection() {
     return () => {
       cancelled = true;
     };
-  }, [api]);
+  }, [api, phaseClis]);
 
-  // Validación por fase contra el server real (debounce corto para no
-  // golpear el catálogo en cada cambio).
+  // Validación por fase contra el server real, ahora con CLI por fase
   useEffect(() => {
     if (!api?.validatePhase) return;
     let cancelled = false;
@@ -138,7 +165,8 @@ export function PhaseModelsSection() {
       void (async () => {
         const entries = await Promise.all(
           PHASE_IDS.map(async (phaseId) => {
-            const res = await api.validatePhase!(phaseId, phaseModels);
+            const cli = phaseClis[phaseId] ?? undefined;
+            const res = await (api.validatePhase as unknown as (phaseId: PhaseId, overrides: unknown, cli?: string) => Promise<CatalogResult<PhaseValidation>>)(phaseId, phaseModels, cli);
             return [phaseId, res.ok ? res.data : undefined] as const;
           }),
         );
@@ -155,9 +183,34 @@ export function PhaseModelsSection() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [api, phaseModels]);
+  }, [api, phaseModels, phaseClis]);
 
-  const groups = useMemo(() => buildPhaseModelGroups(catalog), [catalog]);
+  const getGroupsForPhase = (phaseId: PhaseId) => {
+    const cli = phaseClis[phaseId] ?? "opencode";
+    const catalog = catalogs[cli] ?? catalogs["opencode"] ?? null;
+    return buildPhaseModelGroups(catalog);
+  };
+
+  const handleProbar = (phaseId: PhaseId) => {
+    const cli = phaseClis[phaseId] ?? "opencode";
+    const effective = resolveModelForPhase(phaseId, phaseModels);
+    const headless = !phaseCliTui;
+    let cmd: string;
+    if (cli === "codebuddy") {
+      // CodeBuddy headless es `codebuddy -p --output-format json --model <id> "<prompt>"` (id sin prefijo, ej. fast-model)
+      // No es provider/model como opencode — ver error 400: [codebuddy/fast-model] service info not found
+      const modelFlag = effective ? `--model ${effective.modelID}` : "";
+      cmd = headless
+        ? `codebuddy -p --output-format json ${modelFlag} "<prompt>"`
+        : `codebuddy ${modelFlag} "<prompt>"`;
+    } else if (cli === "opencode") {
+      const modelFlag = effective ? `--model ${effective.providerID}/${effective.modelID}${effective.variant ? ` --variant ${effective.variant}` : ""}` : "";
+      cmd = headless ? `opencode run ${modelFlag} --auto "<prompt>"` : `opencode --prompt "<prompt>" ${modelFlag} --auto`;
+    } else {
+      cmd = `${cli} ${effective ? `--model ${effective.providerID}/${effective.modelID}` : ""} ${headless ? "(headless)" : "(TUI)"} "<prompt>"`;
+    }
+    setDryRun((prev) => ({ ...prev, [phaseId]: cmd.trim() }));
+  };
 
   const configuredCount = Object.keys(phaseModels).length;
 
@@ -202,13 +255,19 @@ export function PhaseModelsSection() {
             className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-[var(--border)] bg-[var(--bg)] px-3 py-1.5 text-[12px] font-medium leading-none text-[var(--text-secondary)] hover:border-[var(--border-hover)] hover:bg-[var(--surface)] hover:text-[var(--text-primary)] active:scale-[0.96] disabled:opacity-50 transition-[transform,background-color,border-color,color] duration-150 will-change-transform"
             style={{ transitionTimingFunction: "cubic-bezier(0.2, 0, 0, 1)" }}
             onClick={() => {
-              setCatalog(null);
+              if (!api?.listAvailable) return;
+              setCatalogs({});
               setLoadError(null);
-              void api?.invalidate?.();
-              void api?.listAvailable?.(true).then((res) => {
-                if (res.ok) setCatalog(res.data);
-                else setLoadError(res.error);
-              });
+              void api.invalidate?.();
+              const needed = new Set<string>(["opencode", ...Object.values(phaseClis).filter(Boolean) as string[]]);
+              void Promise.all(
+                Array.from(needed).map((cli) =>
+                  (api.listAvailable as unknown as (force: boolean, cli: string) => Promise<CatalogResult<ModelCatalog>>)(true, cli).then((res) => {
+                    if (res.ok) setCatalogs((prev) => ({ ...prev, [cli]: res.data }));
+                    else setLoadError(res.error);
+                  }),
+                ),
+              );
             }}
           >
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
@@ -218,14 +277,24 @@ export function PhaseModelsSection() {
             {t.phase_models_refresh}
           </button>
         </div>
-        {/* Subtle meta row: catalog size hint */}
-        {catalog && (
-          <div className="flex items-center gap-2 text-[11px] leading-none text-[var(--text-muted)]">
-            <span className="h-1 w-1 rounded-full bg-[var(--text-faint)]" />
-            {catalog.providers.length} providers · {catalog.providers.reduce((n, p) => n + p.models.length, 0)} models
-            <span className="hidden sm:inline">— type to filter in each phase</span>
-          </div>
-        )}
+        {/* Subtle meta row: per-CLI catalog size hint */}
+        {(() => {
+          const opencodeCatalog = catalogs["opencode"];
+          if (!opencodeCatalog) return null;
+          return (
+            <div className="flex items-center gap-2 text-[11px] leading-none text-[var(--text-muted)]">
+              <span className="h-1 w-1 rounded-full bg-[var(--text-faint)]" />
+              {opencodeCatalog.providers.length} providers · {opencodeCatalog.providers.reduce((n, p) => n + p.models.length, 0)} models (opencode)
+              {Object.keys(catalogs).length > 1 && (
+                <span className="hidden sm:inline">
+                  {" "}
+                  — {Object.keys(catalogs).filter((k) => k !== "opencode" && catalogs[k]).length} other CLI catalogs loaded
+                </span>
+              )}
+              <span className="hidden sm:inline">— type to filter in each phase</span>
+            </div>
+          );
+        })()}
       </div>
 
       {/* CLI mode — compact control card */}
@@ -324,11 +393,36 @@ export function PhaseModelsSection() {
                 <StatusBadge status={st.key} detail={st.detail} t={t} />
               </div>
 
-              {/* Bottom row: combobox + reset — subtle surface lift. Rounded bottom keeps outer 14px corners crisp without needing overflow-hidden on the card (which would clip the dropdown). */}
-              <div className="flex items-center gap-2 border-t border-[var(--border)] bg-[var(--surface)]/30 px-3 py-3 rounded-b-[14px]">
+              {/* CLI per phase — new in Fase B, default null = opencode global default. Resilient: if CLI not in PATH, model picker will show "no auth" but card won't break. */}
+              <div className="flex items-center gap-2 border-t border-[var(--border)] bg-[var(--surface)]/20 px-3 py-2">
+                <span className="text-[11px] font-medium text-[var(--text-faint)]">CLI</span>
+                <select
+                  value={phaseClis[phaseId] ?? ""}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setPhaseCli(phaseId, v ? (v as unknown as import("../../../shared/phaseModels").PhaseCli) : null);
+                  }}
+                  className="flex-1 min-w-0 rounded-md border border-[var(--border)] bg-[var(--bg)] px-2 py-1 text-[12px] text-[var(--text-primary)] focus:outline-none focus:border-[var(--accent)]"
+                  title="CLI que ejecuta esta fase (null = default global, hoy opencode)"
+                >
+                  <option value="">opencode (default)</option>
+                  <option value="codebuddy">codebuddy</option>
+                  <option value="claude">claude</option>
+                  <option value="codex">codex</option>
+                  <option value="gemini">gemini</option>
+                  <option value="kimi">kimi</option>
+                  <option value="wuu">wuu</option>
+                </select>
+                <span className="text-[10px] text-[var(--text-faint)]">
+                  {phaseClis[phaseId] ? phaseClis[phaseId] : "default"}
+                </span>
+              </div>
+
+              {/* Bottom row: combobox + reset — now per CLI, so codebuddy shows its 17 models, not opencode's. */}
+              <div className="flex items-center gap-2 border-t border-[var(--border)] bg-[var(--surface)]/30 px-3 py-3">
                 <ModelCombobox
                   value={override ? formatModelRef(override) : ""}
-                  groups={groups}
+                  groups={getGroupsForPhase(phaseId)}
                   defaultLabel={t.phase_model_default}
                   onChange={(value) => {
                     setPhaseModel(
@@ -351,6 +445,32 @@ export function PhaseModelsSection() {
                   <span className="hidden sm:inline-flex shrink-0 items-center rounded-full bg-[var(--surface)] border border-[var(--border)] px-2.5 py-1 text-[11px] leading-none text-[var(--text-faint)]">
                     Default
                   </span>
+                )}
+              </div>
+
+              {/* Probar dry-run — muestra el comando exacto que se ejecutaría sin gastar créditos ni tocar el modelo */}
+              <div className="flex items-center gap-2 border-t border-[var(--border)] bg-[var(--surface)]/20 px-3 py-2 rounded-b-[14px]">
+                <button
+                  type="button"
+                  onClick={() => handleProbar(phaseId)}
+                  className="inline-flex items-center gap-1.5 rounded-full bg-[var(--accent)]/10 border border-[var(--accent)]/20 px-3 py-1 text-[11px] font-medium leading-none text-[var(--accent)] hover:bg-[var(--accent)]/15 active:scale-[0.96] transition-colors"
+                  title="Muestra el comando exacto sin ejecutarlo ni gastar créditos"
+                >
+                  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><path d="M14 2v6h6" /><path d="M9 15l2 2 4-4" /></svg>
+                  Probar
+                </button>
+                <span className="flex-1 truncate font-mono text-[11px] leading-none text-[var(--text-muted)]" title={dryRun[phaseId] ?? ""}>
+                  {dryRun[phaseId] ?? "— click Probar para ver el comando"}
+                </span>
+                {dryRun[phaseId] && (
+                  <button
+                    type="button"
+                    onClick={() => navigator.clipboard.writeText(dryRun[phaseId]!)}
+                    className="shrink-0 text-[10px] text-[var(--text-faint)] hover:text-[var(--text-primary)]"
+                    title="Copiar comando"
+                  >
+                    copiar
+                  </button>
                 )}
               </div>
             </div>

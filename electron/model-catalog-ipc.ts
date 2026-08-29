@@ -20,15 +20,24 @@ import {
   type ModelCatalog,
   type PhaseValidation,
 } from "./model-catalog.ts";
-import { setPhaseModelOverrides } from "../headless-runtime/interview/engine.ts";
-import { isModelRef, isPhaseId, sanitizePhaseModels, type ModelRef, type PhaseId } from "../shared/phaseModels";
+import { setPhaseCliOverrides, setPhaseModelOverrides } from "../headless-runtime/interview/engine.ts";
+import { PHASE_CLIS, isModelRef, isPhaseId, sanitizePhaseClis, sanitizePhaseModels, type ModelRef, type PhaseId } from "../shared/phaseModels";
+import type { CliCatalogSource } from "../shared/modelCatalog";
+
+function sanitizeCliParam(cli: unknown): CliCatalogSource {
+  if (typeof cli === "string" && (PHASE_CLIS as readonly string[]).includes(cli)) {
+    return cli as CliCatalogSource;
+  }
+  return "opencode";
+}
 
 export function registerModelCatalogIpc(): void {
   ipcMain.handle(
     "models:list-available",
-    async (_event, force?: boolean): Promise<CatalogResult<ModelCatalog>> => {
+    async (_event, force?: boolean, cli?: string): Promise<CatalogResult<ModelCatalog>> => {
       try {
-        return { ok: true, data: await fetchModelCatalog(force === true) };
+        const source = sanitizeCliParam(cli);
+        return { ok: true, data: await fetchModelCatalog(force === true, source) };
       } catch (err) {
         return {
           ok: false,
@@ -44,19 +53,20 @@ export function registerModelCatalogIpc(): void {
       _event,
       phaseId: PhaseId,
       overrides?: Partial<Record<PhaseId, ModelRef>> | null,
+      cli?: string,
     ): Promise<CatalogResult<PhaseValidation>> => {
       try {
         if (!isPhaseId(phaseId)) {
           return { ok: false, error: `PhaseId desconocido: ${String(phaseId)}` };
         }
-        // Los overrides viajan por IPC: se re-validan acá antes de confiar.
         const safeOverrides: Partial<Record<PhaseId, ModelRef>> = {};
         if (overrides && typeof overrides === "object") {
           for (const [key, value] of Object.entries(overrides)) {
             if (isPhaseId(key) && isModelRef(value)) safeOverrides[key] = value;
           }
         }
-        const catalog = await fetchModelCatalog();
+        const source = sanitizeCliParam(cli);
+        const catalog = await fetchModelCatalog(false, source);
         return {
           ok: true,
           data: validatePhaseAgainstCatalog(phaseId, catalog, safeOverrides),
@@ -70,17 +80,26 @@ export function registerModelCatalogIpc(): void {
     },
   );
 
-  ipcMain.handle("models:invalidate", (): CatalogResult<{ invalidated: true }> => {
-    invalidateModelCatalog();
+  ipcMain.handle("models:invalidate", (_event, cli?: string): CatalogResult<{ invalidated: true }> => {
+    const source = typeof cli === "string" && (PHASE_CLIS as readonly string[]).includes(cli) ? (cli as CliCatalogSource) : undefined;
+    invalidateModelCatalog(source);
     return { ok: true, data: { invalidated: true } };
   });
 
   ipcMain.handle(
     "models:set-phase-overrides",
     (_event, overrides: unknown): CatalogResult<{ applied: number }> => {
-      // Sanitizado defensivo: por acá viaja lo persistido en el renderer.
       const safe = sanitizePhaseModels(overrides);
       setPhaseModelOverrides(safe);
+      return { ok: true, data: { applied: Object.keys(safe).length } };
+    },
+  );
+
+  ipcMain.handle(
+    "models:set-phase-clis",
+    (_event, overrides: unknown): CatalogResult<{ applied: number }> => {
+      const safe = sanitizePhaseClis(overrides);
+      setPhaseCliOverrides(safe);
       return { ok: true, data: { applied: Object.keys(safe).length } };
     },
   );

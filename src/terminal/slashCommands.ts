@@ -37,6 +37,16 @@ const CODEX_COMMANDS: readonly SlashCommand[] = [
   { command: "/skills", description: "Use skills to improve how Codex performs specific tasks" },
 ] as const;
 
+const CODEBUDDY_COMMANDS: readonly SlashCommand[] = [
+  { command: "/help", description: "Show help" },
+  { command: "/model", description: "Switch model" },
+  { command: "/clear", description: "Clear conversation" },
+  { command: "/mcp", description: "Manage MCP servers" },
+  { command: "/skills", description: "List available skills" },
+  { command: "/cost", description: "Show token usage and cost" },
+  { command: "/compact", description: "Compact conversation history" },
+] as const;
+
 const NO_COMMANDS: readonly SlashCommand[] = [];
 
 const COMMANDS_BY_TYPE: Record<TerminalType, readonly SlashCommand[]> = {
@@ -46,6 +56,7 @@ const COMMANDS_BY_TYPE: Record<TerminalType, readonly SlashCommand[]> = {
   kimi: NO_COMMANDS,
   gemini: NO_COMMANDS,
   opencode: NO_COMMANDS,
+  codebuddy: CODEBUDDY_COMMANDS,
   wuu: NO_COMMANDS,
   lazygit: NO_COMMANDS,
   tmux: NO_COMMANDS,

@@ -12,6 +12,7 @@
 
 import {
   formatModelRef,
+  resolveCliForPhase,
   resolveModelForPhase,
   type ModelRef,
   type PhaseId,
@@ -19,6 +20,17 @@ import {
 import { toPreviewText } from "../terminal/terminalRuntimePolicy";
 import { getTerminalRuntimePreviewAnsi } from "../terminal/terminalRuntimeStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
+
+// CLIs cuyo flag --model espera solo el modelID sin prefijo provider/
+// (CodeBuddy: fast-model, no codebuddy/fast-model — ver error 400).
+const CLI_MODEL_ID_ONLY = new Set<string>(["codebuddy"]);
+// CLIs que ignoran --variant (solo opencode lo soporta vía --variant)
+const CLI_IGNORES_VARIANT = new Set<string>(["codebuddy"]);
+
+function formatModelForCli(ref: ModelRef, cli: string | null): string {
+  if (cli && CLI_MODEL_ID_ONLY.has(cli)) return ref.modelID;
+  return formatModelRef(ref);
+}
 
 /** Modelo efectivo de una fase según las preferencias actuales. */
 export function resolvePhaseModelRef(phaseId: PhaseId): ModelRef | null {
@@ -40,6 +52,7 @@ interface PhaseGateApi {
   validatePhase: (
     phaseId: PhaseId,
     overrides?: Partial<Record<PhaseId, ModelRef>> | null,
+    cli?: string,
   ) => Promise<
     | { ok: true; data: { ok: boolean; reason?: string } }
     | { ok: false; error: string }
@@ -50,19 +63,27 @@ interface PhaseGateApi {
  * Gate ANTES de spawnear una fase CLI: devuelve null si la corrida puede
  * proceder (modelo válido, fase sin pin o catálogo no disponible — misma
  * semántica best-effort que el motor), o el motivo accionable si bloquea.
+ * Respeta el CLI configurado para la fase: si la fase usa codebuddy, valida
+ * contra el catálogo de codebuddy, no contra opencode (fix del bug
+ * "[diagnosisLlm] El proveedor codebuddy no está disponible en esta
+ * instalación de opencode" en TODAS las fases).
  */
 export async function assertPhaseModelAvailable(
   phaseId: PhaseId,
   api?: PhaseGateApi,
+  cliOverride?: string | null,
 ): Promise<string | null> {
   const client =
     api ??
     (typeof window !== "undefined" ? window.termcanvas?.models : undefined);
   if (!client?.validatePhase) return null;
   try {
+    const cli =
+      cliOverride ?? resolveCliForPhase(phaseId, usePreferencesStore.getState().phaseClis) ?? undefined;
     const res = await client.validatePhase(
       phaseId,
       usePreferencesStore.getState().phaseModels,
+      cli,
     );
     if (!res.ok) return null;
     return res.data.ok
@@ -94,17 +115,24 @@ export function getPhaseOutputTail(terminalId: string, lines = 15): string {
 /** Flags de pin para `opencode run` (acepta --model y --variant). */
 export function runModelFlagArgs(
   ref: ModelRef | null | undefined,
+  cli: string | null = "opencode",
 ): string[] {
   if (!ref) return [];
+  const modelValue = formatModelForCli(ref, cli);
+  const variantFlag = ref.variant && cli && CLI_IGNORES_VARIANT.has(cli) ? [] : ref.variant ? ["--variant", ref.variant] : [];
   return [
     "--model",
-    formatModelRef(ref),
-    ...(ref.variant ? ["--variant", ref.variant] : []),
+    modelValue,
+    ...variantFlag,
   ];
 }
 
-/** Flags de pin para la TUI de opencode (--variant no existe ahí). */
-export function tuiModelFlagArgs(ref: ModelRef | null | undefined): string[] {
+/** Flags de pin para la TUI (--variant no existe en TUI para ningún CLI). */
+export function tuiModelFlagArgs(
+  ref: ModelRef | null | undefined,
+  cli: string | null = "opencode",
+): string[] {
   if (!ref) return [];
-  return ["--model", formatModelRef(ref)];
+  const modelValue = formatModelForCli(ref, cli);
+  return ["--model", modelValue];
 }

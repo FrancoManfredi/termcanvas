@@ -41,6 +41,7 @@ export const SESSION_POLL_INTERVAL_MS = {
   codex: 500,
   opencode: 1_000,
   wuu: 1_000,
+  codebuddy: 1_000,
   default: 5_000,
 } as const;
 
@@ -59,6 +60,7 @@ export const SESSION_POLL_MAX_ATTEMPTS = {
   codex: 20,
   opencode: 120,
   wuu: 120,
+  codebuddy: 120,
   default: 10,
 } as const;
 
@@ -181,6 +183,13 @@ export const DEFAULT_CODEX_STALL_MS = 180_000;
 export const DEFAULT_KIMI_STALL_MS = 60_000;
 
 /**
+ * CodeBuddy: same semantic as Claude/Codex. CodeBuddy tool calls are similar
+ * to opencode/wuu (often file-heavy, ~1-2s per tool). 60 s is a safe default
+ * until we have more data — matches opencode/wuu window.
+ */
+export const DEFAULT_CODEBUDDY_STALL_MS = 60_000;
+
+/**
  * Advisory stall thresholds used by the hydra watch loop when deciding
  * whether to surface a stall_advisory DecisionPoint. The *_STALL_MS
  * constants drive UI status ("stall_candidate"), which is deliberately
@@ -203,6 +212,8 @@ export const DEFAULT_CODEX_STALL_ADVISORY_MS =
   DEFAULT_CODEX_STALL_MS * STALL_ADVISORY_MULTIPLIER;
 export const DEFAULT_KIMI_STALL_ADVISORY_MS =
   DEFAULT_KIMI_STALL_MS * STALL_ADVISORY_MULTIPLIER;
+export const DEFAULT_CODEBUDDY_STALL_ADVISORY_MS =
+  DEFAULT_CODEBUDDY_STALL_MS * STALL_ADVISORY_MULTIPLIER;
 
 /**
  * Session heartbeat staleness: how long a `turn_state: "in_turn"`

@@ -156,3 +156,48 @@ export function sanitizePhaseModels(
   }
   return out;
 }
+
+// ─── CLI por fase (Fase B) ───────────────────────────────────────────────
+
+export type PhaseCli = "opencode" | "codebuddy" | "claude" | "codex" | "gemini" | "kimi" | "wuu" | null;
+
+export const PHASE_CLIS = ["opencode", "codebuddy", "claude", "codex", "gemini", "kimi", "wuu"] as const;
+
+export function isPhaseCli(value: unknown): value is PhaseCli {
+  if (value === null) return true;
+  return typeof value === "string" && (PHASE_CLIS as readonly string[]).includes(value);
+}
+
+/**
+ * CLI efectivo por fase: override del usuario si existe, si no null (usa default global del sistema,
+ * que hoy es opencode). null = no fijar CLI, el motor usa su default.
+ */
+export const DEFAULT_PHASE_CLIS: Record<PhaseId, PhaseCli> = {
+  brief: null,
+  requirements: null,
+  synthesis: null,
+  gapCheck: null,
+  asrReview: null,
+  tactics: null,
+  diagnosisLlm: null,
+};
+
+export function resolveCliForPhase(
+  phaseId: PhaseId,
+  overrides?: Partial<Record<PhaseId, PhaseCli>> | null,
+): PhaseCli {
+  return overrides?.[phaseId] ?? DEFAULT_PHASE_CLIS[phaseId];
+}
+
+export function sanitizePhaseClis(
+  value: unknown,
+): Partial<Record<PhaseId, PhaseCli>> {
+  if (!value || typeof value !== "object") return {};
+  const out: Partial<Record<PhaseId, PhaseCli>> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (!isPhaseId(key)) continue;
+    if (!isPhaseCli(entry)) continue;
+    if (entry !== null) out[key] = entry;
+  }
+  return out;
+}

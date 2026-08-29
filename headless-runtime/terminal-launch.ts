@@ -88,6 +88,21 @@ const WUU_ADAPTER: CliAdapter = {
   promptArgs: (prompt) => ["run", prompt],
 };
 
+const CODEBUDDY_ADAPTER: CliAdapter = {
+  shell: "codebuddy",
+  supportsModel: () => true,
+  supportsReasoningEffort: () => true,
+  autoApproveArgs: () => ["--dangerously-skip-permissions"],
+  resumeArgs: (sessionId) => ["--resume", sessionId],
+  modelArgs: (model) => {
+    // CodeBuddy expects just modelID (fast-model), not provider/model (codebuddy/fast-model)
+    const id = model.includes("/") ? model.split("/").pop()! : model;
+    return ["--model", id];
+  },
+  reasoningEffortArgs: (level) => ["--effort", level],
+  promptArgs: defaultPromptArgs,
+};
+
 function makeBareAdapter(shell: string): CliAdapter {
   return {
     shell,
@@ -108,6 +123,7 @@ export const CLI_LAUNCH: Partial<Record<TerminalType, CliAdapter>> = {
   wuu: WUU_ADAPTER,
   gemini: makeBareAdapter("gemini"),
   opencode: makeBareAdapter("opencode"),
+  codebuddy: CODEBUDDY_ADAPTER,
   lazygit: makeBareAdapter("lazygit"),
   tmux: makeBareAdapter("tmux"),
 };

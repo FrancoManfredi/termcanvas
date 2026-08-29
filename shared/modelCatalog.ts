@@ -1,9 +1,13 @@
-// Tipos del catálogo de modelos de opencode — contrato compartido entre el
-// proceso principal (electron/model-catalog.ts, que normaliza la respuesta
-// cruda del SDK) y el renderer (API window.termcanvas.models + Settings).
+// Tipos del catálogo de modelos — contrato compartido entre el proceso principal
+// (electron/model-catalog.ts, que normaliza la respuesta cruda del SDK por CLI)
+// y el renderer (API window.termcanvas.models + Settings).
+// Multi-CLI desde Fase A: opencode + codebuddy (futuros: claude, codex, gemini).
 // SOLO tipos: sin lógica ni imports de node/electron, seguro para ambos lados.
 
-import type { ModelRef, PhaseId } from "./phaseModels";
+import type { ModelRef, PhaseId, PhaseCli } from "./phaseModels";
+
+/** Fuente de catálogo = CLI disponible (PhaseCli sin null). Derivado del contrato de fase para que agregar un CLI solo toque PHASE_CLIS. */
+export type CliCatalogSource = Exclude<PhaseCli, null>;
 
 export interface CatalogModel {
   providerID: string;
@@ -28,6 +32,8 @@ export interface ModelCatalog {
   /** Modelo default por proveedor (del endpoint), para preselección en UI. */
   defaults: Record<string, string>;
   fetchedAt: number;
+  /** CLI de origen — para que el renderer sepa qué catálogo está viendo. Default "opencode" por compatibilidad. */
+  source: CliCatalogSource;
 }
 
 export interface PhaseValidation {

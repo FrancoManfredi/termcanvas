@@ -4,7 +4,9 @@ import { writeMcpToAgentsDir, readMcpFromAgentsDir } from "./sync.ts";
 import { getGlobalOpencodeMcpEntries, getProjectOpencodeMcpEntries } from "./opencode-reader.ts";
 import { syncTermCanvasMcpToOpencode, syncAllEnabledToOpencode } from "./opencode-sync.ts";
 import { registerMcpProject } from "./project-env.ts";
+import { syncToAllHarnesses, syncAllToAllHarnesses } from "./adapters/index.ts";
 import type { McpServerId } from "../../shared/mcp.ts";
+import { syncGlobalSkillsToCodebuddy } from "../skills/codebuddy-sync.ts";
 
 type Envelope<T> = { ok: true; result: T } | { ok: false; error: string };
 
@@ -16,6 +18,8 @@ function wrap<T>(fn: () => Promise<T>): Promise<Envelope<T>> {
       error: err instanceof Error ? err.message : String(err),
     }));
 }
+
+const migratedCodebuddyProjects = new Set<string>();
 
 export function registerMcpIpc(manager: McpManager): void {
   ipcMain.handle("mcp:status", async (_event, projectId: string, projectPath: string) => {
@@ -50,7 +54,15 @@ export function registerMcpIpc(manager: McpManager): void {
           }
           if (shouldHydrate) {
             manager.hydrateConfig(projectId, fromAgents);
-            // Sincronizar los habilitados hacia opencode para que `opencode` los vea
+            // Sincronizar los habilitados hacia todos los harnesses (opencode + codebuddy) para que cada CLI los vea
+            try {
+              await syncAllToAllHarnesses(
+                projectPath,
+                () => manager.getRawConfig(projectId),
+                (sid) => manager.getSecret(projectId, sid),
+              );
+            } catch {}
+            // Fallback legacy: mantener opencode-sync directo por si un adapter falla
             try {
               await syncAllEnabledToOpencode(
                 projectPath,
@@ -59,6 +71,25 @@ export function registerMcpIpc(manager: McpManager): void {
               );
             } catch {}
           }
+        }
+      }
+      // Migración one-time para CodeBuddy: skills globales → proyecto
+      // (ej. education-games). Sin esto `codebuddy` muestra "No custom skills were found".
+      void syncGlobalSkillsToCodebuddy(projectPath).catch(() => {});
+      // Migración one-time para CodeBuddy: si el proyecto tiene MCPs enabled en neutral
+      // pero nunca se migraron a CodeBuddy (caso de MCPs prendidos antes de Fase 1),
+      // copiarlos ahora a --scope project. Esto hace que `codebuddy mcp list --scope project`
+      // muestre engram/codegraph/context7 sin requerir toggle manual.
+      if (projectPath && !migratedCodebuddyProjects.has(projectId)) {
+        const cfg = manager.getRawConfig(projectId);
+        if (cfg.servers.some((s) => s.enabled)) {
+          migratedCodebuddyProjects.add(projectId);
+          // Fire-and-forget, no bloquea el status
+          void syncAllToAllHarnesses(
+            projectPath,
+            () => manager.getRawConfig(projectId),
+            (sid) => manager.getSecret(projectId, sid),
+          ).catch(() => {});
         }
       }
     }
@@ -72,6 +103,13 @@ export function registerMcpIpc(manager: McpManager): void {
         const cfg = manager.getRawConfig(projectId);
         writeMcpToAgentsDir(projectPath, cfg);
       } catch {}
+      // Dual-write: neutral -> all harnesses (opencode + codebuddy) via adapters
+      try {
+        const cfg = manager.getRawConfig(projectId);
+        const token = await manager.getSecret(projectId, serverId as McpServerId);
+        syncToAllHarnesses(projectPath, serverId as McpServerId, enabled, token, cfg.customServers);
+      } catch {}
+      // Legacy fallback: keep direct opencode sync for zero-risk rollback
       try {
         const cfg = manager.getRawConfig(projectId);
         const token = await manager.getSecret(projectId, serverId as McpServerId);
@@ -83,6 +121,16 @@ export function registerMcpIpc(manager: McpManager): void {
 
   ipcMain.handle("mcp:set-secret", async (_event, projectId: string, serverId: string, token: string | null, projectPath?: string) => {
     const res = await wrap(() => manager.setSecret(projectId, serverId as McpServerId, token));
+    // Dual-write secret to all harnesses if the server is enabled (so remote headers get fresh token)
+    if (res.ok && projectPath) {
+      try {
+        const cfg = manager.getRawConfig(projectId);
+        const srv = cfg.servers.find((s) => s.id === serverId);
+        if (srv?.enabled) {
+          syncToAllHarnesses(projectPath, serverId as McpServerId, true, token, cfg.customServers);
+        }
+      } catch {}
+    }
     if (res.ok && projectPath) {
       try {
         const cfg = manager.getRawConfig(projectId);
@@ -120,6 +168,13 @@ export function registerMcpIpc(manager: McpManager): void {
         try {
           const cfg = manager.getRawConfig(projectId);
           writeMcpToAgentsDir(projectPath, cfg);
+        } catch {}
+        try {
+          await syncAllToAllHarnesses(
+            projectPath,
+            () => manager.getRawConfig(projectId),
+            (sid) => manager.getSecret(projectId, sid),
+          );
         } catch {}
         try {
           await syncAllEnabledToOpencode(

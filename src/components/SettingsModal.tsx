@@ -426,6 +426,7 @@ const AGENT_TYPES = [
   "kimi",
   "gemini",
   "opencode",
+  "codebuddy",
   "wuu",
 ] as const;
 

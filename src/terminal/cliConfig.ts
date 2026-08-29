@@ -183,6 +183,27 @@ export const TERMINAL_CONFIG: Record<TerminalType, TerminalAdapterConfig> = {
       pasteStrategy: "separate",
     },
   },
+  codebuddy: {
+    type: "codebuddy",
+    launch: {
+      shell: "codebuddy",
+      resumeArgs: (id) => ["--resume", id],
+      newArgs: () => [],
+      promptArgs: (prompt) => [prompt],
+      autoApproveArgs: () => ["--dangerously-skip-permissions"],
+      promptOnResume: false,
+    },
+    composer: {
+      supportsComposer: true,
+      allowedStatuses: INTERACTIVE_STATUSES,
+      inputMode: "bracketed-paste",
+      supportsImages: false,
+      pasteKeySequence: () => "",
+      imageFallback: "error",
+      pasteDelayMs: 120,
+      pasteStrategy: "separate",
+    },
+  },
   wuu: {
     type: "wuu",
     launch: {

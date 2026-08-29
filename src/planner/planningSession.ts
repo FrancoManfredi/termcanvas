@@ -16,6 +16,37 @@ import { formatModelRef, type ModelRef } from "../../shared/phaseModels";
 import { prepareSkillScope } from "../skills/scopedSession.ts";
 import { discoverVendorSkills } from "../skills/vendorSkills.ts";
 
+// ─── Headless args — REGISTRY extensible testeable ───────────────────────
+// Para añadir un CLI: añadir caso en buildHeadlessArgsForCli y su id en PHASE_CLIS.
+export function buildHeadlessArgsForCli(
+  cli: string,
+  flags: string[],
+  prompt: string,
+  resumeId?: string,
+): string[] | null {
+  switch (cli) {
+    case "codebuddy":
+      return resumeId ? ["--resume", resumeId, prompt] : ["-p", "--output-format", "json", ...flags, prompt];
+    case "claude":
+      return resumeId
+        ? ["--resume", resumeId, "--print", "--output-format", "json", ...flags, prompt]
+        : ["-p", "--output-format", "json", ...flags, prompt];
+    case "codex":
+      return ["exec", "--json", ...flags, prompt];
+    case "gemini":
+      return ["-p", ...flags, prompt];
+    case "kimi":
+      return ["-p", ...flags, prompt];
+    case "wuu":
+      return ["run", ...flags, prompt];
+    case "opencode":
+    default:
+      return resumeId ? ["run", ...flags, "-s", resumeId, "--auto", prompt] : ["run", ...flags, "--auto", prompt];
+  }
+}
+
+export const HEADLESS_KNOWN_CLIS = new Set<string>(["opencode", "codebuddy", "claude", "codex", "gemini", "kimi", "wuu"]);
+
 // Sesión REAL de planificación: crea un runtime de terminal (el mismo
 // pipeline que usa el canvas: ensureTerminalRuntime spawnea el PTY de
 // opencode con launch options + hooks) pero SIN meter el tile en la
@@ -60,7 +91,11 @@ export interface LaunchPlanningSessionOptions {
   worktreeId: string;
   roadmapText: string;
   attachmentNames: string[];
-  // Headless: lanza `opencode run <prompt>` (sin TUI). El proceso escribe
+  // CLI que ejecuta la fase (opencode por default, codebuddy si el usuario lo eligió por fase).
+  // Si es null/undefined, usa opencode (backward compat). El sistema no se rompe si el CLI
+  // no soporta headless/TUI — hace fallback a TUI o a shell.
+  cli?: string | null;
+  // Headless: lanza `opencode run <prompt>` o `codebuddy -p` (sin TUI). El proceso escribe
   // el plan y termina solo; el poller observa el archivo y también el exit
   // del proceso (un exit != 0 temprano falla la sesión sin esperar el
   // timeout). Con false (default) corre la TUI interactiva con --prompt.
@@ -405,10 +440,11 @@ export async function launchPlanningSession(
     }
   }
 
-  // Pin de modelo por fase: en headless viaja como flags de `opencode run`
-  // (verificados contra la CLI instalada); en TUI viaja por metadatos del
-  // terminal y el runtime lo inyecta al spawnear.
-  const modelPinFlags = options.model ? runModelFlagArgs(options.model) : [];
+  // Pin de modelo por fase: en headless viaja como flags del CLI (verificados contra la CLI instalada);
+  // en TUI viaja por metadatos del terminal y el runtime lo inyecta al spawnear.
+  // Para codebuddy, el flag es --model <modelID> sin prefijo (ej. fast-model), no provider/model.
+  const cliForFlags = (options.cli as string) ?? "opencode";
+  const modelPinFlags = options.model ? runModelFlagArgs(options.model, cliForFlags) : [];
 
   // Scope de skills especializadas: materializa SKILL.md + config opencode
   // efímeros y devuelve el env con OPENCODE_CONFIG. Con null (allowlist
@@ -426,11 +462,12 @@ export async function launchPlanningSession(
 
   // TerminalData sintética que solo alimenta al runtime: nunca entra a la
   // escena, así que no hay tile que renderizar ni arrastrar en el canvas.
-  // Con TUI (headless=false) el prompt viaja como initialPrompt → el runtime
-  // lo pasa como `--prompt` y la TUI lo auto-submitea cuando está lista; con
-  // headless=true va como mensaje posicional de `opencode run <prompt> --auto`.
+  // Generalizado para cualquier CLI (opencode, codebuddy, claude...): el CLI
+  // se resuelve por fase (phaseClis[phase] ?? opencode) y el caller lo pasa
+  // en options.cli. Si es null, usa opencode por compat.
+  const cliType = (options.cli as string) ?? "opencode";
   const terminal = createTerminal(
-    "opencode",
+    cliType as unknown as import("../types/index.ts").TerminalType,
     options.mode === "roadmap"
       ? "Planificación (roadmap)"
       : "Planificación (auditoría)",
@@ -439,28 +476,26 @@ export async function launchPlanningSession(
     "agent",
   );
   if (options.model) {
-    terminal.modelOverride = formatModelRef(options.model);
-    terminal.variantOverride = options.model.variant;
+    // Registro de formato de modelo por CLI — codebuddy usa solo modelID (ver error 400: [codebuddy/fast-model] not found)
+    const cliUsesModelIdOnly = new Set(["codebuddy"]).has(cliType);
+    const cliIgnoresVariant = new Set(["codebuddy"]).has(cliType);
+    terminal.modelOverride = cliUsesModelIdOnly ? options.model.modelID : formatModelRef(options.model);
+    terminal.variantOverride = cliIgnoresVariant ? undefined : options.model.variant;
   }
   if (skillScope) {
     terminal.envOverride = skillScope.env;
   }
+  // Headless args via registry testeable (exportado).
+  const isHeadlessCapable = HEADLESS_KNOWN_CLIS.has(cliType);
+  const effectiveHeadless = options.headless && isHeadlessCapable;
   if (options.resumeSessionId) {
-    // Reintento resumido: `opencode run -s <id> --auto <mensaje corto>`.
-    // El contexto completo ya está en la sesión; no se re-paga el prompt.
-    terminal.headlessArgs = [
-      "run",
-      ...modelPinFlags,
-      "-s",
-      options.resumeSessionId,
-      "--auto",
-      promptRef,
-    ];
-  } else if (options.headless) {
-    // Headless: `opencode run @<prompt-file> --auto` (sin TUI). El proceso
-    // escribe el plan y termina solo; el poller resuelve con el archivo o el
-    // exit del proceso.
-    terminal.headlessArgs = ["run", ...modelPinFlags, "--auto", promptRef];
+    const args = buildHeadlessArgsForCli(cliType, modelPinFlags, promptRef, options.resumeSessionId);
+    if (args) terminal.headlessArgs = args;
+  } else if (effectiveHeadless) {
+    const args = buildHeadlessArgsForCli(cliType, modelPinFlags, promptRef);
+    if (args) terminal.headlessArgs = args;
+  } else if (options.headless && !isHeadlessCapable) {
+    console.warn(`[planningSession] CLI "${cliType}" no soporta headless, usando TUI`);
   }
   // else: TUI interactiva (initialPrompt ya está en el terminal) — el
   // usuario ve la sesión y puede intervenir; el poller la cierra cuando el

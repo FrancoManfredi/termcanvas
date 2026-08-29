@@ -16,7 +16,7 @@ export type XtermWheelFallbackState = {
 export function decideXtermWheelFallback(
   state: XtermWheelFallbackState,
 ): XtermWheelFallbackDecision {
-  if (state.terminalType !== "opencode") return "xterm";
+  if (state.terminalType !== "opencode" && state.terminalType !== "codebuddy") return "xterm";
   if (state.ctrlKey || state.metaKey) return "xterm";
   if (state.deltaY === 0) return "xterm";
   if (state.mouseEventsEnabled) return "xterm";

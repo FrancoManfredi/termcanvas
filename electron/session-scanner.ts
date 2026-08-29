@@ -142,6 +142,33 @@ export function extractUserPromptText(raw: Record<string, unknown>): string {
     }
   }
 
+  if (typeof raw.role === "string" && raw.role === "user") {
+    const content = raw.content;
+    let rawText = "";
+    if (typeof content === "string") {
+      rawText = content;
+    } else if (Array.isArray(content)) {
+      for (const block of content) {
+        if (!block || typeof block !== "object") continue;
+        const entry = block as Record<string, unknown>;
+        const text =
+          typeof entry.text === "string"
+            ? entry.text
+            : typeof entry.content === "string"
+              ? entry.content
+              : "";
+        if (text) {
+          rawText = text;
+          break;
+        }
+      }
+    }
+    if (rawText) {
+      const cleaned = stripSyntheticUserBlocks(rawText);
+      if (cleaned) return cleaned.slice(0, REPLAY_TEXT_MAX_CHARS);
+    }
+  }
+
   const payload = getObject(raw.payload);
   if (!payload) return "";
   if (
@@ -350,7 +377,10 @@ export class SessionScanner {
       type === "codex"
         ? this.readCodexSessionId(filePath, lines) ??
           path.basename(filePath, ".jsonl")
-        : path.basename(filePath, ".jsonl");
+        : type === "codebuddy"
+          ? this.readCodebuddySessionId(filePath, lines) ??
+            path.basename(filePath, ".jsonl")
+          : path.basename(filePath, ".jsonl");
     const projectDir = this.resolveProjectDir(filePath, type, sessionId, lines);
     const events: TimelineEvent[] = [];
     const editIndices: Array<{ index: number; filePath: string }> = [];
@@ -638,10 +668,18 @@ export class SessionScanner {
     if (normalizedPath.includes("/.codex/")) return "codex";
     if (normalizedPath.includes("/.claude/")) return "claude";
     if (normalizedPath.includes("/.kimi/")) return "kimi";
+    if (normalizedPath.includes("/.codebuddy/")) return "codebuddy";
+    if (normalizedPath.includes("/.wuu/")) return "wuu";
 
     for (const line of lines.slice(0, 20)) {
       try {
         const raw = JSON.parse(line) as Record<string, unknown>;
+        if (
+          typeof raw.sessionId === "string" &&
+          typeof raw.cwd === "string"
+        ) {
+          return "codebuddy";
+        }
         if (
           raw.type === "session_meta" ||
           raw.type === "event_msg" ||
@@ -658,6 +696,24 @@ export class SessionScanner {
           raw.type === "progress"
         ) {
           return "claude";
+        }
+        if (
+          typeof raw.role === "string" &&
+          (raw.role === "assistant" ||
+            raw.role === "user" ||
+            raw.role === "tool" ||
+            raw.role === "system" ||
+            raw.role === "meta")
+        ) {
+          // wuu/kimi/codebuddy all use role-based JSONL; path check already handled above.
+          // Fall back to codebuddy when cwd/sessionId hint present, otherwise wuu.
+          if (
+            typeof (raw as Record<string, unknown>).sessionId === "string" ||
+            normalizedPath.includes("codebuddy")
+          ) {
+            return "codebuddy";
+          }
+          return "wuu";
         }
       } catch {}
     }
@@ -691,6 +747,15 @@ export class SessionScanner {
 
     if (type === "kimi") {
       return this.readKimiProjectDir(filePath) ?? sessionId;
+    }
+
+    if (type === "codebuddy") {
+      return this.readCodebuddyProjectDir(filePath, lines) ?? sessionId;
+    }
+
+    if (type === "wuu") {
+      // wuu sessions live under <cwd>/.wuu/sessions, so cwd is the project dir
+      return path.dirname(path.dirname(path.dirname(filePath))) ?? sessionId;
     }
 
     return this.readCodexProjectDir(filePath, lines) ?? sessionId;
@@ -756,6 +821,48 @@ export class SessionScanner {
           typeof payload?.cwd === "string" &&
           payload.cwd
         ) {
+          return payload.cwd;
+        }
+      } catch {}
+    }
+    return null;
+  }
+
+  private readCodebuddySessionId(
+    filePath: string,
+    lines?: string[],
+  ): string | null {
+    const sourceLines = lines ?? this.readHeadLines(filePath, 20);
+    for (const line of sourceLines) {
+      if (!line.trim()) continue;
+      try {
+        const raw = JSON.parse(line) as Record<string, unknown>;
+        if (typeof raw.sessionId === "string" && raw.sessionId) {
+          return raw.sessionId;
+        }
+        const payload = this.getObject(raw.payload);
+        if (typeof payload?.id === "string" && payload.id) {
+          return payload.id;
+        }
+      } catch {}
+    }
+    return null;
+  }
+
+  private readCodebuddyProjectDir(
+    filePath: string,
+    lines?: string[],
+  ): string | null {
+    const sourceLines = lines ?? this.readHeadLines(filePath, 20);
+    for (const line of sourceLines) {
+      if (!line.trim()) continue;
+      try {
+        const raw = JSON.parse(line) as Record<string, unknown>;
+        if (typeof raw.cwd === "string" && raw.cwd) {
+          return raw.cwd;
+        }
+        const payload = this.getObject(raw.payload);
+        if (typeof payload?.cwd === "string" && payload.cwd) {
           return payload.cwd;
         }
       } catch {}

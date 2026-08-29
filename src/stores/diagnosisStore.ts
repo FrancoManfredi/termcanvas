@@ -17,6 +17,8 @@ import {
   parseDiagnosisFileName,
   LEGACY_CATEGORY_ID,
 } from "../types/diagnosisCategories.ts";
+import { resolveCliForPhase } from "../../shared/phaseModels";
+import { usePreferencesStore } from "./preferencesStore";
 import { parsePlanningPlan } from "../planner/parsePlanResult.ts";
 import {
   assertPhaseModelAvailable,
@@ -389,20 +391,12 @@ async function launchLlmPhase(options: {
         worktreeId,
         roadmapText: "",
         attachmentNames: [],
-        // Categoría del diagnóstico: foco del prompt (REGLA DE FOCO) y
-        // filename diagnostico-<categoria>-<ts>.json. La skill especializada
-        // de la categoría es la ÚNICA permitida en esta sesión (scoping por
-        // permission.skill): ni otras categorías ni skills globales.
         category: activeCategory ?? undefined,
         allowedSkills: activeCategory
           ? diagnosisAllowedSkills(activeCategory)
           : [],
-        // Pin por fase (routing): null = sin pin, default global del CLI.
         model: resolvePhaseModelRef("diagnosisLlm"),
-        // Headless por defecto (`opencode run --model X --variant Y --auto`):
-        // es donde el pin es confiable; la TUI interactiva cae al último
-        // modelo usado ignorando el flag. Opt-in en Settings (Models per
-        // phase) para quien prefiera intervenir en vivo sabiendo ese riesgo.
+        cli: resolveCliForPhase("diagnosisLlm", usePreferencesStore.getState().phaseClis),
         headless: !shouldRunPhaseInTui(),
         toolFindingsText: pendingFindingsText,
         resumeSessionId,

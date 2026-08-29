@@ -13,7 +13,7 @@ import type {
 
 const isDev = !!process.env.VITE_DEV_SERVER_URL;
 
-export type SessionType = "claude" | "codex" | "kimi" | "wuu" | "opencode";
+export type SessionType = "claude" | "codex" | "kimi" | "wuu" | "opencode" | "codebuddy";
 
 interface CompletionSignal {
   completed: boolean;
@@ -196,7 +196,9 @@ export function checkTurnComplete(
   const lines = content.split("\n").filter((l) => l.trim().length > 0);
 
   const startIndex =
-    type === "wuu" || type === "kimi" ? 0 : Math.max(0, lines.length - 5);
+    type === "wuu" || type === "kimi" || type === "codebuddy"
+      ? 0
+      : Math.max(0, lines.length - 5);
   for (let i = lines.length - 1; i >= startIndex; i--) {
     let parsed: Record<string, unknown>;
     try {
@@ -270,6 +272,42 @@ export function checkTurnComplete(
         return { completed: false };
       }
     }
+
+    if (type === "codebuddy") {
+      const role = getString(parsed.role);
+      if (role === "meta" || role === "system") {
+        continue;
+      }
+      if (role === "assistant") {
+        const toolCalls = Array.isArray(parsed.tool_calls)
+          ? parsed.tool_calls
+          : [];
+        if (toolCalls.length > 0) {
+          return { completed: false };
+        }
+        return {
+          completed: extractTextContent(parsed.content).trim().length > 0,
+        };
+      }
+      if (role === "tool" || role === "user") {
+        return { completed: false };
+      }
+      const payload = getObject(parsed.payload);
+      if (
+        parsed.type === "event_msg" &&
+        (payload?.type === "task_complete" || payload?.type === "turn_complete")
+      ) {
+        return { completed: true };
+      }
+      if (
+        parsed.type === "assistant" &&
+        typeof parsed.message === "object" &&
+        parsed.message !== null &&
+        (parsed.message as Record<string, unknown>).stop_reason === "end_turn"
+      ) {
+        return { completed: true };
+      }
+    }
   }
 
   return { completed: false };
@@ -309,6 +347,84 @@ function resolveKimiSessionFile(sessionId: string, cwd: string): string | null {
     // ignore
   }
   return null;
+}
+
+export function toCodebuddyProjectKey(cwd: string): string {
+  let key = cwd;
+  if (/^[A-Za-z]:[\\/]/.test(key)) {
+    key = key[0].toLowerCase() + key.slice(1);
+  }
+  key = key.replace(/:/g, "").replace(/[/\\]/g, "-");
+  return key;
+}
+
+function resolveCodebuddySessionFile(
+  sessionId: string,
+  cwd: string,
+  home = os.homedir(),
+): string | null {
+  const projectKey = toCodebuddyProjectKey(cwd);
+  const projectDir = path.join(home, ".codebuddy", "projects", projectKey);
+  const candidates: string[] = [
+    path.join(projectDir, sessionId + ".jsonl"),
+    path.join(projectDir, "sessions", sessionId + ".jsonl"),
+    path.join(home, ".codebuddy", "sessions", sessionId + ".jsonl"),
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+
+  // Fallback: scan projectDir and global sessions dir for a file containing the sessionId
+  const scanDirForSession = (dir: string): string | null => {
+    try {
+      const entries = fs.readdirSync(dir);
+      for (const entry of entries) {
+        if (!entry.endsWith(".jsonl")) continue;
+        if (!entry.includes(sessionId)) continue;
+        const full = path.join(dir, entry);
+        try {
+          if (fs.statSync(full).isFile()) return full;
+        } catch {}
+      }
+      // One level deep
+      for (const entry of entries) {
+        const full = path.join(dir, entry);
+        try {
+          if (fs.statSync(full).isDirectory()) {
+            const subs = fs.readdirSync(full);
+            for (const sub of subs) {
+              if (!sub.endsWith(".jsonl")) continue;
+              if (!sub.includes(sessionId)) continue;
+              const subFull = path.join(full, sub);
+              try {
+                if (fs.statSync(subFull).isFile()) return subFull;
+              } catch {}
+            }
+          }
+        } catch {}
+      }
+    } catch {}
+    return null;
+  };
+
+  const fromProject = scanDirForSession(projectDir);
+  if (fromProject) return fromProject;
+
+  const sessionsDir = path.join(projectDir, "sessions");
+  if (fs.existsSync(sessionsDir)) {
+    const fromSessions = scanDirForSession(sessionsDir);
+    if (fromSessions) return fromSessions;
+  }
+
+  const globalSessions = path.join(home, ".codebuddy", "sessions");
+  if (fs.existsSync(globalSessions)) {
+    const fromGlobal = scanDirForSession(globalSessions);
+    if (fromGlobal) return fromGlobal;
+  }
+
+  // Return deterministic path so SessionWatcher can watch its parent dir even before file exists
+  return candidates[0] as string;
 }
 
 export function toClaudeProjectKey(cwd: string): string {
@@ -375,6 +491,10 @@ export function resolveSessionFile(
 
   if (type === "opencode") {
     return resolveOpenCodeSessionFile(sessionId, cwd);
+  }
+
+  if (type === "codebuddy") {
+    return resolveCodebuddySessionFile(sessionId, cwd);
   }
 
   return null;
@@ -713,6 +833,127 @@ export function parseSessionTelemetryLine(
     }
 
     return [];
+  }
+
+  if (type === "codebuddy") {
+    const role = getString(parsed.role);
+    if (role === "user") {
+      const text = extractTextContent(parsed.content);
+      if (!text.trim()) return [];
+      return [
+        buildEvent({
+          at,
+          event_type: "user_message",
+          role: "user",
+          turn_state: "in_turn",
+        }),
+      ];
+    }
+
+    if (role === "assistant") {
+      const events: NormalizedSessionTelemetryEvent[] = [];
+      const toolCalls = Array.isArray(parsed.tool_calls)
+        ? parsed.tool_calls
+        : [];
+      for (const callEntry of toolCalls) {
+        const call = getObject(callEntry);
+        if (!call) continue;
+        const fn = getObject(call.function);
+        events.push(
+          buildEvent({
+            at,
+            event_type: "tool_use",
+            role: "assistant",
+            tool_name: getString(fn?.name) ?? getString(call.name),
+            call_id: getString(call.id),
+            lifecycle: "start",
+            turn_state: "tool_running",
+            meaningful_progress: true,
+          }),
+        );
+      }
+      const text = extractTextContent(parsed.content);
+      if (text.trim()) {
+        events.push(
+          buildEvent({
+            at,
+            event_type: "assistant_message",
+            role: "assistant",
+            turn_state: toolCalls.length > 0 ? "in_turn" : "turn_complete",
+            meaningful_progress: true,
+          }),
+        );
+      }
+      if (events.length > 0) return events;
+      // Fall through to payload-based handling if role exists but no content/tool
+    }
+
+    if (role === "tool") {
+      return [
+        buildEvent({
+          at,
+          event_type: "tool_result",
+          role: "tool",
+          tool_name: getString(parsed.name),
+          call_id: getString(parsed.tool_call_id),
+          lifecycle: "end",
+          turn_state: "in_turn",
+          meaningful_progress: true,
+        }),
+      ];
+    }
+
+    if (role === "system") {
+      const content = extractTextContent(parsed.content).trim();
+      if (!content) return [];
+      return [
+        buildEvent({
+          at,
+          event_type: "system_message",
+          role: "system",
+          meaningful_progress: true,
+        }),
+      ];
+    }
+
+    // If no role matched, try codex-style payload handling below instead of early return
+    const maybePayload = getObject(parsed.payload);
+    if (!maybePayload) {
+      // Also support top-level message shape like { type: "assistant", message: {...} } similar to claude
+      if (parsed.type === "assistant" || parsed.type === "user" || parsed.type === "system") {
+        // Treat codebuddy like claude for these top-level types: delegate to claude-like handling
+        // Minimal: assistant with text => assistant_message, user => user_message
+        if (parsed.type === "assistant") {
+          const msg = getObject(parsed.message);
+          const txt = extractTextContent(msg?.content);
+          if (txt.trim()) {
+            return [
+              buildEvent({
+                at,
+                event_type: "assistant_message",
+                role: "assistant",
+                turn_state: "in_turn",
+                meaningful_progress: true,
+              }),
+            ];
+          }
+        }
+        if (parsed.type === "user") {
+          const txt2 = extractTextContent(getObject(parsed.message)?.content);
+          if (txt2.trim()) {
+            return [
+              buildEvent({
+                at,
+                event_type: "user_message",
+                role: "user",
+                turn_state: "in_turn",
+              }),
+            ];
+          }
+        }
+      }
+      return [];
+    }
   }
 
   const payload = getObject(parsed.payload);
