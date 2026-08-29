@@ -33,3 +33,8 @@ export * from "./domain/skill.registry";
 export * from "./domain/runner.derive";
 export * from "./domain/secrets.derive";
 export * from "./domain/integrations.derive";
+export * from "./domain/factory.definition.derive";
+export * from "./domain/settings.derive";
+export * from "./domain/benchmark.types";
+export * from "./domain/benchmark.derive";
+export * from "./mcp/mcp.stub";

@@ -357,6 +357,9 @@ export function Sidebar({ activeItem = "Activity", onNavigate }: SidebarProps) {
                       { label: "Runners", delay: 0.22 },
                       { label: "Scorers", delay: 0.24 },
                       { label: "Skills", delay: 0.26 },
+                      { label: "Benchmarks", delay: 0.28 },
+                      { label: "Factory definition", delay: 0.3 },
+                      { label: "Settings", delay: 0.32 },
                     ].map(({ label, delay }) => {
                       const isActive = label === activeItem;
                       return (

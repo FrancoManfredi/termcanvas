@@ -11,6 +11,10 @@ import { RunnersPage } from "./components/runners/RunnersPage";
 import { SecretsPage } from "./components/secrets/SecretsPage";
 import { IntegrationsPage } from "./components/integrations/IntegrationsPage";
 import { McpsPage } from "./components/mcp/McpsPage";
+import { FactoryDefinitionPage } from "./components/factory-definition/FactoryDefinitionPage";
+import { SettingsPage } from "./components/factory-definition/SettingsPage";
+import { BenchmarksPage } from "./components/benchmarks/BenchmarksPage";
+import { SelfImprovementPage } from "./components/self-improvement/SelfImprovementPage";
 
 export default function App() {
   const [activeItem, setActiveItem] = useState("Activity");
@@ -39,6 +43,12 @@ export default function App() {
         return <ScorersPage />;
       case "Skills":
         return <SkillsPage />;
+      case "Benchmarks":
+        return <BenchmarksPage />;
+      case "Factory definition":
+        return <FactoryDefinitionPage />;
+      case "Settings":
+        return <SettingsPage />;
       case "Secrets":
         return <SecretsPage />;
       case "Integrations":
@@ -46,14 +56,7 @@ export default function App() {
       case "MCPs and apps":
         return <McpsPage />;
       case "Self-improvement":
-        return (
-          <div className="flex flex-1 items-center justify-center p-6 text-center">
-            <div>
-              <p className="text-sm font-medium text-zinc-700">{activeItem}</p>
-              <p className="mt-1 text-xs text-zinc-500">Vista en construcción — próximo paso (Self-improvement)</p>
-            </div>
-          </div>
-        );
+        return <SelfImprovementPage />;
       default:
         return (
           <div className="flex flex-1 items-center justify-center p-6 text-center">
