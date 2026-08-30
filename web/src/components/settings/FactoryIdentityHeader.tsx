@@ -1,8 +1,9 @@
-// SRP: Factory Settings header — Identity, Repos, PW authorship, Analysis model, Runners, Deletion warning
+// SRP: Factory identity header — Identity, Repos, PW authorship, Analysis model, Runners, Deletion warning
+// Renamed from FactorySettingsHeader to avoid overlap with factory-definition/SettingsPage (full page)
 // DIP: recibe FactoryBundle (via hook), no hardcodes salvo fallback
 import { useFactoryBundle } from "../../lib/factory/hooks/useFactoryBundle";
 
-export function FactorySettingsHeader() {
+export function FactoryIdentityHeader() {
   const bundleRes = useFactoryBundle();
   const bundle = bundleRes.ok ? bundleRes.value! : null;
   const factory = bundle?.factory ?? null;
@@ -85,3 +86,6 @@ export function FactorySettingsHeader() {
     </section>
   );
 }
+
+// Compat alias — remove in next major
+export const FactorySettingsHeader = FactoryIdentityHeader;

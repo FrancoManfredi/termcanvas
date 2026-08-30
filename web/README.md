@@ -1,32 +1,27 @@
-# React + TypeScript + Vite
+# TermCanvas Web — Factory Platform
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+Monorepo workspace `web` (pnpm). Instalación y scripts con **pnpm** (no npm).
 
-Currently, two official plugins are available:
-
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
-
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```bash
+pnpm install
+pnpm --filter web dev        # dev server :5174
+pnpm --filter web build      # tsc -b && vite build
+pnpm --filter web test       # vitest run
+pnpm --filter web typecheck
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+Workspace: `pnpm-workspace.yaml` incluye `web`. Lockfile único: `pnpm-lock.yaml` en la raíz.
+
+Stack: React 19 + Vite 8 + Tailwind 4 + motion + zod/yaml, Vitest + jsdom + Testing Library, Oxlint.
+
+## Bundle
+
+`vite.config.ts` usa `manualChunks` (`vendor: react/react-dom`, `anim: motion`, `parse: yaml/zod`) y `lazy()` en `App.tsx`; inicial <250KB (warn 500KB).
+
+## Config
+
+- `vite.config.ts` — solo Vite (plugins + build.manualChunks)
+- `vitest.config.ts` — `mergeConfig(viteConfig, { test: ... })`
+- `tsconfig.node.json` incluye `vite.config.ts` y `vitest.config.ts`
+
+Ver `../pnpm-workspace.yaml` y `../pnpm-lock.yaml` para dependencias del monorepo.

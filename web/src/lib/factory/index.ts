@@ -1,4 +1,6 @@
-// Barrel — DIP: consumers import from here, not concretions
+// Barrel — curated explicit exports to avoid wildcard collisions (e.g. SelfImprovementPR)
+// Consumers import from here; concretions stay hidden.
+// For domain types that could collide, export with explicit names/aliases.
 
 export * from "./domain/types";
 export * from "./domain/result";
@@ -20,9 +22,19 @@ export * from "./parsers/yaml.utils";
 export * from "./parsers/frontmatter.utils";
 export * from "./store/factoryRegistry";
 export * from "./store/workItem.store";
+export * from "./store/WorkItemStoreContext";
 export * from "./fixtures/samples";
 export * from "./fixtures/workItem.samples";
-export * from "./domain/dashboard.types";
+// dashboard.types exports SelfImprovementPR — explicit to avoid collision with benchmark
+export type {
+  SelfImprovementPR,
+  DashboardMetrics,
+  DashboardDeriveInput,
+  ScorerCard,
+  MostExpensivePR,
+  TotalRunsMetric,
+  TotalRunsBreakdown,
+} from "./domain/dashboard.types";
 export * from "./domain/dashboard.derive";
 export * from "./domain/automation.engine";
 export * from "./domain/run.types";
@@ -35,7 +47,16 @@ export * from "./domain/secrets.derive";
 export * from "./domain/integrations.derive";
 export * from "./domain/factory.definition.derive";
 export * from "./domain/settings.derive";
-export * from "./domain/benchmark.types";
+// benchmark.types exports BenchmarkSelfImprovementPR — distinct name, explicit
+export type {
+  BenchmarkSelfImprovementPR,
+  BenchmarkDefinition,
+  BenchmarkTask,
+  BenchmarkConfig,
+  BenchmarkTrial,
+  BenchmarkDerived,
+  BenchmarkConfigResult,
+} from "./domain/benchmark.types";
 export * from "./domain/benchmark.derive";
 export * from "./domain/troubleshooting.data";
 export * from "./domain/integrations.deep";

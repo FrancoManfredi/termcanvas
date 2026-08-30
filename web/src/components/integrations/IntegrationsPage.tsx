@@ -3,7 +3,7 @@
 import { useMemo } from "react";
 import { useFactoryBundle } from "../../lib/factory/hooks/useFactoryBundle";
 import { PROVIDER_TABLE, deriveProviderStatuses, getIntegratedTypes } from "../../lib/factory/domain/integrations.derive";
-import { FactorySettingsHeader } from "../settings/FactorySettingsHeader";
+import { FactoryIdentityHeader } from "../settings/FactoryIdentityHeader";
 
 function StatusDot({ status }: { status: string }) {
   const cls =
@@ -35,7 +35,7 @@ export function IntegrationsPage() {
 
       <div className="flex-1 overflow-y-auto p-4">
         <div className="mx-auto max-w-[1080px] space-y-4">
-          <FactorySettingsHeader />
+          <FactoryIdentityHeader />
 
           <section className="rounded-[12px] border border-zinc-200 bg-white p-4">
             <h3 className="text-[13px] font-[600] tracking-[-0.01em] text-zinc-900">factory.yaml integrations</h3>
@@ -137,3 +137,4 @@ export function IntegrationsPage() {
     </div>
   );
 }
+

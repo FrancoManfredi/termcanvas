@@ -1,24 +1,25 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { Sidebar } from "./components/Sidebar";
-import { ActivityBoard } from "./components/activity/ActivityBoard";
-import { DashboardPage } from "./components/dashboard/DashboardPage";
-import { AgentsPage } from "./components/agents/AgentsPage";
-import { AutomationsPage } from "./components/automations/AutomationsPage";
-import { RunsPage } from "./components/runs/RunsPage";
-import { ScorersPage } from "./components/scorers/ScorersPage";
-import { SkillsPage } from "./components/skills/SkillsPage";
-import { RunnersPage } from "./components/runners/RunnersPage";
-import { SecretsPage } from "./components/secrets/SecretsPage";
-import { IntegrationsPage } from "./components/integrations/IntegrationsPage";
-import { McpsPage } from "./components/mcp/McpsPage";
-import { FactoryDefinitionPage } from "./components/factory-definition/FactoryDefinitionPage";
-import { SettingsPage } from "./components/factory-definition/SettingsPage";
-import { BenchmarksPage } from "./components/benchmarks/BenchmarksPage";
-import { SelfImprovementPage } from "./components/self-improvement/SelfImprovementPage";
-import { TroubleshootingPage } from "./components/help/TroubleshootingPage";
-import { IntegrationsDeepDivesPage } from "./components/integrations-deep/IntegrationsDeepDivesPage";
-import { InfraPage } from "./components/infra/InfraPage";
-import { ValidationPage } from "./components/validation/ValidationPage";
+
+const ActivityBoard = lazy(() => import("./components/activity/ActivityBoard").then((m) => ({ default: m.ActivityBoard })));
+const DashboardPage = lazy(() => import("./components/dashboard/DashboardPage").then((m) => ({ default: m.DashboardPage })));
+const AgentsPage = lazy(() => import("./components/agents/AgentsPage").then((m) => ({ default: m.AgentsPage })));
+const AutomationsPage = lazy(() => import("./components/automations/AutomationsPage").then((m) => ({ default: m.AutomationsPage })));
+const RunsPage = lazy(() => import("./components/runs/RunsPage").then((m) => ({ default: m.RunsPage })));
+const ScorersPage = lazy(() => import("./components/scorers/ScorersPage").then((m) => ({ default: m.ScorersPage })));
+const SkillsPage = lazy(() => import("./components/skills/SkillsPage").then((m) => ({ default: m.SkillsPage })));
+const RunnersPage = lazy(() => import("./components/runners/RunnersPage").then((m) => ({ default: m.RunnersPage })));
+const SecretsPage = lazy(() => import("./components/secrets/SecretsPage").then((m) => ({ default: m.SecretsPage })));
+const IntegrationsPage = lazy(() => import("./components/integrations/IntegrationsPage").then((m) => ({ default: m.IntegrationsPage })));
+const McpsPage = lazy(() => import("./components/mcp/McpsPage").then((m) => ({ default: m.McpsPage })));
+const FactoryDefinitionPage = lazy(() => import("./components/factory-definition/FactoryDefinitionPage").then((m) => ({ default: m.FactoryDefinitionPage })));
+const SettingsPage = lazy(() => import("./components/factory-definition/SettingsPage").then((m) => ({ default: m.SettingsPage })));
+const BenchmarksPage = lazy(() => import("./components/benchmarks/BenchmarksPage").then((m) => ({ default: m.BenchmarksPage })));
+const SelfImprovementPage = lazy(() => import("./components/self-improvement/SelfImprovementPage").then((m) => ({ default: m.SelfImprovementPage })));
+const TroubleshootingPage = lazy(() => import("./components/help/TroubleshootingPage").then((m) => ({ default: m.TroubleshootingPage })));
+const IntegrationsDeepDivesPage = lazy(() => import("./components/integrations-deep/IntegrationsDeepDivesPage").then((m) => ({ default: m.IntegrationsDeepDivesPage })));
+const InfraPage = lazy(() => import("./components/infra/InfraPage").then((m) => ({ default: m.InfraPage })));
+const ValidationPage = lazy(() => import("./components/validation/ValidationPage").then((m) => ({ default: m.ValidationPage })));
 
 export default function App() {
   const [activeItem, setActiveItem] = useState("Activity");
@@ -89,7 +90,9 @@ export default function App() {
   return (
     <div className="flex h-screen overflow-hidden bg-[#f6f6f6] text-zinc-900 antialiased">
       <Sidebar activeItem={activeItem} onNavigate={handleNavigate} />
-      <main className="flex min-h-0 min-w-0 flex-1 overflow-hidden bg-[#f6f6f6]">{renderContent()}</main>
+      <main className="flex min-h-0 min-w-0 flex-1 overflow-hidden bg-[#f6f6f6]">
+        <Suspense fallback={<div className="flex flex-1 items-center justify-center p-6 text-sm text-zinc-500">Cargando...</div>}>{renderContent()}</Suspense>
+      </main>
     </div>
   );
 }

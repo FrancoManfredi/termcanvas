@@ -4,7 +4,7 @@
 import { useMemo } from "react";
 import { useFactoryBundle } from "../../lib/factory/hooks/useFactoryBundle";
 import { resolveAllSecretsView, resolveAllMcpView } from "../../lib/factory/domain/secrets.derive";
-import { FactorySettingsHeader } from "../settings/FactorySettingsHeader";
+import { FactoryIdentityHeader } from "../settings/FactoryIdentityHeader";
 
 function Badge({ children, tone = "zinc" }: { children: React.ReactNode; tone?: "zinc" | "violet" | "emerald" | "amber" | "red" }) {
   const cls =
@@ -49,7 +49,7 @@ export function SecretsPage() {
 
       <div className="flex-1 overflow-y-auto p-4">
         <div className="mx-auto max-w-[1080px] space-y-4">
-          <FactorySettingsHeader />
+          <FactoryIdentityHeader />
 
           <section className="rounded-[12px] border border-zinc-200 bg-white p-4">
             <div className="flex items-center justify-between">
@@ -276,3 +276,4 @@ export function SecretsPage() {
     </div>
   );
 }
+
