@@ -1,0 +1,54 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Geist", "Geist Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, monospace;
+  /* H9: realigned to the light theme the UI actually renders (zinc/violet on #f6f6f6). */
+  --color-border: hsl(0 0% 90%);
+  --color-input: hsl(0 0% 90%);
+  --color-ring: hsl(263 70% 60%);
+  --color-background: hsl(0 0% 98%);
+  --color-foreground: hsl(0 0% 9%);
+  /* Semantic surfaces — replace the hardcoded hexes, single place to retune the palette. */
+  --color-canvas: #f6f6f6;
+  --color-panel: #f8f8f8;
+  --color-subsurface: #fcfcfc;
+}
+
+* {
+  border-color: var(--color-border);
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--color-canvas);
+  color: hsl(0 0% 15%);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* H10: light selection instead of the dark-theme white overlay. */
+::selection {
+  background: rgba(139, 92, 246, 0.18);
+}
+
+/* H10: light scrollbar to match the zinc/violet light surfaces. */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #f4f4f5;
+}
+::-webkit-scrollbar-thumb {
+  background: #d4d4d8;
+  border-radius: 999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #a1a1aa;
+}

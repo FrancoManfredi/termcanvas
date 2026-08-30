@@ -1,0 +1,5 @@
+#!/bin/sh
+# Husky pre-commit — gate rápido LOCAL (Ola 5+6-8, hotfix valid_routing)
+# Gate canónico completo: pnpm --filter web check (tsc --noEmit && tsc -b && vitest --pool=threads && vite build && oxlint)
+# Pre-commit rápido: tsc -b + vitest (evita drift sin esperar build/oxlint)
+pnpm --filter web exec tsc -b && pnpm --filter web exec vitest run --pool=threads

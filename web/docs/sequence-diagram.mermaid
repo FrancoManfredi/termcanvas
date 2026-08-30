@@ -1,0 +1,120 @@
+%% TermCanvas Web — Flujo de llamada del diseño incremental (G1–G4)
+%% Source: WarpFactories.md §3 §9 §14 §19 · WarpFactories-Tickets.md T02 T09 T14 T15
+sequenceDiagram
+    autonumber
+    actor User as Usuario
+    participant Nav as nav.ts / App.tsx
+    participant Sidebar as Sidebar.tsx
+    participant RoutingUI as GitHubRoutingPage
+    participant Routing as github.routing (puro)
+    participant Engine as automation.engine (intacto)
+    participant ApiUI as FactoryApiPage
+    participant Api as createFactoryApi().handle
+    participant Store as WorkItemStore
+    participant WizardUI as QuickstartWizard
+    participant QS as quickstart.wizard (puro)
+    participant WS as FactoryWorkspaceStore
+    participant Port as KeyValuePort (localStorage)
+
+    Note over User,Port: ── W0/W1 · Navegación única + alta de factory (G5, G3) ──
+
+    User->>Sidebar: click "+ Add factory"
+    Sidebar->>WizardUI: abre NewFactoryDialog
+    User->>WizardUI: escribe name = "payments-factory"
+    WizardUI->>WS: create({ name })
+    WS->>WS: validateFactoryCreate → defaultAliasFor(name)
+    alt validación OK
+        WS->>Port: write(WORKSPACE_STORAGE_KEY, JSON)
+        WS-->>WizardUI: ParseResult.ok(FactoryRecord)
+        WS->>Store: addKnownFactories(["payments-factory"])
+        Note right of Store: aditivo — no pisa el set existente
+        WizardUI->>Nav: select(uid) → navigate("Dashboard")
+    else alias duplicado o charset inválido
+        WS-->>WizardUI: ParseResult.fail([{code:"alias_unique"|"alias_charset"}])
+        WizardUI-->>User: error inline en español (US-001, US-002)
+    end
+
+    User->>Sidebar: intenta aplicar una segunda policy
+    Sidebar->>WS: setPolicy(uid, policyB)
+    WS-->>User: ParseResult.fail "two_policies" + atajo "Crear factory separada" (US-005)
+
+    Note over User,Port: ── W2 · GitHub dual-label routing (G1) ──
+
+    User->>Nav: click "GitHub routing"
+    Nav->>RoutingUI: monta
+    User->>RoutingUI: pega evento (labels, body con ```, isEdit, authorIsBot)
+    RoutingUI->>Routing: isRoutable(event, policy)
+    Routing->>Routing: new_content → not_bot_author → label_present → not_code_block → mention_present
+    Routing-->>RoutingUI: RoutingDecision{ routable, checks[5], reason, expectedLabel }
+    RoutingUI-->>User: veredicto + traza por check (§9)
+    alt routable = true
+        RoutingUI->>Routing: evaluateGitHubEvent(automations, event, policy)
+        Routing->>Routing: toMockEvent(event)
+        Routing->>Engine: findMatchingAutomations(automations, mockEvent)
+        Note right of Engine: automation.engine.ts NO se modifica
+        Engine-->>Routing: AutomationDefinition[]
+        Routing-->>RoutingUI: { decision, matched }
+        RoutingUI-->>User: "N automations disparan" + continuationKey (dedupe)
+    else routable = false
+        Routing-->>RoutingUI: matched = []
+        RoutingUI-->>User: "Mention sin label = no arranca" (US-076)
+    end
+
+    Note over User,Port: ── W3 · Factory API + Agent API (G2) ──
+
+    User->>Nav: click "Factory API"
+    User->>ApiUI: elige POST /api/v1/factory/{uid}/runs + body JSON
+    ApiUI->>Api: handle({ method, path, headers, body })
+    Api->>Api: auth Bearer (401 si falta/incorrecta)
+    Api->>Api: validateDispatchBody → prompt requerido, ticket_ref ^[a-z]+:[A-Za-z0-9-_]+$
+    alt body inválido
+        Api-->>ApiUI: 400 missing_prompt / 422 invalid_ticket_ref
+        ApiUI-->>User: error JSON + status
+    else body válido
+        Api->>Api: deriveRunTitle(prompt) si no vino title
+        Api->>Store: create({ factoryName, title, source:"factory", sourceRef: ticket_ref, createdBy:"factory-api" })
+        Store-->>Api: ParseResult.ok(WorkItem)
+        Api-->>ApiUI: 201 DispatchedRun{ run_id, work_item_id, status:"queued" }
+        ApiUI-->>User: response + snippets curl y OzAPI (US-151, US-155)
+    end
+
+    User->>ApiUI: GET /agent/runs/{runId}
+    Api->>Store: getById(workItemId)
+    Store-->>Api: WorkItem
+    Api-->>ApiUI: 200 { run_id, status, stage, followups }
+    User->>ApiUI: POST /agent/runs/{runId}/followups { content }
+    Api-->>ApiUI: 201 { id, run_id, status } (ledger en memoria)
+    User->>ApiUI: POST /agent/runs/{runId}/cancel
+    Api->>Store: cancel(workItemId, "human", "cancelled via Agent API")
+    Store-->>Api: ParseResult.ok(WorkItem)
+    Api-->>ApiUI: 200 { run_id, status:"cancelled" } (US-152)
+
+    Note over User,Port: ── W4 · Quickstart wizard 7 pasos (G4) ──
+
+    User->>Nav: click "Quickstart"
+    Nav->>WizardUI: monta QuickstartWizard (stepIndex 0)
+    loop pasos 1..7 (source → repos → identity → slack → agents → tracker → review)
+        User->>WizardUI: elige / togglea
+        WizardUI->>QS: quickstartReducer(state, action)
+        QS-->>WizardUI: QuickstartState'
+        WizardUI->>QS: validateStep(state, existing)
+        QS-->>WizardUI: ParseResult<QuickstartState> (habilita "Siguiente")
+    end
+    User->>WizardUI: "Crear factory y enviar el primer work item"
+    WizardUI->>QS: toCreateFactoryInput(state) / toFirstWorkItemInput(state)
+    WizardUI->>WS: create(input)
+    WS-->>WizardUI: ParseResult.ok(FactoryRecord)
+    WizardUI->>Store: addKnownFactories([factory.name])
+    WizardUI->>Store: create({ title: VERBATIM_FIRST_WORK_ITEM, source:"direct" })
+    Store-->>WizardUI: ParseResult.ok(WorkItem) (US-143)
+    WizardUI->>Nav: navigate("Activity")
+    Nav-->>User: work item visible en el kanban
+
+    Note over User,Port: ── Persistencia (G3) ──
+    User->>Nav: recarga la página (F5)
+    Nav->>WS: new FactoryWorkspaceStore(createLocalStoragePort())
+    WS->>Port: read(WORKSPACE_STORAGE_KEY)
+    Port-->>WS: JSON con factories + selectedUid
+    WS-->>Nav: factories restauradas
+    Nav->>Sidebar: navItemsByScope("factory") + factories
+    Sidebar-->>User: sidebar reconstruido desde nav.ts (G5)

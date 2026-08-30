@@ -1,0 +1,308 @@
+%% TermCanvas Web — Diagrama de clases del diseño incremental (G1–G6)
+%% Source: WarpFactories.md §3 §7 §9 §10 §14 §19 · WarpFactories-Tickets.md T02 T09 T14 T15
+classDiagram
+    direction LR
+
+    %% ─────────────── EXISTENTE (no modificar) ───────────────
+    class ParseResult~T~ {
+        +boolean ok
+        +T value
+        +ParseIssue[] issues
+        +static ok(v) ParseResult
+        +static fail(issues) ParseResult
+        +static singleFail(path, message, code) ParseResult
+        +map(fn) ParseResult
+        +flatMap(fn) ParseResult
+    }
+    class ParseIssue {
+        +string path
+        +string message
+        +string code
+    }
+    class WorkItemStore {
+        -Map items
+        -WorkItemMachine machine
+        -Set knownFactories
+        -Set listeners
+        -number version
+        +create(input) ParseResult~WorkItem~
+        +getById(id) WorkItem
+        +list(filter) WorkItem[]
+        +transition(id, to, actor, ctx) ParseResult~WorkItem~
+        +cancel(id, actor, reason) ParseResult~WorkItem~
+        +setKnownFactories(names) void
+        +addKnownFactories(names) void
+        +subscribe(cb) Function
+        +getVersion() number
+    }
+    class WorkItem {
+        +readonly string id
+        +readonly string factoryName
+        +readonly string title
+        +readonly WorkItemSource source
+        +readonly string sourceRef
+        +readonly WorkItemStage stage
+        +readonly WorkItemEvent[] history
+    }
+    class AutomationDefinition {
+        +string name
+        +boolean enabled
+        +string agent
+        +AutomationTrigger[] triggers
+        +string prompt
+    }
+    class MockEvent {
+        +string provider
+        +string event
+        +string[] repos
+        +string[] labels
+    }
+
+    %% ─────────────── G1 · GitHub dual-label routing ───────────────
+    class GitHubRoutingEvent {
+        +readonly string provider
+        +readonly string event
+        +readonly string repo
+        +readonly number number
+        +readonly string[] labels
+        +readonly string body
+        +readonly boolean isEdit
+        +readonly boolean authorIsBot
+        +readonly string[] mentioned
+        +readonly string[] assigned
+    }
+    class RoutingPolicy {
+        +readonly string foremanName
+        +readonly string handle
+        +readonly boolean requireFactoryLabel
+    }
+    class RoutingCheck {
+        +readonly RoutingCheckId id
+        +readonly string label
+        +readonly boolean ok
+        +readonly string detail
+        +readonly string source
+    }
+    class RoutingDecision {
+        +readonly boolean routable
+        +readonly RoutingCheck[] checks
+        +readonly string reason
+        +readonly string expectedLabel
+        +readonly string matchedHandle
+    }
+    class GitHubRoutingService {
+        <<module puro>>
+        +factoryLabel(foremanName) string
+        +stripCodeBlocks(markdown) string
+        +findMention(text, handle) string
+        +hasFactoryLabel(labels, foremanName) boolean
+        +continuationKey(event) string
+        +isRoutable(event, policy) RoutingDecision
+        +toMockEvent(event) MockEvent
+        +evaluateGitHubEvent(automations, event, policy) Object
+    }
+
+    %% ─────────────── G2 · Factory API + Agent API ───────────────
+    class ApiRequest {
+        +readonly HttpMethod method
+        +readonly string path
+        +readonly Record query
+        +readonly Record headers
+        +readonly unknown body
+    }
+    class ApiResponse~T~ {
+        +readonly number status
+        +readonly Record headers
+        +readonly T body
+    }
+    class FactorySummary {
+        +readonly string uid
+        +readonly string name
+        +readonly string alias
+        +readonly RepositoryRef[] repositories
+        +readonly Object foreman
+    }
+    class DispatchedRun {
+        +readonly string run_id
+        +readonly string factory_uid
+        +readonly string work_item_id
+        +readonly RunStatus status
+        +readonly string prompt
+        +readonly string title
+        +readonly string ticket_ref
+        +readonly string ticket_url
+        +readonly string created_at
+    }
+    class FactoryApiDeps {
+        +readonly WorkItemStore store
+        +readonly FactorySummary[] factories
+        +readonly string apiKey
+        +readonly Function now
+        +readonly Function id
+    }
+    class FactoryApiRouter {
+        <<module puro sobre store>>
+        +handle(req) ApiResponse
+        +routes() RouteDef[]
+    }
+    class FactoryApiHelpers {
+        <<module puro>>
+        +deriveRunTitle(prompt, max) string
+        +validateDispatchBody(body) ParseResult
+        +matchRoute(method, path) Object
+        +toCurl(req, apiKey) string
+        +toOzApiSnippet(routeId, req) string
+    }
+
+    %% ─────────────── G3 · Factory CRUD + policy ───────────────
+    class FactoryRecord {
+        +readonly string uid
+        +readonly string name
+        +readonly string alias
+        +readonly RepositoryRef[] repositories
+        +readonly IntegrationType[] integrations
+        +readonly Record agentToggles
+        +readonly string policyId
+        +readonly string createdAt
+    }
+    class CreateFactoryInput {
+        +string name
+        +string alias
+        +string description
+        +RepositoryRef[] repositories
+    }
+    class FactoryPolicy {
+        +readonly string id
+        +readonly string label
+        +readonly boolean specApproval
+        +readonly boolean requireReview
+        +readonly string mergePolicy
+    }
+    class FactoryRecordService {
+        <<module puro>>
+        +defaultAliasFor(name) string
+        +validateFactoryName(name, existing) Object
+        +validateFactoryAlias(alias, existing) Object
+        +validateFactoryCreate(input, opts) ParseResult~FactoryRecord~
+        +renameFactory(record, patch, existing) ParseResult~FactoryRecord~
+    }
+    class FactoryPolicyService {
+        <<module puro>>
+        +DEFAULT_POLICY FactoryPolicy
+        +enforceSinglePolicy(record, candidate) ParseResult~FactoryRecord~
+        +FACTORY_GLOSSARY GlossaryEntry[]
+    }
+    class KeyValuePort {
+        <<interface>>
+        +read(key) string
+        +write(key, value) void
+    }
+    class MemoryPort
+    class LocalStoragePort
+    class FactoryWorkspaceStore {
+        -Map records
+        -KeyValuePort port
+        -string selectedUid
+        -Set listeners
+        -number version
+        +list() FactoryRecord[]
+        +getByUid(uid) FactoryRecord
+        +getSelectedUid() string
+        +select(uid) void
+        +create(input) ParseResult~FactoryRecord~
+        +update(uid, patch) ParseResult~FactoryRecord~
+        +setPolicy(uid, policy) ParseResult~FactoryRecord~
+        +remove(uid) ParseResult~void~
+        +toSummaries() FactorySummary[]
+        +subscribe(cb) Function
+        +getVersion() number
+    }
+
+    %% ─────────────── G4 · Quickstart wizard ───────────────
+    class QuickstartState {
+        +readonly number stepIndex
+        +readonly string provider
+        +readonly RepositoryRef[] repos
+        +readonly string name
+        +readonly string alias
+        +readonly boolean aliasTouched
+        +readonly boolean slack
+        +readonly Record agents
+        +readonly string tracker
+        +readonly boolean useMcpOnboarding
+    }
+    class QuickstartWizardService {
+        <<module puro>>
+        +QUICKSTART_STEPS string[]
+        +initialQuickstartState() QuickstartState
+        +quickstartReducer(state, action) QuickstartState
+        +validateStep(state, existing) ParseResult~QuickstartState~
+        +isStepComplete(state) boolean
+        +toCreateFactoryInput(state) CreateFactoryInput
+        +toFirstWorkItemInput(state) Object
+    }
+    class QuickstartData {
+        <<module puro>>
+        +VERBATIM_FIRST_WORK_ITEM string
+        +MCP_ONBOARDING_PROMPT string
+        +STEP_COPY Record
+        +DEMO_REPOS RepositoryRef[]
+    }
+
+    %% ─────────────── G5 · Navegación ───────────────
+    class NavItem {
+        +readonly NavItemId id
+        +readonly string label
+        +readonly string scope
+        +readonly string trace
+        +readonly string badge
+    }
+    class NavRegistry {
+        <<module puro>>
+        +NAV_ITEMS NavItem[]
+        +DEFAULT_NAV_ITEM NavItemId
+        +navItemsByScope(scope) NavItem[]
+        +isNavItemId(value) boolean
+        +assertNever(value) never
+    }
+
+    %% ─────────────── Relaciones ───────────────
+    ParseResult "1" o-- "*" ParseIssue
+    WorkItemStore "1" o-- "*" WorkItem : items
+    WorkItemStore ..> WorkItem : create/transition
+
+    GitHubRoutingService ..> GitHubRoutingEvent : evalúa
+    GitHubRoutingService ..> RoutingPolicy : evalúa
+    GitHubRoutingService ..> RoutingDecision : produce
+    RoutingDecision "1" *-- "5" RoutingCheck : checks
+    GitHubRoutingService ..> MockEvent : toMockEvent
+    GitHubRoutingService ..> AutomationDefinition : delega matching
+    GitHubRoutingService ..> ParseResult : errores como valores
+
+    FactoryApiRouter ..> ApiRequest : consume
+    FactoryApiRouter ..> ApiResponse : produce
+    FactoryApiRouter --> FactoryApiDeps : dependencias inyectadas (DIP)
+    FactoryApiDeps --> WorkItemStore
+    FactoryApiDeps --> FactorySummary
+    FactoryApiRouter ..> DispatchedRun : 201
+    FactoryApiHelpers ..> FactoryApiRouter
+    FactoryApiHelpers ..> ParseResult
+
+    FactoryRecordService ..> CreateFactoryInput
+    FactoryRecordService ..> FactoryRecord : ParseResult
+    FactoryPolicyService ..> FactoryPolicy
+    FactoryPolicyService ..> FactoryRecord : enforceSinglePolicy
+    FactoryWorkspaceStore --> KeyValuePort : DIP
+    KeyValuePort <|.. MemoryPort
+    KeyValuePort <|.. LocalStoragePort
+    FactoryWorkspaceStore "1" o-- "*" FactoryRecord
+    FactoryWorkspaceStore ..> FactorySummary : toSummaries (G2)
+    FactoryWorkspaceStore ..> ParseResult
+
+    QuickstartWizardService ..> QuickstartState : reducer puro
+    QuickstartWizardService ..> QuickstartData : copy verbatim
+    QuickstartWizardService ..> CreateFactoryInput : toCreateFactoryInput
+    FactoryWorkspaceStore ..> CreateFactoryInput : create
+
+    NavRegistry "1" o-- "*" NavItem
+    FactoryWorkspaceStore ..> NavRegistry : factories del sidebar
