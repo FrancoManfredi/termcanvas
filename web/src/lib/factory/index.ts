@@ -37,4 +37,8 @@ export * from "./domain/factory.definition.derive";
 export * from "./domain/settings.derive";
 export * from "./domain/benchmark.types";
 export * from "./domain/benchmark.derive";
+export * from "./domain/troubleshooting.data";
+export * from "./domain/integrations.deep";
+export * from "./domain/infra.derive";
+export * from "./domain/validation.derive";
 export * from "./mcp/mcp.stub";

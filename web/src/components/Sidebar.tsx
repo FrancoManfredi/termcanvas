@@ -360,6 +360,9 @@ export function Sidebar({ activeItem = "Activity", onNavigate }: SidebarProps) {
                       { label: "Benchmarks", delay: 0.28 },
                       { label: "Factory definition", delay: 0.3 },
                       { label: "Settings", delay: 0.32 },
+                      { label: "Troubleshooting", delay: 0.34 },
+                      { label: "Infra", delay: 0.36 },
+                      { label: "Validation", delay: 0.38 },
                     ].map(({ label, delay }) => {
                       const isActive = label === activeItem;
                       return (
