@@ -1,6 +1,6 @@
 import { useMemo, useSyncExternalStore, useCallback } from "react";
 import { type WorkItemFilter } from "../store/workItem.store";
-import { useWorkItemStore } from "../store/WorkItemStoreContext";
+import { useWorkItemStore, getDefaultStore } from "../store/WorkItemStoreContext";
 import type { Actor, WorkItemStage, TransitionContext } from "../domain/workItem.types";
 
 export function useWorkItems(filter: WorkItemFilter = {}) {
@@ -34,5 +34,5 @@ export function useWorkItem(id: string) {
 }
 
 export function getWorkItemStore() {
-  return useWorkItemStore();
+  return getDefaultStore();
 }

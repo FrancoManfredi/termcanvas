@@ -5,7 +5,7 @@ const WorkItemStoreContext = createContext<WorkItemStore | null>(null);
 
 let defaultStore: WorkItemStore | null = null;
 
-function getDefaultStore(): WorkItemStore {
+export function getDefaultStore(): WorkItemStore {
   if (!defaultStore) {
     defaultStore = new WorkItemStore(undefined, ["payments-factory", "termcanvas-factory"]);
   }
