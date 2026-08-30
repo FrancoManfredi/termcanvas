@@ -10,10 +10,7 @@ import {
   Waypoints,
 } from "lucide-react";
 import { useState } from "react";
-// motion v13 re-exports framer-motion — types for AnimatePresence live in the react entry
-// eslint-disable-next-line @typescript-eslint/ban-ts-comment
-// @ts-ignore - motion's index.d.ts only re-exports dom; react entry has AnimatePresence
-import { AnimatePresence, motion } from "motion";
+import { AnimatePresence, motion } from "framer-motion";
 
 // ——— tokens ———
 // Concentric radius: outer 12px = inner 8px + 4px padding
