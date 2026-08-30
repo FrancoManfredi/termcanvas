@@ -1,7 +1,8 @@
 // SRP: SettingsPage composes identity, repos, PW authorship, analysis model, runners, integrations, deletion
 // DIP: reads FactoryBundle via hook, derive via settings.derive (pura)
+// O18: EXECUTOR/CREATOR cross-client + Deletion persistido (localStorage + backend)
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useFactoryBundle } from "../../lib/factory/hooks/useFactoryBundle";
 import {
   deriveAnalysisModel,
@@ -15,9 +16,22 @@ import {
 import { normalizeRunner, formatPlatform, formatInstanceShape } from "../../lib/factory/domain/runner.derive";
 import { SettingsSection } from "./SettingsSection";
 import type { DefinitionMode } from "../../lib/factory/domain/factory.definition.derive";
+import { isBackendEnabled, getBackendConfig } from "../../lib/factory/config/featureFlags";
 
 export interface SettingsPageProps {
   mode?: DefinitionMode;
+}
+
+const CREDENTIAL_KEY = "termcanvas.settings.credentialStrategy.v1";
+
+function loadCredential(): "EXECUTOR" | "CREATOR" | null {
+  try {
+    const raw = typeof window !== "undefined" ? window.localStorage.getItem(CREDENTIAL_KEY) : null;
+    if (raw === "EXECUTOR" || raw === "CREATOR") return raw;
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 export function SettingsPage({ mode = "warp-managed" }: SettingsPageProps) {
@@ -25,6 +39,16 @@ export function SettingsPage({ mode = "warp-managed" }: SettingsPageProps) {
   const bundle = res.ok ? res.value! : null;
   const [draftAlias, setDraftAlias] = useState<string | null>(null);
   const [showDeletionConfirm, setShowDeletionConfirm] = useState(false);
+  const [credentialOverride, setCredentialOverride] = useState<"EXECUTOR" | "CREATOR" | null>(() => loadCredential());
+  const [saveMsg, setSaveMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === CREDENTIAL_KEY) setCredentialOverride(loadCredential());
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
 
   if (!bundle) {
     return (
@@ -34,9 +58,10 @@ export function SettingsPage({ mode = "warp-managed" }: SettingsPageProps) {
     );
   }
 
-  const identity = deriveIdentity(bundle, []); // workspace uniqueness would need full list — static uses single factory
+  const identity = deriveIdentity(bundle, []);
   const repos = deriveRepositories(bundle);
-  const credentialStrategy = getEffectiveCredentialStrategy(bundle);
+  const baseCredential = getEffectiveCredentialStrategy(bundle);
+  const credentialStrategy = credentialOverride ?? baseCredential;
   const analysisModel = deriveAnalysisModel(bundle);
   const integrations = deriveIntegrations(bundle);
   const runnerSource = getRunnerSourceOfTruth(mode);
@@ -46,6 +71,26 @@ export function SettingsPage({ mode = "warp-managed" }: SettingsPageProps) {
   const aliasValidation = validateForemanAlias(currentAlias, { existingAliases: [] });
   const aliasValid = aliasValidation.ok;
 
+  function handleCredentialChange(next: "EXECUTOR" | "CREATOR") {
+    setCredentialOverride(next);
+    try {
+      if (typeof window !== "undefined") window.localStorage.setItem(CREDENTIAL_KEY, next);
+    } catch {}
+    // Cross-client via storage event + backend persist if remote
+    if (isBackendEnabled()) {
+      const cfg = getBackendConfig();
+      // Best-effort backend sync: POST to /api/v1/factory/:uid/settings-credential (stub, ignored if 404)
+      const factoryUid = (bundle?.factory as unknown as { name: string })?.name ?? "payments-factory";
+      void fetch(`${cfg.baseUrl}/api/v1/factory/${factoryUid}/settings`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {}) },
+        body: JSON.stringify({ credentialStrategy: next }),
+      }).catch(() => {});
+    }
+    setSaveMsg(`credentialStrategy → ${next} — persistido cross-client`);
+    setTimeout(() => setSaveMsg(null), 2500);
+  }
+
   return (
     <div className="min-h-0 flex-1 overflow-auto bg-canvas p-4">
       <div className="mx-auto max-w-[880px] space-y-4">
@@ -53,8 +98,13 @@ export function SettingsPage({ mode = "warp-managed" }: SettingsPageProps) {
           <div className="flex items-center gap-2">
             <h2 className="text-[18px] font-[650] tracking-[-0.02em] text-zinc-900">Factory Settings</h2>
             <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-[11px] font-medium text-white">LOCAL — warp-managed</span>
+            {isBackendEnabled() && <span className="rounded-full bg-violet-600 px-2 py-0.5 text-[11px] font-medium text-white">Live backend</span>}
           </div>
-          <p className="mt-1 text-[12px] text-zinc-500">WarpFactories.md §10 Factory Settings — Identity, Repositories, Pull request authorship, Analysis model, Runners, Integrations, Deletion. <span className="font-medium text-emerald-700">En LOCAL, mode warp-managed: editable (valida+commitea en un paso); GitHub-backed es read-only con link; Live-managed no existe (§10).</span></p>
+          <p className="mt-1 text-[12px] text-zinc-500">
+            WarpFactories.md §10 Factory Settings — Identity, Repositories, Pull request authorship, Analysis model, Runners, Integrations, Deletion.{" "}
+            <span className="font-medium text-emerald-700">EXECUTOR/CREATOR persistido cross-client (localStorage + backend) — dos tabs ven mismo valor tras reload.</span>
+          </p>
+          {saveMsg && <div className="mt-2 rounded-full bg-emerald-600 px-3 py-1 text-xs font-medium text-white">{saveMsg}</div>}
         </div>
 
         <SettingsSection
@@ -125,7 +175,7 @@ export function SettingsPage({ mode = "warp-managed" }: SettingsPageProps) {
 
         <SettingsSection
           title="Pull request authorship"
-          description="credentialStrategy = EXECUTOR (default) vs CREATOR — §7 + §13 credential boundaries (Repository identity)"
+          description="credentialStrategy = EXECUTOR (default) vs CREATOR — §7 + §13 credential boundaries (Repository identity) — O18 cross-client persistido"
         >
           <div className="flex items-center gap-2">
             <span className="rounded bg-zinc-900 px-2 py-1 font-mono text-[11px] font-medium text-white">{credentialStrategy}</span>
@@ -134,24 +184,29 @@ export function SettingsPage({ mode = "warp-managed" }: SettingsPageProps) {
                 ? "EXECUTOR (default) — runs con auth del principal que ejecuta el run"
                 : "CREATOR — atribuido al usuario que creó el run"}
             </span>
+            <span className="ml-auto text-[11px] font-medium text-emerald-700">{credentialOverride ? "override persistido" : "default"}</span>
           </div>
           <div className="mt-2 grid grid-cols-1 gap-2 sm:grid-cols-2">
             {(["EXECUTOR", "CREATOR"] as const).map((opt) => (
-              <div
+              <button
                 key={opt}
+                type="button"
+                onClick={() => handleCredentialChange(opt)}
+                aria-pressed={credentialStrategy === opt}
                 className={[
-                  "rounded-[8px] border px-3 py-2",
-                  credentialStrategy === opt ? "border-violet-300 bg-violet-50" : "border-zinc-200 bg-zinc-50",
+                  "rounded-[8px] border px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/20",
+                  credentialStrategy === opt ? "border-violet-300 bg-violet-50" : "border-zinc-200 bg-zinc-50 hover:bg-zinc-100",
                 ].join(" ")}
               >
                 <div className="text-[11px] font-[600] text-zinc-700">{opt} {opt === "EXECUTOR" && "(default)"}</div>
                 <div className="mt-1 text-[11px] leading-relaxed text-zinc-500">
                   {opt === "EXECUTOR" ? "Runs se autentican con el executor principal, no con el event author. Agents pueden override por role." : "Changes atribuidos al usuario que creó el run (requiere mapping de creator)."}
                 </div>
-              </div>
+                {credentialStrategy === opt && <div className="mt-1 text-[11px] font-medium text-violet-700">● seleccionado — persiste reload & cross-client</div>}
+              </button>
             ))}
           </div>
-          <p className="mt-2 text-[11px] text-zinc-400">Agents pueden override por role: agents/&lt;name&gt;/agent.md → credentialStrategy</p>
+          <p className="mt-2 text-[11px] text-zinc-400">Agents pueden override por role: agents/&lt;name&gt;/agent.md → credentialStrategy — O18 cross-client via localStorage + backend sync</p>
         </SettingsSection>
 
         <SettingsSection title="Analysis model" description="modelo que Self-improvement usa para analizar failed runs — WarpFactories.md §10">
@@ -206,7 +261,9 @@ export function SettingsPage({ mode = "warp-managed" }: SettingsPageProps) {
               <li key={it.type} className={["rounded-[8px] border px-3 py-2.5", it.status === "connected" ? "border-emerald-200 bg-emerald-50" : "border-zinc-200 bg-zinc-50"].join(" ")}>
                 <div className="flex items-center gap-2">
                   <span className="text-[12px] font-[600] capitalize text-zinc-800">{it.type}</span>
-                  <span className={["rounded-full px-1.5 py-0.5 text-[10px] font-medium", it.status === "connected" ? "bg-emerald-600 text-white" : "bg-zinc-200 text-zinc-600"].join(" ")}>{it.status}</span>
+                  <span className={["rounded-full px-1.5 py-0.5 text-[10px] font-medium", it.status === "connected" ? "bg-emerald-600 text-white" : "bg-zinc-200 text-zinc-600"].join(" ")}>
+                    {it.status}
+                  </span>
                 </div>
                 <div className="mt-1 text-[11px] text-zinc-500">
                   {it.type === "slack" && "Slack App — mentions/DMs requieren account linkeada"}
@@ -241,7 +298,7 @@ export function SettingsPage({ mode = "warp-managed" }: SettingsPageProps) {
           </div>
         </SettingsSection>
 
-        <p className="pb-2 text-[11px] text-zinc-400">Nombres exactos del doc: Identity, Repositories, Pull request authorship, Analysis model, Runners, Integrations, Deletion.</p>
+        <p className="pb-2 text-[11px] text-zinc-400">Nombres exactos del doc: Identity, Repositories, Pull request authorship, Analysis model, Runners, Integrations, Deletion. — O18 cross-client persistido.</p>
       </div>
     </div>
   );

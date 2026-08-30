@@ -1,11 +1,11 @@
-import { useMemo, useState, useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Search, Plus, SlidersHorizontal } from "lucide-react";
 import { useWorkItems, getWorkItemStore } from "../../lib/factory/hooks/useWorkItems";
 import { ACTIVE_STAGES, ALL_STAGES } from "../../lib/factory/domain/workItem.types";
-import type { WorkItemStage } from "../../lib/factory/domain/workItem.types";
+import type { WorkItem, WorkItemStage } from "../../lib/factory/domain/workItem.types";
 import { ActivityDetail } from "./ActivityDetail";
 import { HelpLink } from "../help/HelpLinks";
-
+import { isBackendEnabled } from "../../lib/factory/config/featureFlags";
 
 function hashForItem(id: string): string {
   let h = 0;
@@ -19,25 +19,23 @@ export const ACTIVITY_DEFAULT_CREATED_BY = "you";
 export const ACTIVITY_DEFAULT_INCLUDE_TERMINALS = false;
 
 function seedIfEmpty() {
+  // O18: solo seed en local; en remote el backend es source of truth (SQLite)
+  if (isBackendEnabled()) return;
   const store = getWorkItemStore();
   if (store.size() > 0) {
     return;
   }
-  // Determinístico, sin Math.random — OCP puro domain + UI
   const creator = ACTIVITY_DEFAULT_CREATED_BY;
-  // Triage 4 — todos con createdBy=you para default filter
   store.create({ factoryName: "payments-factory", title: "Update pin UI to left hover", description: "Origin Slack thread", source: "slack_mention", createdBy: creator, sourceRef: "slack:thread" });
   store.create({ factoryName: "payments-factory", title: "Replace ASCII caret with chevron icon", source: "github_issue", createdBy: creator });
   store.create({ factoryName: "payments-factory", title: "Debug GitHub Permissions Issue", source: "github_issue", createdBy: creator });
   store.create({ factoryName: "payments-factory", title: "Add Paste Option for Grok Auth Code", source: "github_issue", createdBy: creator });
-  // Reviewing 3
   const r1 = store.create({ factoryName: "payments-factory", title: "Adjust Pin Icon Alignment", source: "github_issue", createdBy: creator, foremanDecision: { shouldSkipTriage: true, shouldSkipPlanning: true, reason: "image" } });
   if (r1.ok) store.transition(r1.value!.id, "Reviewing", "implement");
   const r2 = store.create({ factoryName: "payments-factory", title: "Fix Hubble Factory Triager Issue", source: "github_issue", createdBy: creator, foremanDecision: { shouldSkipTriage: true, shouldSkipPlanning: true, reason: "image" } });
   if (r2.ok) store.transition(r2.value!.id, "Reviewing", "implement");
   const r3 = store.create({ factoryName: "payments-factory", title: "Add /resume Command Suggestion", source: "github_issue", createdBy: creator, foremanDecision: { shouldSkipTriage: true, shouldSkipPlanning: true, reason: "image" } });
   if (r3.ok) store.transition(r3.value!.id, "Reviewing", "implement");
-  // Terminales para includeTerminals toggle — no visibles por defecto (includeTerminals false)
   const t1 = store.create({ factoryName: "payments-factory", title: "Self-improvement: enforce test evidence", source: "github_issue", createdBy: creator, foremanDecision: { shouldSkipTriage: true, shouldSkipPlanning: true, reason: "self-improvement" } });
   if (t1.ok) {
     store.transition(t1.value!.id, "Reviewing", "implement");
@@ -59,7 +57,6 @@ export function ActivityBoard() {
   const [createdBy, setCreatedBy] = useState(ACTIVITY_DEFAULT_CREATED_BY);
   const [stages, setStages] = useState<WorkItemStage[]>([]);
   const [includeTerminals, setIncludeTerminals] = useState(ACTIVITY_DEFAULT_INCLUDE_TERMINALS);
-  // Tri-state selection: undefined = derive the first Triage item, null = detail explicitly closed.
   const [selection, setSelection] = useState<string | null | undefined>(undefined);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({ Planning: true, Building: true });
 
@@ -77,29 +74,33 @@ export function ActivityBoard() {
     };
   }, [search, createdBy, stages, includeTerminals]);
 
-  const { items, transition, cancel, store } = useWorkItems(filter);
+  // O18: live contra backend — await MaybePromise + useSyncExternalStore, server-side search/includeTerminals
+  const workItemsState = useWorkItems(filter) as unknown as {
+    items: WorkItem[];
+    transition: (id: string, to: WorkItemStage, actor: unknown, ctx?: unknown) => Promise<unknown>;
+    cancel: (id: string, actor?: unknown, reason?: string) => Promise<unknown>;
+    store: ReturnType<typeof getWorkItemStore>;
+    loading?: boolean;
+    error?: string;
+  };
+  const { items, transition, cancel, store, loading, error } = workItemsState;
 
   const grouped = useMemo(() => {
-    const map = new Map<WorkItemStage, typeof items>();
+    const map = new Map<WorkItemStage, WorkItem[]>();
     const stagesToShow: WorkItemStage[] = stages.length > 0 ? stages : includeTerminals ? [...ALL_STAGES] : [...ACTIVE_STAGES];
     for (const stage of stagesToShow) {
-      if (stages.length > 1) {
-        const all = getWorkItemStore().list({ search: search || undefined, createdBy: createdBy || undefined, includeTerminals: true });
-        map.set(stage, all.filter((it) => it.stage === stage));
-      } else {
-        map.set(stage, items.filter((it) => it.stage === stage));
-      }
+      // O18: items ya viene filtrado server-side (search/createdBy/includeTerminals) — no re-filtrar via getWorkItemStore
+      map.set(stage, (items as WorkItem[]).filter((it) => it.stage === stage));
     }
     return map;
-  }, [items, stages, includeTerminals, search, createdBy]);
+  }, [items, stages, includeTerminals]);
 
-  // Derived during render instead of stored: removes the set-state-in-effect and its act() risk.
   const selectedItem =
     selection === undefined
       ? (grouped.get("Triage")?.[0] ?? null)
       : selection === null
         ? null
-        : (store.getById(selection) ?? null);
+        : ((store.getById(selection) as unknown) ?? (items as unknown[]).find((it: unknown) => (it as { id: string }).id === selection) ?? null);
 
   function handleSelect(id: string) {
     setSelection(id);
@@ -107,18 +108,19 @@ export function ActivityBoard() {
   function handleClose() {
     setSelection(null);
   }
-  function handleStop(id: string) {
-    cancel(id, "foreman", "stopped via Activity Stop task");
+  async function handleStop(id: string) {
+    // O18: Stop persistido — await MaybePromise (remote → backend, local → memory)
+    await (cancel as unknown as (id: string, actor?: unknown, reason?: string) => Promise<unknown>)(id, "foreman" as never, "stopped via Activity Stop task");
   }
-  function handleTransition(id: string, to: WorkItemStage, ctx?: Record<string, unknown>) {
+  async function handleTransition(id: string, to: WorkItemStage, ctx?: Record<string, unknown>) {
     const actor = to === "Complete" ? "foreman" : to === "Cancelled" ? "foreman" : "human";
-    transition(id, to, actor as never, ctx as never);
+    await (transition as unknown as (id: string, to: WorkItemStage, actor: unknown, ctx?: unknown) => Promise<unknown>)(id, to, actor as never, ctx as never);
   }
   function toggleCollapsed(stage: string) {
     setCollapsed((prev) => ({ ...prev, [stage]: !prev[stage] }));
   }
 
-  const total = getWorkItemStore().list({ search: search || undefined, createdBy: createdBy || undefined, includeTerminals: true }).length;
+  const total = (items as WorkItem[]).length;
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-panel">
@@ -158,7 +160,6 @@ export function ActivityBoard() {
             </button>
           )}
         </div>
-        {/* US-102: terminal stages are hidden by default — one click brings them back. */}
         <button
           type="button"
           onClick={() => setIncludeTerminals((v) => !v)}
@@ -210,12 +211,23 @@ export function ActivityBoard() {
         </div>
       </div>
 
+      {/* Loading / error states contra RemoteWorkItemRepo (O18) */}
+      {loading && (
+        <div className="border-b border-violet-200 bg-violet-50 px-4 py-2 text-xs text-violet-800">Cargando work items…</div>
+      )}
+      {error && (
+        <div className="border-b border-red-200 bg-red-50 px-4 py-2 text-xs text-red-700">Error: {error}</div>
+      )}
+      {isBackendEnabled() && !loading && !error && (
+        <div className="border-b border-emerald-200 bg-emerald-50 px-4 py-1.5 text-[11px] text-emerald-800">Live — backend {isBackendEnabled() ? "remote" : "local"} · search server-side · {total} items</div>
+      )}
+
       {/* Main two-pane: list + detail */}
       <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
         {/* List */}
         <div className="min-w-0 flex-1 overflow-y-auto bg-panel p-3">
           <div className="mx-auto max-w-[640px] space-y-3">
-            {/* Search mini */}
+            {/* Search mini — server-side via useWorkItems filter */}
             <div className="flex gap-2">
               <input
                 value={search}
@@ -248,12 +260,11 @@ export function ActivityBoard() {
                   {!isCollapsed && (
                     <div className="divide-y divide-zinc-100">
                       {stageItems.length === 0 ? (
-                        <p className="px-3 py-4 text-center text-xs text-zinc-400">No items</p>
+                        <p className="px-3 py-4 text-center text-xs text-zinc-400">{loading ? "Cargando…" : "No items"}</p>
                       ) : (
                         stageItems.map((item) => {
                           const isSelected = selection === item.id;
                           const hash = hashForItem(item.id);
-                          // vary time for demo
                           const timeLabel = item.title.includes("Replace") || item.title.includes("Debug") || item.title.includes("Add Paste") ? "1 week ago" : item.title.includes("Adjust") ? "2 days ago" : "1 min ago";
                           return (
                             <button
@@ -286,19 +297,26 @@ export function ActivityBoard() {
                 </div>
               );
             })}
+            {/* Empty global state */}
+            {!loading && total === 0 && (
+              <div className="rounded-[10px] border border-dashed border-zinc-300 bg-white p-8 text-center">
+                <p className="text-sm font-medium text-zinc-700">No hay work items</p>
+                <p className="mt-1 text-xs text-zinc-500">Ajustá filtros o creá un work item. Event history persistido en backend.</p>
+              </div>
+            )}
           </div>
         </div>
 
-        {/* Detail */}
+        {/* Detail — Event history persistido */}
         <div className="hidden w-[380px] shrink-0 border-l border-zinc-200 bg-white lg:flex">
-          <ActivityDetail item={selectedItem} onClose={handleClose} onStop={handleStop} onTransition={handleTransition} />
+          <ActivityDetail item={selectedItem as never} onClose={handleClose} onStop={handleStop} onTransition={handleTransition} />
         </div>
       </div>
 
       {/* Mobile detail overlay */}
       {selectedItem && (
         <div className="fixed inset-0 z-10 flex flex-col bg-white lg:hidden">
-          <ActivityDetail item={selectedItem} onClose={handleClose} onStop={handleStop} onTransition={handleTransition} />
+          <ActivityDetail item={selectedItem as never} onClose={handleClose} onStop={handleStop} onTransition={handleTransition} />
         </div>
       )}
     </div>

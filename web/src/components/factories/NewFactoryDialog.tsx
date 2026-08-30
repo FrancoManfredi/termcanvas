@@ -85,14 +85,14 @@ export function NewFactoryDialog({
     setConflict(null);
   }
 
-  function handleSubmit(event: FormEvent<HTMLFormElement>): void {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>): Promise<void> {
     event.preventDefault();
     if (!canSubmit) return;
 
-    const created = create(input);
+    const created = await Promise.resolve(create(input) as unknown as Promise<import("../../lib/factory/domain/result").ParseResult<FactoryRecord>> | import("../../lib/factory/domain/result").ParseResult<FactoryRecord>);
     if (!created.ok || created.value === undefined) {
       setConflict({
-        message: created.issues.map((issue) => issue.message).join(" · "),
+        message: created.issues.map((issue: { message: string }) => issue.message).join(" · "),
         suggestedName: null,
       });
       return;

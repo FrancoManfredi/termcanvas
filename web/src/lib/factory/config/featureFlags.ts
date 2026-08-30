@@ -20,6 +20,24 @@ const rawEnv = (import.meta as unknown as { env?: Record<string, unknown> }).env
 export const BACKEND_MODE: BackendMode =
   (rawEnv?.VITE_FACTORY_BACKEND as BackendMode | undefined) === "remote" ? "remote" : "local";
 
+export const FACTORY_BACKEND_API_URL: string =
+  (rawEnv?.VITE_FACTORY_BACKEND_API_URL as string | undefined)?.trim() || "http://localhost:8787";
+
+export interface BackendConfig {
+  readonly mode: BackendMode;
+  readonly baseUrl: string;
+  readonly apiKey?: string;
+}
+
+export function getBackendConfig(): BackendConfig {
+  const apiKey = (rawEnv?.VITE_WARP_API_KEY as string | undefined)?.trim() || undefined;
+  return {
+    mode: BACKEND_MODE,
+    baseUrl: FACTORY_BACKEND_API_URL.replace(/\/$/, ""),
+    ...(apiKey ? { apiKey } : {}),
+  };
+}
+
 /**
  * True solo cuando BACKEND_MODE === "remote".
  * Testeable: en tests sin env es false; con VITE_FACTORY_BACKEND=remote sería true.

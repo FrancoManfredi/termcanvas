@@ -118,3 +118,81 @@ sequenceDiagram
     WS-->>Nav: factories restauradas
     Nav->>Sidebar: navItemsByScope("factory") + factories
     Sidebar-->>User: sidebar reconstruido desde nav.ts (G5)
+
+    %% ────────────── ADR-002 · Backend Real O16-O18 (browser → Hono → GitHub) ──────────────
+    Note over User,Port: ── O16 · Backend Core — persistencia y transport reales (BC-P0-01..04) ──
+    participant Flag as featureFlags.ts
+    participant RA as RemoteFactoryRepo
+    participant FT as FetchTransport
+    participant Hono as Hono :8787
+    participant DB as SQLite data/termcanvas.db
+
+    User->>Flag: isBackendEnabled() ? remote : local (fail-closed)
+    alt mode remote
+        User->>RA: create({ name:"demo-factory" })
+        RA->>FT: handle({ method:"POST", path:"/api/v1/factory", body })
+        FT->>Hono: fetch POST http://localhost:8787/api/v1/factory
+        Hono->>Hono: validateFactoryCreate (mismo code)
+        Hono->>DB: INSERT factories (uid,name,alias,data)
+        DB-->>Hono: ok
+        Hono-->>FT: 201 { factory }
+        FT-->>RA: 201
+        RA->>RA: cache.set + notify() → useSyncExternalStore
+        RA-->>User: ParseResult.ok(factory) visible en lista
+        User->>RA: F5 o segundo cliente → hydrate GET /api/v1/factory
+        RA->>FT: handle GET
+        FT->>Hono: fetch GET /api/v1/factory
+        Hono->>DB: SELECT
+        Hono-->>FT: 200 incluye demo-factory
+        FT-->>RA: cache actualizado → re-render
+    end
+
+    Note over User,DB: ── O17 · GitHub Real Link — issue real + webhook (GH-P0-01..04) ──
+    participant GHS as GitHubAppService
+    participant GH as api.github.com
+
+    User->>Hono: POST /api/v1/factory/:uid/runs { prompt, ticket_ref }
+    Hono->>GHS: createIssue({ owner,repo, title, body+@warp-factory, labels:["factory:alias"] })
+    alt B1 real (GITHUB_APP_*)
+        GHS->>GH: JWT → POST /app/installations/:id/access_tokens → token
+        GHS->>GH: POST /repos/acme/payments-service/issues
+        GH-->>GHS: 201 { number:87 }
+        GHS-->>Hono: { number:87, mode:"real" }
+        Hono->>DB: INSERT runs + work_items ticket_ref=github:87
+        Hono-->>User: 201 { ticket_ref:"github:87", run_id }
+    else B1 dry-run (sin env, C4)
+        GHS-->>Hono: { mode:"dry_run", number:9999 }
+        Hono->>DB: INSERT simulado
+        Hono-->>User: 201 + banner "dry-run — sin GitHub App" (no llama api.github.com)
+    end
+    GH->>Hono: POST /webhooks/github X-GitHub-Event: issue_comment_created
+    Hono->>Hono: isRoutable(event,policy) 5 checks → stripCodeBlocks, new_content, not_bot, label_present, mention_present
+    alt routable true
+        Hono->>DB: INSERT work_items source:github continuationKey="acme/payments-service#87"
+        Hono-->>GH: 201 { created:true }
+        User->>RA: GET /api/v1/work-items?factoryName=demo-factory
+        Hono->>DB: SELECT filtered
+        Hono-->>User: Activity muestra work item en Triage
+    else not_code_block false
+        Hono-->>GH: 200 { created:false, reason:"not_code_block=false" }
+    end
+
+    Note over User,DB: ── O18 · Activity/Agents/Runs Live (LV-P0-01..04) ──
+    participant Activity as ActivityBoard
+    participant Runs as RunsPage
+
+    User->>Activity: abre Activity (Created by=you + 4 active por defecto)
+    Activity->>RA: await list({ factoryName, includeTerminals:false, createdBy:"you" })
+    RA->>FT: handle GET /api/v1/work-items?...
+    FT->>Hono: fetch GET
+    Hono->>DB: SELECT WHERE stage IN active
+    Hono-->>Activity: WorkItem[] con history persistido
+    Activity-->>User: kanban con filters Stage/search + toggle includeTerminals
+    User->>Runs: GET /agent/runs/:id
+    Runs->>Hono: fetch GET /agent/runs/:id
+    Hono->>DB: SELECT runs WHERE id
+    Hono-->>Runs: { id, timeline, cost, Sub-agents, View session followups }
+    Runs-->>User: timeline queued→running, cost, Sub-agents, View session
+    User->>Hono: POST /agent/runs/:id/cancel
+    Hono->>DB: UPDATE runs status=cancelled + work_items stage=Cancelled
+    Hono-->>User: 200 persistido → tras reload sigue cancelled

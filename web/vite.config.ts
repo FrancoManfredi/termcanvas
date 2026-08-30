@@ -10,7 +10,15 @@ export default defineConfig({
       motion: "motion/react",
     },
   },
-  server: { port: 5174 },
+  server: {
+    port: 5174,
+    proxy: {
+      "/api": { target: "http://localhost:8787", changeOrigin: true },
+      "/health": { target: "http://localhost:8787", changeOrigin: true },
+      "/agent": { target: "http://localhost:8787", changeOrigin: true },
+      "/webhooks": { target: "http://localhost:8787", changeOrigin: true },
+    },
+  },
   build: {
     chunkSizeWarningLimit: 500,
     rollupOptions: {

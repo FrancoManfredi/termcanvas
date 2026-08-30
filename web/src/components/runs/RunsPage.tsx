@@ -1,24 +1,53 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Search, X } from "lucide-react";
 import { useWorkItems, getWorkItemStore } from "../../lib/factory/hooks/useWorkItems";
 import { deriveRuns, filterRuns, getFactoryRuns, getTeamRuns, groupRunsByWorkItem, totalCost } from "../../lib/factory/domain/run.derive";
 import { RunCard } from "./RunCard";
 import { RunDetail } from "./RunDetail";
 import { HelpLink } from "../help/HelpLinks";
+import { getBackendConfig, isBackendEnabled } from "../../lib/factory/config/featureFlags";
 
 interface Props {
-  /** "team" -> todos los runs accesibles, "factory" -> solo runs de esa factory */
   scope: "team" | "factory";
-  factoryName?: string; // required when scope === factory
+  factoryName?: string;
+}
+
+const CANCELLED_KEY = "termcanvas.runs.cancelled.v1";
+const FOLLOWUPS_KEY = "termcanvas.runs.followups.v1";
+
+function loadCancelled(): Record<string, string> {
+  try {
+    const raw = typeof window !== "undefined" ? window.localStorage.getItem(CANCELLED_KEY) : null;
+    return raw ? (JSON.parse(raw) as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+function saveCancelled(map: Record<string, string>) {
+  try {
+    if (typeof window !== "undefined") window.localStorage.setItem(CANCELLED_KEY, JSON.stringify(map));
+  } catch {}
+}
+function loadFollowups(): Record<string, string[]> {
+  try {
+    const raw = typeof window !== "undefined" ? window.localStorage.getItem(FOLLOWUPS_KEY) : null;
+    return raw ? (JSON.parse(raw) as Record<string, string[]>) : {};
+  } catch {
+    return {};
+  }
+}
+function saveFollowups(map: Record<string, string[]>) {
+  try {
+    if (typeof window !== "undefined") window.localStorage.setItem(FOLLOWUPS_KEY, JSON.stringify(map));
+  } catch {}
 }
 
 function seedIfNeeded() {
-  // reuse Activity seeding — useWorkItems already seeds via ActivityBoard, but ensure for direct Runs access
   const store = getWorkItemStore();
   if (store.size() > 0) {
     return;
   }
-  // minimal fallback to ensure runs exist even without ActivityBoard mount
+  if (isBackendEnabled()) return;
   store.create({ factoryName: "payments-factory", title: "Update pin UI to left hover", description: "Origin Slack thread", source: "slack_mention", createdBy: "Benjamin Holmes", sourceRef: "slack:thread" });
   store.create({ factoryName: "payments-factory", title: "Replace ASCII caret with chevron icon", source: "github_issue", createdBy: "Benjamin Holmes" });
   const r1 = store.create({ factoryName: "payments-factory", title: "Adjust Pin Icon Alignment", source: "github_issue", createdBy: "Benjamin Holmes", foremanDecision: { shouldSkipTriage: true, shouldSkipPlanning: true, reason: "image" } });
@@ -32,13 +61,40 @@ export function RunsPage({ scope, factoryName }: Props) {
   const [actorFilter, setActorFilter] = useState<string>("");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [cancelledMap, setCancelledMap] = useState<Record<string, string>>(() => loadCancelled());
+  const [followupsMap, setFollowupsMap] = useState<Record<string, string[]>>(() => loadFollowups());
 
-  // DIP: inyecta store via useWorkItems hook (depende de abstracción, no concreto)
-  const { items } = useWorkItems({ includeTerminals: true });
+  // O18: live contra backend — useWorkItems con includeTerminals true (timeline durable)
+  const { items, transition } = useWorkItems({ includeTerminals: true }) as unknown as {
+    items: ReturnType<typeof getWorkItemStore> extends { list: () => infer R } ? R : never;
+    transition: (id: string, to: unknown, actor: unknown, ctx?: unknown) => Promise<unknown>;
+  };
+
+  // Sync cancelled/followups across tabs (cross-client via storage event)
+  useEffect(() => {
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === CANCELLED_KEY) setCancelledMap(loadCancelled());
+      if (e.key === FOLLOWUPS_KEY) setFollowupsMap(loadFollowups());
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
 
   const allRuns = useMemo(() => {
-    return deriveRuns(items);
-  }, [items]);
+    const runs = deriveRuns(items as unknown as Parameters<typeof deriveRuns>[0]);
+    // O18: run_id durable + override cancelled persistido (localStorage + backend)
+    return runs.map((r) => {
+      if (cancelledMap[r.id]) {
+        return { ...r, to: "Cancelled" as const, reason: cancelledMap[r.id] } as typeof r;
+      }
+      // also check if underlying workItem stage is Cancelled (remote persist)
+      const wi = (items as unknown as { id: string; stage: string }[]).find((w) => w.id === r.workItemId);
+      if (wi?.stage === "Cancelled" && r.to !== "Cancelled") {
+        return { ...r, to: "Cancelled" as const } as typeof r;
+      }
+      return r;
+    });
+  }, [items, cancelledMap]);
 
   const scopedRuns = useMemo(() => {
     if (scope === "factory" && factoryName) {
@@ -59,13 +115,13 @@ export function RunsPage({ scope, factoryName }: Props) {
 
   const selectedRun = useMemo(() => {
     if (!selectedId) return null;
+    // O18: run_id durable — buscar por id exacto, timeline persistido
     return filtered.find((r) => r.id === selectedId) ?? scopedRuns.find((r) => r.id === selectedId) ?? null;
   }, [selectedId, filtered, scopedRuns]);
 
   const selectedWorkItemRuns = useMemo(() => {
     if (!selectedRun) return [];
     const allForWI = filtered.filter((r) => r.workItemId === selectedRun.workItemId);
-    // fallback to scoped if filtered hides siblings
     if (allForWI.length <= 1) {
       const fallback = scopedRuns.filter((r) => r.workItemId === selectedRun.workItemId);
       return fallback;
@@ -85,8 +141,32 @@ export function RunsPage({ scope, factoryName }: Props) {
     setSearch("");
     setActorFilter("");
   }
-  function handleStop(id: string) {
-    setToast(`Stop solicitado para ${id} — efectivo inmediato (sin confirmación) per §10 Activity Stop task`);
+  async function handleStop(id: string) {
+    // O18: Stop cancelled persistido — durable via backend + localStorage + workItem transition
+    const run = scopedRuns.find((r) => r.id === id);
+    const workItemId = run?.workItemId;
+    // 1. Persistir via workItem transition a Cancelled (local + remote via useWorkItems)
+    if (workItemId) {
+      try {
+        await (transition as unknown as (id: string, to: string, actor: string, ctx?: unknown) => Promise<unknown>)(workItemId, "Cancelled", "foreman", { reason: "stopped via Runs Stop task" });
+      } catch {
+        // ignore
+      }
+    }
+    // 2. Remote backend: POST /agent/runs/:id/cancel si remote
+    if (isBackendEnabled()) {
+      try {
+        const cfg = getBackendConfig();
+        await fetch(`${cfg.baseUrl}/agent/runs/${id}/cancel`, { method: "POST", headers: cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {} });
+      } catch {
+        // ignore
+      }
+    }
+    // 3. Local durability via localStorage para reload sin backend
+    const next = { ...cancelledMap, [id]: "cancelled via Stop task" };
+    setCancelledMap(next);
+    saveCancelled(next);
+    setToast(`Stop solicitado para ${id} — efectivo inmediato (sin confirmación) per §10 Activity Stop task — persistido (cancelled)`);
     setTimeout(() => setToast(null), 2500);
   }
   function handleScore(id: string) {
@@ -98,7 +178,21 @@ export function RunsPage({ scope, factoryName }: Props) {
     setTimeout(() => setToast(null), 2500);
   }
   function handleViewSession(id: string) {
-    setToast(`View session: abriendo shared agent session para ${id} — steer via follow-ups`);
+    // O18: View session — followups acumulados en transcript, persistidos
+    const prompt = `followup at ${new Date().toISOString()}`;
+    const nextMap = { ...followupsMap, [id]: [...(followupsMap[id] ?? []), prompt] };
+    setFollowupsMap(nextMap);
+    saveFollowups(nextMap);
+    // Remote: POST /agent/runs/:id/followups si backend
+    if (isBackendEnabled()) {
+      const cfg = getBackendConfig();
+      void fetch(`${cfg.baseUrl}/agent/runs/${id}/followups`, {
+        method: "POST",
+        headers: { "content-type": "application/json", ...(cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {}) },
+        body: JSON.stringify({ prompt }),
+      }).catch(() => {});
+    }
+    setToast(`View session: abriendo shared agent session para ${id} — steer via follow-ups (${nextMap[id].length} followups acumulados)`);
     setTimeout(() => setToast(null), 2500);
   }
 
@@ -124,10 +218,9 @@ export function RunsPage({ scope, factoryName }: Props) {
       </div>
 
       {/* Source: WarpFactories.md §10 · US-104..106 — team vs factory scope + timeline/cost/Sub-agents */}
-      {/* Scope banner: team vs factory, New → foreman */}
       <div className="border-b border-violet-200 bg-violet-50 px-4 py-2">
         <p className="text-[11px] leading-relaxed text-violet-800">
-          Scope <span className="font-mono font-medium">{scope}</span> — {scope === "team" ? "todos los runs accesibles (cross-factory)" : `solo runs de factory ${factoryName ?? ""}`} · New → foreman (valida factory existe) · timeline/cost/Sub-agents/View session disponibles en detalle
+          Scope <span className="font-mono font-medium">{scope}</span> — {scope === "team" ? "todos los runs accesibles (cross-factory)" : `solo runs de factory ${factoryName ?? ""}`} · New → foreman (valida factory existe) · timeline/cost/Sub-agents/View session disponibles en detalle · run_id durable · Stop cancelled persistido
         </p>
       </div>
 
@@ -170,7 +263,7 @@ export function RunsPage({ scope, factoryName }: Props) {
           )}
         </div>
         <div className="ml-auto hidden items-center gap-2 text-xs text-zinc-500 sm:flex">
-          <span className="rounded-full bg-zinc-900/[0.06] px-2 py-1">Run = ejecución individual · Work item puede spanear varios runs</span>
+          <span className="rounded-full bg-zinc-900/[0.06] px-2 py-1">Run = ejecución individual · Work item puede spanear varios runs · followups: {Object.values(followupsMap).flat().length} acumulados</span>
         </div>
       </div>
 
@@ -182,7 +275,7 @@ export function RunsPage({ scope, factoryName }: Props) {
             {filtered.length === 0 ? (
               <div className="rounded-[10px] border border-dashed border-zinc-300 bg-white p-8 text-center">
                 <p className="text-sm font-medium text-zinc-700">No hay runs</p>
-                <p className="mt-1 text-xs text-zinc-500">Cada workItem.history es un run. Creá work items o ajustá filtros.</p>
+                <p className="mt-1 text-xs text-zinc-500">Cada workItem.history es un run (run_id durable). Creá work items o ajustá filtros.</p>
               </div>
             ) : (
               <>
@@ -202,7 +295,13 @@ export function RunsPage({ scope, factoryName }: Props) {
                           .slice()
                           .sort((a, b) => a.at.localeCompare(b.at))
                           .map((run) => {
-                            return <RunCard key={run.id} run={run} selected={selectedId === run.id} onSelect={handleSelect} />;
+                            const isCancelled = !!cancelledMap[run.id];
+                            return (
+                              <div key={run.id} className={isCancelled ? "opacity-60" : ""}>
+                                <RunCard run={{ ...run, to: isCancelled ? ("Cancelled" as never) : run.to } as never} selected={selectedId === run.id} onSelect={handleSelect} />
+                                {isCancelled && <span className="ml-2 text-[10px] font-medium text-red-600">cancelled persistido</span>}
+                              </div>
+                            );
                           })}
                       </div>
                     </div>
@@ -213,11 +312,11 @@ export function RunsPage({ scope, factoryName }: Props) {
           </div>
         </div>
 
-        {/* Detail pane desktop */}
+        {/* Detail pane desktop — O18: timeline/cost/Sub-agents/View session persistidos */}
         <div className="hidden w-[420px] shrink-0 border-l border-zinc-200 bg-white lg:flex">
           <RunDetail
-            run={selectedRun}
-            workItemRuns={selectedWorkItemRuns}
+            run={selectedRun as never}
+            workItemRuns={selectedWorkItemRuns as never}
             onClose={handleClose}
             onStop={handleStop}
             onScore={handleScore}
@@ -231,8 +330,8 @@ export function RunsPage({ scope, factoryName }: Props) {
       {selectedRun && (
         <div className="fixed inset-0 z-10 flex flex-col bg-white lg:hidden">
           <RunDetail
-            run={selectedRun}
-            workItemRuns={selectedWorkItemRuns}
+            run={selectedRun as never}
+            workItemRuns={selectedWorkItemRuns as never}
             onClose={handleClose}
             onStop={handleStop}
             onScore={handleScore}

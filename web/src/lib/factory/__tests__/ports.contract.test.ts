@@ -93,7 +93,7 @@ describe("ports.contract — Ola 8 spike (sin backend, solo tipos)", () => {
     WorkItemMachine._resetCounter();
   });
 
-  it("FactoryWorkspaceStore satisface FactoryRepositoryPort (shape + behavior)", () => {
+  it("FactoryWorkspaceStore satisface FactoryRepositoryPort (shape + behavior)", async () => {
     const store = makeWorkspace();
     // runtime shape — cada método existe
     expect(typeof store.list).toBe("function");
@@ -108,15 +108,15 @@ describe("ports.contract — Ola 8 spike (sin backend, solo tipos)", () => {
 
     // type-level: store es asignable a FactoryRepositoryPort vía cast (runtime ya es el LocalAdapter)
     const port = store as unknown as FactoryRepositoryPort;
-    expect(port.list()).toHaveLength(2);
-    expect(port.getByName("PAYMENTS-FACTORY")?.uid).toBe("uid_payments-factory_1"); // case-insensitive
+    expect(await port.list()).toHaveLength(2);
+    expect((await port.getByName("PAYMENTS-FACTORY"))?.uid).toBe("uid_payments-factory_1"); // case-insensitive
 
-    const created = port.create({ name: "contract-factory" });
+    const created = await port.create({ name: "contract-factory" });
     expect(created.ok).toBe(true);
-    expect(port.list()).toHaveLength(3);
-    expect(port.toSummaries().some((s) => s.name === "contract-factory")).toBe(true);
+    expect(await port.list()).toHaveLength(3);
+    expect((await port.toSummaries()).some((s) => s.name === "contract-factory")).toBe(true);
 
-    const updated = port.update(created.getOrThrow().uid, { alias: "contract-alias" });
+    const updated = await port.update(created.getOrThrow().uid, { alias: "contract-alias" });
     expect(updated.ok).toBe(true);
     expect(updated.getOrThrow().alias).toBe("contract-alias");
 
@@ -124,16 +124,16 @@ describe("ports.contract — Ola 8 spike (sin backend, solo tipos)", () => {
     const unsub = port.subscribe(() => {
       notified += 1;
     });
-    port.create({ name: "contract-factory-2" });
+    await port.create({ name: "contract-factory-2" });
     expect(notified).toBe(1);
     unsub();
     expect(typeof port.getVersion()).toBe("number");
 
-    const removed = port.remove(created.getOrThrow().uid);
+    const removed = await port.remove(created.getOrThrow().uid);
     expect(removed.ok).toBe(true);
   });
 
-  it("WorkItemStore satisface WorkItemRepositoryPort (shape + behavior)", () => {
+  it("WorkItemStore satisface WorkItemRepositoryPort (shape + behavior)", async () => {
     const workspace = makeWorkspace();
     const store = new WorkItemStore(new WorkItemMachine(), workspace.list().map((f) => f.name));
     expect(typeof store.list).toBe("function");
@@ -144,9 +144,9 @@ describe("ports.contract — Ola 8 spike (sin backend, solo tipos)", () => {
     expect(typeof store.getVersion).toBe("function");
 
     const port = store as unknown as WorkItemRepositoryPort;
-    expect(port.list()).toHaveLength(0);
+    expect(await port.list()).toHaveLength(0);
 
-    const created = port.create({
+    const created = await port.create({
       factoryName: "payments-factory",
       title: "contract work item",
       source: "direct",
@@ -154,13 +154,13 @@ describe("ports.contract — Ola 8 spike (sin backend, solo tipos)", () => {
     });
     expect(created.ok).toBe(true);
     const id = created.getOrThrow().id;
-    expect(port.getById(id)?.title).toBe("contract work item");
+    expect((await port.getById(id))?.title).toBe("contract work item");
 
     let notified = 0;
     const unsub = port.subscribe(() => {
       notified += 1;
     });
-    const transitioned = port.transition(id, "Planning", "foreman");
+    const transitioned = await port.transition(id, "Planning", "foreman");
     // foremanDecision por defecto es Triage, así que Planning puede no ser directo — verificamos que el port reenvía al machine
     // Si falla por gate, el ParseResult debe tener code
     if (!transitioned.ok) {

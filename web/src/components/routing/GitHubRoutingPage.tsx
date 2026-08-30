@@ -2,7 +2,7 @@
 // DIP: consume datos de github.routing.derive y delega reglas en github.routing.
 // Source: WarpFactories.md §9 · US-074, US-075, US-076, US-077
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Check, Copy, X } from "lucide-react";
 import {
   continuationKey,
@@ -19,6 +19,7 @@ import {
 import { useFactoryWorkspace } from "../../lib/factory/hooks/useFactories";
 import { getFactoryBundle } from "../../lib/factory/hooks/useFactoryBundle";
 import { HelpLink } from "../help/HelpLinks";
+import { getBackendConfig, isBackendEnabled } from "../../lib/factory/config/featureFlags";
 
 const DEFAULT_HANDLE = "@warp-factory";
 const DEFAULT_REPO = "acme/payments-service";
@@ -44,6 +45,7 @@ export function GitHubRoutingPage() {
   const [isEdit, setIsEdit] = useState(false);
   const [authorIsBot, setAuthorIsBot] = useState(false);
   const [number, setNumber] = useState("42");
+  const [githubMode, setGithubMode] = useState<"real" | "dry_run" | "unknown">(() => (isBackendEnabled() ? "unknown" : "dry_run"));
 
   const factory = factories.find((candidate) => candidate.uid === factoryUid) ?? selected ?? factories[0];
   const foremanName = factory?.alias ?? "payments";
@@ -66,6 +68,25 @@ export function GitHubRoutingPage() {
   const decision = routeGitHubEvent(routingEvent, policy);
   const bundle = useMemo(() => getFactoryBundle(), []);
   const evaluated = evaluateGitHubEvent(bundle.ok ? bundle.value?.automations ?? [] : [], routingEvent, policy);
+
+  // O17 banner: detect backend health to show dry_run vs real
+  useEffect(() => {
+    if (!isBackendEnabled()) {
+      return;
+    }
+    const cfg = getBackendConfig();
+    const controller = new AbortController();
+    fetch(`${cfg.baseUrl}/health`, { signal: controller.signal })
+      .then((res) => res.json().catch(() => null))
+      .then((data) => {
+        const mode = (data as { githubMode?: string } | null)?.githubMode;
+        if (mode === "real") setGithubMode("real");
+        else if (mode === "dry_run") setGithubMode("dry_run");
+        else setGithubMode("dry_run");
+      })
+      .catch(() => setGithubMode("dry_run"));
+    return () => controller.abort();
+  }, []);
 
   function applyPreset(presetId: string): void {
     const preset = GITHUB_ROUTING_PRESETS.find((candidate) => candidate.id === presetId);
@@ -107,6 +128,16 @@ export function GitHubRoutingPage() {
     }
   }
 
+  const bannerText =
+    githubMode === "real"
+      ? `GitHub App conectado — issue real ${factoryLabel(foremanName)}+mention en ${DEFAULT_REPO}`
+      : "dry-run — sin GitHub App";
+
+  const bannerClass =
+    githubMode === "real"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+      : "border-amber-200 bg-amber-50 text-amber-800";
+
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-auto bg-panel">
       <div className="flex h-[44px] shrink-0 items-center justify-between border-b border-zinc-200 bg-white px-4 text-[13px]">
@@ -125,6 +156,14 @@ export function GitHubRoutingPage() {
       </div>
 
       <div className="mx-auto w-full max-w-[1080px] p-4">
+        {/* O17 banner dry-run vs real */}
+        <div
+          data-testid="github-mode-banner"
+          className={`mb-4 rounded-[8px] border px-3 py-2 text-[12px] font-medium ${bannerClass}`}
+        >
+          {bannerText}
+        </div>
+
         <div className="mb-4">
           <h2 className="text-[18px] font-[650] tracking-[-0.02em] text-zinc-900">GitHub dual-label routing</h2>
           <p className="mt-1 max-w-[760px] text-[12.5px] leading-snug text-zinc-500">

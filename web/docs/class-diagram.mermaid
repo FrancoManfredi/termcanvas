@@ -306,3 +306,75 @@ classDiagram
 
     NavRegistry "1" o-- "*" NavItem
     FactoryWorkspaceStore ..> NavRegistry : factories del sidebar
+
+    %% ─────────────── ADR-002 · Backend Real O16-O18 (nuevo, no rompe G1-G5) ───────────────
+    class FactoryRepositoryPort {
+        <<interface>> +list() MaybePromise~FactoryRecord[]~
+        +getByUid(uid) MaybePromise~FactoryRecord~
+        +create(input) MaybePromise~ParseResult~FactoryRecord~~
+        +update(uid,patch) MaybePromise~ParseResult~FactoryRecord~~
+        +remove(uid) MaybePromise~ParseResult~void~~
+        +toSummaries() MaybePromise~FactorySummary[]~
+        +subscribe(cb) Function; +getVersion() number
+    }
+    class WorkItemRepositoryPort {
+        <<interface>> +list(filter?) MaybePromise~WorkItem[]~
+        +getById(id) MaybePromise~WorkItem~; +create(input) MaybePromise~ParseResult~WorkItem~~
+        +transition(id,to,actor,ctx) MaybePromise~ParseResult~WorkItem~~
+        +subscribe(cb) Function; +getVersion() number
+    }
+    class FactoryApiTransportPort {
+        <<interface>> +handle(req) Promise~ApiResponse~; +routes() RouteDef[]
+    }
+    class FetchTransport {
+        -string baseUrl; -string apiKey
+        +handle(req) Promise~ApiResponse~; +routes() RouteDef[]
+        -toFetch(req) Request; -fromFetch(res) ApiResponse
+    }
+    class RemoteFactoryRepo {
+        -string baseUrl; -FetchTransport transport; -Map cache; -Set listeners; -number version
+        +list() FactoryRecord[]; +create(input) Promise~ParseResult~FactoryRecord~~
+        +subscribe(cb) Function; +hydrate() Promise~void~
+    }
+    class RemoteWorkItemRepo {
+        -string baseUrl; -FetchTransport transport; -Map cache; -Set listeners; -number version
+        +list(filter?) WorkItem[]; +transition() Promise~ParseResult~WorkItem~~
+        +subscribe(cb) Function; +hydrate() Promise~void~
+    }
+    class AdapterFactory {
+        <<module>> +createFactoryAdapters(mode) Object; +getBackendConfig() Object
+    }
+    class HonoApp {
+        -Hono app; -Database db
+        +fetch(req) Response
+    }
+    class FactoryRepoSQLite {
+        -Database db
+        +list(search?) FactoryRecord[]; +create(record) void; +toSummaries() FactorySummary[]
+    }
+    class WorkItemRepoSQLite {
+        -Database db; -WorkItemMachine machine
+        +list(filter) WorkItem[]; +create(input) ParseResult~WorkItem~
+    }
+    class GitHubAppService {
+        -Env env; +mode: "real"|"dry_run"
+        +createIssue(input) Promise~Object~; +ensureLabel(owner,repo,alias) Promise~void~
+    }
+    class WebhookHandler {
+        +handleGitHubWebhook(event,payload) Promise~Object~
+    }
+
+    FactoryWorkspaceStore ..|> FactoryRepositoryPort
+    WorkItemStore ..|> WorkItemRepositoryPort
+    RemoteFactoryRepo ..|> FactoryRepositoryPort
+    RemoteWorkItemRepo ..|> WorkItemRepositoryPort
+    FetchTransport ..|> FactoryApiTransportPort
+    RemoteFactoryRepo --> FetchTransport
+    RemoteWorkItemRepo --> FetchTransport
+    AdapterFactory ..> FactoryRepositoryPort
+    HonoApp --> FactoryRepoSQLite
+    HonoApp --> WorkItemRepoSQLite
+    HonoApp --> GitHubAppService
+    HonoApp --> WebhookHandler
+    WebhookHandler ..> WorkItemRepoSQLite
+    WebhookHandler ..> GitHubRoutingService : reusa 5 checks

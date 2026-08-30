@@ -631,3 +631,104 @@ Este plan convierte la réplica de **"LOCAL-hardened demo 5 min + backend-ready 
 ---
 
 *Plan LOCAL-first, backend-ready sin backend — continuación autónoma Opción A (web-only PR chico, frontier ancha) tras O12 preview prod. Identificadores en inglés, traza a `WarpFactories.md` § y `US-NNN` en cada módulo. `pnpm check` verde como invariante. No implementar código en este doc, solo diseño ejecutable.*
+
+---
+
+## 12. Apéndice — O16-O18 Backend Real vertical slice (adelanto trigger 2026-11-01 a pedido)
+
+> **Estado:** Diseño aceptado en `ADR-002-backend-real.md` (Gao, 2026-08-30) · No implementado aún · Extiende este plan sin invalidar O13-O15  
+> **Trigger adelantado:** usuario pide adelantar `BACKEND-TRIGGER.md` 2026-11-01 solo para este vertical slice (Activity/Agents/Runs + GitHub Real Link) · No es backend completo (sin Slack/Linear/Jira live, sin MCP live, sin auth/OTEL/metering)  
+> **Objetivo del slice:** que `Activity + Agents + Runs` dejen de ser simulación `localStorage`/`InMemoryTransport` y pasen a **persistencia backend + transport real + GitHub real link** con feature flag reversible, sin romper 999 tests
+
+### 12.1 Respuestas a §9 en 1 línea (ver ADR-002 §TL;DR para tabla completa)
+
+| § | Decisión |
+|---|----------|
+| **9.1 Persistencia** | **SQLite `data/termcanvas.db` vía `better-sqlite3` (fallback `node:sqlite`)** — 3 tablas normalizadas ligeras + `data JSON`, `schema.sql`, backup `cp file`, filtro en memoria <1k rows. Migración manual `export → POST /api/v1/factory/import`. |
+| **9.2 Transport** | **Hono `:8787` + `@hono/node-server`** — mantiene `handle(ApiRequest)→ApiResponse|Promise`, `FetchTransport` mapea a `fetch` + `Bearer` opcional, mismos paths que stub. |
+| **9.3 GitHub** | **GitHub App repo-scoped + `POST /webhooks/github` simulado** (5 checks `github.routing`) + modo `dry-run` sin B1; `PRIVATE_KEY` solo en `server` env (C5, token nunca en browser). |
+| **9.4 Flag** | **Un único `if (isBackendEnabled())` en `web/src/main.tsx` / `adapterFactory.ts`** → `LocalAdapter` vs `RemoteAdapter` (`MaybePromise` widen); `VITE_FACTORY_BACKEND` fail-closed `local`; tests cubren ambos con fetch mock. |
+| **9.5 Hosting** | **`localhost:8787`** (`pnpm --filter server dev` + `vite dev :5174` proxy, `docker compose` opcional) — sin deploy prod O16-O17; preview opcional Cloud Run/Fly cambiando `VITE_FACTORY_BACKEND_API_URL`. |
+
+### 12.2 Tabla resumen O16-O18
+
+| Ola | Nombre | Objetivo 1 frase | P0 que cierra | Pts | Dur. 1 dev | Depende de | Demo al cierre | Tests |
+|-----|--------|------------------|---------------|-----|------------|------------|----------------|-------|
+| **O16** | **Backend Core** | Persistencia y transport reales con flag reversible | BC-P0-01..04 | 8 (5+3) | 5d | HEAD O15 | Creo factory en `remote`, recargo, sigue; `pnpm check` verde ambos modos | 999→~1015 (+16) |
+| **O17** | **GitHub Real Link** | Dual-label vinculado a GitHub real (o dry-run) | GH-P0-01..04 | 5 (3+2) | 3d | O16 | `POST /factory/:uid/runs` crea issue real con `factory:<alias>`+mention; webhook crea work item solo si routable | ~1015→~1030 (+15) |
+| **O18** | **Activity/Agents/Runs Live** | Boards consumen backend real E2E | LV-P0-01..04 | 8 (3+2+3) | 5d | O16+O17 | Gherkin §7 verde punta a punta con 1 repo | ~1030→~1045 (+15) |
+
+**Total O16-O18:** **21 pts · 13d esfuerzo · ~10d wall-clock frontier 1** · 999→~1045 tests · `pnpm check` verde · `vite build` 2319 modules (server no afecta bundle).
+
+### 12.3 Mapa dependencias O13-O15 → O16-O18
+
+```mermaid
+flowchart TB
+  subgraph Pasado["Cerrado O5-O12"]
+    O12["O12 PREVIEW PROD<br/>✅ 902 tests · 2319 modules · 200"]
+  end
+  subgraph O13O15["Este plan O13-O15 (web-only)"]
+    O13["O13 PARSING PARITY<br/>5 pts · 3d"]
+    O14["O14 INTEGRATIONS CATALOG<br/>5 pts · 3d"]
+    O15["O15 DASHBOARD FINAL<br/>8 pts · 5d"]
+  end
+  subgraph O16O18["Apéndice Backend Real O16-O18 (ADR-002)"]
+    O16["O16 BACKEND CORE<br/>8 pts · 5d<br/>persist+transport+flag"]
+    O17["O17 GITHUB REAL LINK<br/>5 pts · 3d<br/>issue+webhook"]
+    O18["O18 LIVE BOARDS<br/>8 pts · 5d<br/>activity/agents/runs"]
+  end
+  O12 --> O13 & O14 --> O15 --> O16 --> O17 --> O18
+  classDef done fill:#dcfce7,stroke:#16a34a,color:#14532d
+  classDef next fill:#fef9c3,stroke:#ca8a04,color:#713f12
+  classDef backend fill:#e0e7ff,stroke:#4f46e5,color:#1e1b4b
+  class O12 done
+  class O13,O14,O15 next
+  class O16,O17,O18 backend
+```
+
+**Orden recomendado:** O16 sin excepción primero (sin persistencia/transport no hay GitHub ni boards live). O17 inmediatamente después. O18 última (cierra Gherkin). Con 1 dev secuencial; con 2 devs, O18 puede arrancar UI mockeada día 2 de O17.
+
+### 12.4 Frontier width por ola (backend)
+
+| Ola | Width | Paralelizables |
+|-----|-------|----------------|
+| O16 | 2 | `FactoryRepositoryPort remoto` ‖ `WorkItemRepositoryPort remoto + FetchTransport` (misma DB, distinta tabla/ruta) |
+| O17 | 1 | `GitHub issue creation` + `webhook ingest` comparten B1 y `github.routing` — no paralelizar |
+| O18 | 2 | `Activity live` ‖ `Agents/Runs live` (distintas páginas, mismo `WorkItemRepositoryPort`) |
+
+### 12.5 Constraints reiterados O16-O18 (del PRD §2.4)
+
+- **C1 OCP estricto:** no mutar firma/semántica de ningún export de dominio; todo se añade (nuevo adapter o `opts?` al final); `MaybePromise` widen es aditivo (`await syncValue` sigue verde).
+- **C2 Stack congelado:** `web` 0 deps nuevas; `server` deps (`hono`, `better-sqlite3`, `octokit`, `zod`) aisladas, no afectan `vite build` `web`.
+- **C3 Dominio puro:** `domain/` no importa `fetch`/`localStorage`/`Request`; solo `adapters/` y `server/` conocen I/O; errores como `ParseResult` con `code`, cero `throw`.
+- **C4 Fail-closed local:** `VITE_FACTORY_BACKEND=local` default sin env; `pnpm i && pnpm --filter web dev` sin credenciales sigue funcionando; `remote` opt-in; sin B1 → `dry-run` con banner.
+- **C5 Boundaries:** `GITHUB_APP_PRIVATE_KEY` solo en `server` env (execution/repository identity, `EXECUTOR` default); token nunca en browser (verificado por `grep` bundle); `WARP_API_KEY` solo en `harness auth`.
+- **C6 Flag en raíz:** único `if` en `main.tsx`/`adapterFactory.ts`; prohibido `isBackendEnabled()` en `domain/` o páginas.
+- **C7 Receipt:** `docs/RECEIPT.md` con `commit·comando·salida` por ola.
+
+### 12.6 Gate y métricas O16-O18 (del PRD §8)
+
+**Gate canónico (siempre verde):**
+```
+pnpm --filter web exec tsc --noEmit              → 0
+pnpm --filter web exec tsc -b                    → 0
+pnpm --filter web exec vitest run --pool=threads → 999→1045 (no baja)
+pnpm --filter web build                          → verde, 2319± módulos
+pnpm --filter web exec oxlint                    → 0
+pnpm --filter web exec vite preview --port 4173  → 200
+pnpm --filter web check                          → verde
+pnpm --filter server check (cuando exista)       → tsc -b + vitest server
+curl localhost:8787/health                       → 200 { ok:true, factories:n }
+```
+
+**Métricas de negocio (PRD §8.3):** demo E2E ≤7m con B1 / ≤5m dry-run; factory/workItem durable 100% cross-client; issue GitHub creado 100% con B1 / 100% dry-run sin B1; webhook→work item 100% si `routable=true`, 0% si `not_code_block=false`.
+
+### 12.7 Referencias
+
+- `PRD-BACKEND-REAL.md` §1-§12 (Gherkin E2E §7, backlog P0 §5.1, riesgos §3, métricas §8)
+- `ADR-001-ports-backend.md` (4 ports + feature flag) — extendido por `ADR-002-backend-real.md`
+- `ENV-MAP.md` B1-B8 (scoping real de `GITHUB_APP_ID/PRIVATE_KEY/INSTALLATION_ID` en O17)
+- `BACKEND-TRIGGER.md` (G-T1..G-T4 verdes, S-N1..S-N3 — trigger adelantado solo para este slice)
+- Código: `src/lib/factory/domain/github.routing.ts` (5 checks), `src/lib/factory/domain/factoryApi.router.ts`, `src/lib/factory/store/factoryWorkspace.store.ts`, `src/lib/factory/ports/*.ts`, `src/lib/factory/config/featureFlags.ts`
+
+> **Nota de migración:** O13-O15 siguen siendo el plan vigente web-only. Este apéndice no los reemplaza; los extiende adelantando el trigger solo para el vertical slice O16-O18 (21 pts). Si Warp abre antes de O18, se congela como `Simulator + vertical slice backend` con nota `WARP-OPEN-NOTE.md` — el trabajo de ports no se pierde (valor didáctico).
