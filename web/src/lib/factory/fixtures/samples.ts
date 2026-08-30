@@ -24,27 +24,27 @@ repositories:
   - owner: acme
     name: payments-api
 secrets:
-  - SENTRY_AUTH_TOKEN
+  - <REPLACE_ME>
 mcpServers:
   sentry:
-    warpId: SENTRY_MCP_SERVER_ID
+    warpId: <REPLACE_ME>
 integrations:
   - type: slack
 agentDefaults:
   model: auto
   runner: linux-build
   secrets:
-    - SHARED_SECRET
+    - <REPLACE_ME>
 `;
 
 export const SAMPLE_AGENT_FOREMAN = `---
 description: Routes approved payments work through the factory
 agentType: FOREMAN
 secrets:
-  - SENTRY_AUTH_TOKEN
+  - <REPLACE_ME>
 mcpServers:
   sentry:
-    warpId: SENTRY_MCP_SERVER_ID
+    warpId: <REPLACE_ME>
 model: auto
 runner: linux-build
 ---

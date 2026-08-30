@@ -114,7 +114,11 @@ export function hasGitHubInIntegrations(raw: unknown): boolean {
 }
 
 export function deriveProviderStatuses(bundle: FactoryBundle): Record<string, ProviderStatus> {
-  const types = new Set(getIntegratedTypes(bundle));
+  const typesList = getIntegratedTypes(bundle);
+  if (hasTrackerConflict(typesList)) {
+    throw new Error("integrations: linear and jira are mutually exclusive (runtime derive)");
+  }
+  const types = new Set(typesList);
   const hasRepos = bundle.factory.repositories.length > 0;
   // mock logic: if integrations declares slack/linear/jira => connected, else disconnected; GitHub => connected if repos present (via App); GitLab disconnected in sample (no group)
   const map: Record<string, ProviderStatus> = {};
@@ -142,11 +146,24 @@ export function integrationSummaryMessage(types: IntegrationType[]): string {
 }
 
 export function validateAlias(alias: string): { ok: boolean; reason?: string } {
-  if (alias.length > 60) return { ok: false, reason: "alias max 60 chars" };
-  if (!/^[A-Za-z0-9 ._-]+$/.test(alias)) return { ok: false, reason: "alias: allowed [A-Za-z0-9 ._-]" };
+  const trimmed = alias.trim();
+  if (trimmed.length === 0) return { ok: false, reason: "alias cannot be empty or whitespace" };
+  if (/^\s*$/.test(alias) || trimmed !== alias) {
+    // reject leading/trailing whitespace — must be normalized before regex
+  }
+  if (trimmed.length > 60) return { ok: false, reason: "alias max 60 chars" };
+  if (!/^[A-Za-z0-9 ._-]+$/.test(trimmed)) return { ok: false, reason: "alias: allowed [A-Za-z0-9 ._-]" };
+  if (alias !== trimmed) return { ok: false, reason: "alias must be trimmed" };
   return { ok: true };
 }
 
 export function validateMcpWarpId(warpId: string): boolean {
-  return warpId.length > 0;
+  if (!warpId || /^\s*$/.test(warpId)) return false;
+  const trimmed = warpId.trim();
+  if (trimmed.length === 0) return false;
+  if (trimmed !== warpId) return false; // reject not trimmed
+  return trimmed.length > 0;
 }
+
+// M5 runtime guard: hasTrackerConflict is now also enforced in deriveProviderStatuses above
+// (deriveIntegrations alias removed to avoid barrel duplicate with settings.derive — runtime guard still via deriveProviderStatuses)

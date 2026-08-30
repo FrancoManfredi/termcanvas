@@ -40,8 +40,9 @@ function NavItem({
       transition={{ duration: 0.3, ease: [0.2, 0, 0, 1], delay }}
       style={{ willChange: "transform, opacity, filter" }}
     >
-      <a
-        href="#"
+      <button
+        type="button"
+        onClick={() => {}}
         aria-current={active ? "page" : undefined}
         className={[
           "group flex items-center gap-2.5 rounded-[8px] px-2 py-[7px] text-[13.5px] leading-none",
@@ -67,7 +68,7 @@ function NavItem({
         <span className={active ? "font-[500] tracking-[-0.01em]" : "font-[450]"}>
           {label}
         </span>
-      </a>
+      </button>
     </motion.li>
   );
 }
@@ -218,9 +219,10 @@ export function Sidebar({ activeItem = "Activity", onNavigate }: SidebarProps) {
               animate={{ opacity: 1, y: 0 }}
               transition={{ duration: 0.28, ease: [0.2, 0, 0, 1], delay: 0.46 }}
             >
-              <a
-                href="#"
-                className="group flex items-center justify-between rounded-[8px] px-2 py-1.5 transition-[background-color,color,scale,box-shadow] duration-150 ease-[cubic-bezier(0.2,0,0,1)] hover:bg-zinc-900/[0.06] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/20"
+              <button
+                type="button"
+                onClick={() => {}}
+                className="group flex w-full items-center justify-between rounded-[8px] px-2 py-1.5 text-left transition-[background-color,color,scale,box-shadow] duration-150 ease-[cubic-bezier(0.2,0,0,1)] hover:bg-zinc-900/[0.06] active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/20"
                 style={{ willChange: "transform" }}
               >
                 <span className="flex items-center gap-2.5">
@@ -260,7 +262,7 @@ export function Sidebar({ activeItem = "Activity", onNavigate }: SidebarProps) {
                     />
                   </span>
                 </span>
-              </a>
+              </button>
             </motion.li>
 
             {/* wilson — expandable */}

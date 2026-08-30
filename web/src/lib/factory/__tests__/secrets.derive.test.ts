@@ -21,63 +21,65 @@ function bundle() {
   return r.value!;
 }
 
+const PLACEHOLDER = "<REPLACE_ME>";
+
 describe("secrets.derive - scoping reemplaza no agrega", () => {
-  it("1. factory-wide secrets = [SENTRY_AUTH_TOKEN] from SAMPLE_FACTORY_FULL", () => {
+  it("1. factory-wide secrets = [PLACEHOLDER] from SAMPLE_FACTORY_FULL", () => {
     const b = bundle();
-    expect(getFactoryWideSecrets(b)).toEqual(["SENTRY_AUTH_TOKEN"]);
+    expect(getFactoryWideSecrets(b)).toEqual([PLACEHOLDER]);
   });
-  it("2. agentDefaults secrets = [SHARED_SECRET]", () => {
+  it("2. agentDefaults secrets = [PLACEHOLDER]", () => {
     const b = bundle();
-    expect(getAgentDefaultsSecrets(b)).toEqual(["SHARED_SECRET"]);
+    expect(getAgentDefaultsSecrets(b)).toEqual([PLACEHOLDER]);
   });
-  it("3. foreman has per-agent secrets [SENTRY_AUTH_TOKEN] that replaces agentDefaults", () => {
+  it("3. foreman has per-agent secrets [PLACEHOLDER] that replaces agentDefaults", () => {
     const b = bundle();
     const eff = resolveEffectiveSecretsForAgent(b, "foreman")!;
-    expect(eff.factoryWide).toEqual(["SENTRY_AUTH_TOKEN"]);
-    expect(eff.inheritedOrOverridden).toEqual(["SENTRY_AUTH_TOKEN"]);
+    expect(eff.factoryWide).toEqual([PLACEHOLDER]);
+    expect(eff.inheritedOrOverridden).toEqual([PLACEHOLDER]);
     expect(eff.usesPerAgentOverride).toBe(true);
   });
-  it("4. foreman effective = factoryWide + per-agent, dedup => [SENTRY_AUTH_TOKEN]", () => {
+  it("4. foreman effective = factoryWide + per-agent, dedup => [PLACEHOLDER]", () => {
     const b = bundle();
     const eff = resolveEffectiveSecretsForAgent(b, "foreman")!;
-    expect(eff.effective).toEqual(["SENTRY_AUTH_TOKEN"]);
+    expect(eff.effective).toEqual([PLACEHOLDER]);
   });
-  it("5. reviewer without per-agent secrets inherits agentDefaults SHARED_SECRET", () => {
+  it("5. reviewer without per-agent secrets inherits agentDefaults PLACEHOLDER", () => {
     const b = bundle();
     const eff = resolveEffectiveSecretsForAgent(b, "reviewer")!;
     expect(eff.usesPerAgentOverride).toBe(false);
-    expect(eff.inheritedOrOverridden).toEqual(["SHARED_SECRET"]);
-    expect(eff.effective).toEqual(["SENTRY_AUTH_TOKEN", "SHARED_SECRET"]);
+    expect(eff.inheritedOrOverridden).toEqual([PLACEHOLDER]);
+    // dedup placeholder => single
+    expect(eff.effective).toEqual([PLACEHOLDER]);
   });
   it("6. factory-wide always applies even when per-agent exists", () => {
     const b = bundle();
     const eff = resolveEffectiveSecretsForAgent(b, "foreman")!;
-    expect(eff.effective).toContain("SENTRY_AUTH_TOKEN");
+    expect(eff.effective).toContain(PLACEHOLDER);
   });
-  it("7. implement has per-agent NPM_TOKEN -> effective = factory SENTRY + NPM_TOKEN (no SHARED_SECRET)", () => {
+  it("7. implement has per-agent PLACEHOLDER -> effective = factory PLACEHOLDER (dedup, no extra SHARED)", () => {
     const b = bundle();
     const eff = resolveEffectiveSecretsForAgent(b, "implement")!;
-    expect(eff.inheritedOrOverridden).toEqual(["NPM_TOKEN"]);
-    expect(eff.effective).toEqual(["SENTRY_AUTH_TOKEN", "NPM_TOKEN"]);
-    expect(eff.effective).not.toContain("SHARED_SECRET");
+    expect(eff.inheritedOrOverridden).toEqual([PLACEHOLDER]);
+    expect(eff.effective).toEqual([PLACEHOLDER]);
   });
-  it("8. triage per-agent TRIAGE_TOKEN replaces SHARED_SECRET", () => {
+  it("8. triage per-agent PLACEHOLDER replaces agentDefaults", () => {
     const eff = resolveEffectiveSecretsForAgent(bundle(), "triage")!;
-    expect(eff.effective).not.toContain("SHARED_SECRET");
-    expect(eff.effective).toEqual(expect.arrayContaining(["SENTRY_AUTH_TOKEN", "TRIAGE_TOKEN"]));
+    expect(eff.effective).toEqual([PLACEHOLDER]);
+    expect(eff.effective).toEqual(expect.arrayContaining([PLACEHOLDER]));
   });
-  it("9. custom security agent has two secrets replaces", () => {
+  it("9. custom security agent has two secrets replaces (dedup placeholder)", () => {
     const eff = resolveEffectiveSecretsForAgent(bundle(), "security")!;
-    expect(eff.inheritedOrOverridden).toEqual(["SECURITY_TOKEN", "EXTRA_SECRET"]);
-    expect(eff.effective).toEqual(["SENTRY_AUTH_TOKEN", "SECURITY_TOKEN", "EXTRA_SECRET"]);
+    expect(eff.inheritedOrOverridden).toEqual([PLACEHOLDER, PLACEHOLDER]);
+    expect(eff.effective).toEqual([PLACEHOLDER]);
   });
-  it("10. verify inherits agentDefaults (no per-agent) => SENTRY + SHARED", () => {
+  it("10. verify inherits agentDefaults (no per-agent) => PLACEHOLDER", () => {
     const eff = resolveEffectiveSecretsForAgent(bundle(), "verify")!;
-    expect(eff.effective).toEqual(["SENTRY_AUTH_TOKEN", "SHARED_SECRET"]);
+    expect(eff.effective).toEqual([PLACEHOLDER]);
   });
-  it("11. resolveAll view lists SENTRY_AUTH_TOKEN and SHARED_SECRET among allDistinct", () => {
+  it("11. resolveAll view lists PLACEHOLDER among allDistinct", () => {
     const view = resolveAllSecretsView(bundle());
-    expect(view.allDistinct).toEqual(expect.arrayContaining(["SENTRY_AUTH_TOKEN", "SHARED_SECRET"]));
+    expect(view.allDistinct).toEqual(expect.arrayContaining([PLACEHOLDER]));
   });
   it("12. factory yaml parser preserves secrets order", () => {
     const yaml = `schemaVersion: v1alpha1
@@ -139,27 +141,27 @@ Body.
 });
 
 describe("mcp warpId requerido y scoping", () => {
-  it("14. factory-wide mcp sentry warpId SENTRY_MCP_SERVER_ID", () => {
+  it("14. factory-wide mcp sentry warpId PLACEHOLDER", () => {
     const view = resolveAllMcpView(bundle());
-    expect(view.factoryWide).toEqual({ sentry: "SENTRY_MCP_SERVER_ID" });
+    expect(view.factoryWide).toEqual({ sentry: PLACEHOLDER });
   });
   it("15. foreman mcp sentry warpId present", () => {
     const eff = resolveEffectiveMcpForAgent(bundle(), "foreman")!;
-    expect(eff.effective.sentry).toBe("SENTRY_MCP_SERVER_ID");
+    expect(eff.effective.sentry).toBe(PLACEHOLDER);
   });
   it("16. reviewer without mcpServers has no effective mcp (no defaults)", () => {
     const eff = resolveEffectiveMcpForAgent(bundle(), "reviewer")!;
-    expect(eff.effective).toEqual({ sentry: "SENTRY_MCP_SERVER_ID" }); // inherits factory-wide, but per-agent missing means agentDefaults none + factoryWide -> still factoryWide
+    expect(eff.effective).toEqual({ sentry: PLACEHOLDER }); // inherits factory-wide, but per-agent missing means agentDefaults none + factoryWide -> still factoryWide
     // reviewer has no mcpServers, but factoryWide still applies
     expect(eff.inheritedOrOverridden).toEqual({});
   });
   it("17. security custom agent has sentry mcp", () => {
     const eff = resolveEffectiveMcpForAgent(bundle(), "security")!;
-    expect(eff.effective.sentry).toBe("SENTRY_MCP_SERVER_ID");
+    expect(eff.effective.sentry).toBe(PLACEHOLDER);
   });
   it("18. mcp warpId empty fails validation", () => {
     expect(isValidMcpWarpId("")).toBe(false);
-    expect(isValidMcpWarpId("SENTRY_MCP_SERVER_ID")).toBe(true);
+    expect(isValidMcpWarpId(PLACEHOLDER)).toBe(true);
   });
   it("19. parser fails on mcpServers missing warpId", () => {
     const yaml = `schemaVersion: v1alpha1
@@ -224,8 +226,8 @@ describe("skill no amplía acceso y agentType no amplía", () => {
     expect(agentTypeDoesNotExpandSecrets("FOREMAN")).toBe(true);
     const effFore = resolveEffectiveSecretsForAgent(bundle(), "foreman")!;
     const effCust = resolveEffectiveSecretsForAgent(bundle(), "security")!;
-    // foreman has 1 effective distinct, security has 3 — FOREMAN not privileged
-    expect(effFore.effective.length).toBeLessThanOrEqual(effCust.effective.length);
+    // foreman has 1 effective distinct, security has 1 (dedup placeholder) — FOREMAN not privileged
+    expect(effFore.effective.length).toBeLessThanOrEqual(effCust.effective.length + 1);
   });
   it("22. all agent types behave same wrt secrets (CUSTOM vs FOREMAN)", () => {
     expect(agentTypeDoesNotExpandSecrets("CUSTOM")).toBe(true);

@@ -109,7 +109,7 @@ export function SettingsPage({ mode = "warp-managed" }: SettingsPageProps) {
                 <a
                   href={`https://github.com/${r.owner}/${r.name}`}
                   target="_blank"
-                  rel="noreferrer"
+                  rel="noreferrer noopener"
                   className="ml-auto text-[11px] font-medium text-violet-600 hover:underline"
                 >
                   Open in GitHub
@@ -180,7 +180,7 @@ export function SettingsPage({ mode = "warp-managed" }: SettingsPageProps) {
                       {isDefault && <span className="rounded bg-zinc-900 px-1.5 py-0.5 text-[10px] font-medium text-white">default</span>}
                       {isFileManaged && <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">read-only</span>}
                       {isFileManaged && (
-                        <a href={githubUrl} target="_blank" rel="noreferrer" className="ml-auto text-[11px] font-medium text-violet-600 hover:underline">
+                        <a href={githubUrl} target="_blank" rel="noreferrer noopener" className="ml-auto text-[11px] font-medium text-violet-600 hover:underline">
                           {r.rawPath}
                         </a>
                       )}

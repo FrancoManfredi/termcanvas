@@ -52,7 +52,7 @@ export function FileViewer({ path, raw, language, githubUrl, readOnly }: FileVie
             <a
               href={githubUrl}
               target="_blank"
-              rel="noreferrer"
+              rel="noreferrer noopener"
               className="rounded-[8px] border border-zinc-200 bg-zinc-50 px-2 py-1 text-[11px] font-medium text-zinc-700 hover:bg-white"
             >
               Open in GitHub

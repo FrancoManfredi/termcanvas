@@ -1,6 +1,17 @@
 import { parse as yamlParse } from "yaml";
 import { ParseResult } from "../domain/result";
 
+function hasProtoPollution(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  if (Array.isArray(value)) return value.some(hasProtoPollution);
+  const obj = value as Record<string, unknown>;
+  for (const key of Object.keys(obj)) {
+    if (key.startsWith("__proto__") || key === "constructor" || key === "prototype") return true;
+    if (hasProtoPollution(obj[key])) return true;
+  }
+  return false;
+}
+
 
 // Browser-safe frontmatter parser — replaces gray-matter (which needs Buffer)
 // Extracts YAML between --- delimiters and returns { data, content }
@@ -39,12 +50,15 @@ export function parseFrontmatter<T extends object>(raw: string, file: string): P
   }
 
   try {
-    const data = yamlParse(yamlContent) as T;
+    const data = yamlParse(yamlContent, { customTags: [], merge: false, maxAliasCount: 50 } as unknown as Record<string, unknown>) as T;
     if (data === null || data === undefined) {
       return ParseResult.ok({ data: {} as T, content: content.trim() });
     }
     if (typeof data !== "object" || Array.isArray(data)) {
       return ParseResult.singleFail(file, "frontmatter must be a YAML object", "frontmatter_syntax");
+    }
+    if (hasProtoPollution(data)) {
+      return ParseResult.singleFail(file, "frontmatter contains forbidden prototype key (__proto__)", "proto_pollution");
     }
     return ParseResult.ok({ data, content: content.trim() });
   } catch (e) {

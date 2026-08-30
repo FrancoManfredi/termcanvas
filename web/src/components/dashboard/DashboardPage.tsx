@@ -162,7 +162,7 @@ export function DashboardPage() {
                       <li key={pr.prUrl} className="flex items-center justify-between rounded-[8px] border border-zinc-200 bg-zinc-50 px-3 py-2">
                         <div className="min-w-0 flex-1">
                           <div className="truncate text-[12px] font-medium text-zinc-800">{pr.title}</div>
-                          <a href={pr.prUrl} target="_blank" rel="noreferrer" className="truncate text-[11px] text-violet-600 hover:underline">
+                          <a href={pr.prUrl} target="_blank" rel="noreferrer noopener" className="truncate text-[11px] text-violet-600 hover:underline">
                             {pr.prUrl}
                           </a>
                         </div>
@@ -187,7 +187,7 @@ export function DashboardPage() {
                     return (
                       <li key={pr.prUrl} className="rounded-[8px] border border-zinc-200 bg-zinc-50 px-3 py-2">
                         <div className="text-[12px] font-medium text-zinc-800">{pr.title}</div>
-                        <a href={pr.prUrl} target="_blank" rel="noreferrer" className="truncate text-[11px] text-violet-600 hover:underline">
+                        <a href={pr.prUrl} target="_blank" rel="noreferrer noopener" className="truncate text-[11px] text-violet-600 hover:underline">
                           {pr.prUrl}
                         </a>
                         <div className="mt-1 text-[11px] text-zinc-400">{new Date(pr.createdAt).toLocaleDateString()} · {pr.workItemId}</div>

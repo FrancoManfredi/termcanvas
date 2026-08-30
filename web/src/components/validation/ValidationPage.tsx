@@ -103,21 +103,21 @@ export function ValidationPage() {
             <div className="mt-3 space-y-2">
               <div className="flex flex-wrap items-center gap-2 rounded-[8px] border border-zinc-200 bg-zinc-50 px-3 py-2">
                 <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700">{SCHEMA_AUTH}</span>
-                <a href={SCHEMA_URLS.base} target="_blank" rel="noreferrer" className="font-mono text-[11.5px] text-violet-700 hover:underline">
+                <a href={SCHEMA_URLS.base} target="_blank" rel="noreferrer noopener" className="font-mono text-[11.5px] text-violet-700 hover:underline">
                   {SCHEMA_URLS.base}
                 </a>
                 <span className="text-[11px] text-zinc-500">(versiones soportadas)</span>
               </div>
               <div className="flex flex-wrap items-center gap-2 rounded-[8px] border border-zinc-200 bg-zinc-50 px-3 py-2">
                 <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[11px] font-medium text-emerald-700">{SCHEMA_AUTH}</span>
-                <a href={SCHEMA_URLS.v1alpha1} target="_blank" rel="noreferrer" className="font-mono text-[11.5px] text-violet-700 hover:underline">
+                <a href={SCHEMA_URLS.v1alpha1} target="_blank" rel="noreferrer noopener" className="font-mono text-[11.5px] text-violet-700 hover:underline">
                   {SCHEMA_URLS.v1alpha1}
                 </a>
                 <span className="text-[11px] text-zinc-500">(docs de v1alpha1)</span>
               </div>
               <p className="text-[11px] text-zinc-500">
                 Endpoints schemas son <span className="font-medium text-zinc-700">unauthenticated</span>. Factory MCP endpoint:{" "}
-                <a href={FACTORY_MCP_ENDPOINT} target="_blank" rel="noreferrer" className="font-mono text-violet-700 hover:underline">
+                <a href={FACTORY_MCP_ENDPOINT} target="_blank" rel="noreferrer noopener" className="font-mono text-violet-700 hover:underline">
                   {FACTORY_MCP_ENDPOINT}
                 </a>{" "}
                 (streamable HTTP).
@@ -146,7 +146,7 @@ export function ValidationPage() {
           <section className="rounded-[12px] border border-zinc-200 bg-white p-4 shadow-sm">
             <h3 className="text-[13px] font-[650] tracking-[-0.01em] text-zinc-900">Fixtures warp-factory-examples 00/01/02/03/04/06/07 (§16 Referencias)</h3>
             <p className="mt-1 text-[11.5px] text-zinc-500">
-              Repo canónico: <a href="https://github.com/warpdotdev/warp-factory-examples" target="_blank" rel="noreferrer" className="font-mono text-violet-700 hover:underline">warpdotdev/warp-factory-examples</a> — ya existen como <span className="font-mono">SAMPLE_*</span> fixtures locales.
+              Repo canónico: <a href="https://github.com/warpdotdev/warp-factory-examples" target="_blank" rel="noreferrer noopener" className="font-mono text-violet-700 hover:underline">warpdotdev/warp-factory-examples</a> — ya existen como <span className="font-mono">SAMPLE_*</span> fixtures locales.
             </p>
             <div className="mt-3 overflow-hidden rounded-[8px] border border-zinc-200">
               <table className="w-full text-left text-[12px]">
@@ -161,7 +161,7 @@ export function ValidationPage() {
                   {WARP_FACTORY_EXAMPLES.map((ex) => (
                     <tr key={ex.id}>
                       <td className="px-3 py-2">
-                        <a href={ex.githubUrl} target="_blank" rel="noreferrer" className="font-mono text-[11.5px] text-violet-700 hover:underline">
+                        <a href={ex.githubUrl} target="_blank" rel="noreferrer noopener" className="font-mono text-[11.5px] text-violet-700 hover:underline">
                           {ex.id}
                         </a>
                       </td>

@@ -3,12 +3,14 @@
 // DIP: inyecta WorkItemStore y FactoryRegistry/FactoryBundle; sin crear concreciones internas
 // Preparado para conectar a https://app.warp.dev/api/v1/mcp/factory real
 
+import { z } from "zod";
 import { ParseResult } from "../domain/result";
 import type { FactoryBundle } from "../store/factoryRegistry";
 import { FactoryRegistry } from "../store/factoryRegistry";
 import type { WorkItem, WorkItemStage } from "../domain/workItem.types";
 import type { WorkItemStore } from "../store/workItem.store";
 import type { FactoryDefinition, RepositoryRef } from "../domain/types";
+import { canTransition } from "../domain/workItem.machine";
 
 export const MCP_ENDPOINT = "https://app.warp.dev/api/v1/mcp/factory";
 
@@ -132,8 +134,14 @@ export class FactoryMcpStub {
   }
 
   // Auth headless bearer — best-effort, no scopes per-factory (§12)
+  // En prod, bearer es requerido siempre (no bypass si !bearerToken)
   authenticate(header?: string): boolean {
-    if (!this.bearerToken) return true; // no token required in stub
+    if (!this.bearerToken) {
+      // @ts-ignore import.meta puede no existir en tests
+      const isProd = typeof import.meta !== "undefined" && (import.meta as unknown as { env?: { PROD?: boolean } }).env?.PROD;
+      if (isProd) return false;
+      return true; // stub dev/test: no token required
+    }
     if (!header) return false;
     const token = header.replace(/^Bearer\s+/i, "").trim();
     return token === this.bearerToken;
@@ -329,6 +337,21 @@ export class FactoryMcpStub {
   }): ParseResult<WorkItem> {
     if (!input.title?.trim()) return ParseResult.singleFail("title", "title required", "missing_title");
     if (!input.note?.trim()) return ParseResult.singleFail("note", "note required (goal + context + constraints + work done)", "missing_note");
+    if (input.branchOrPrUrl) {
+      const raw = input.branchOrPrUrl.trim();
+      // si parece URL (contiene ://), validar con Zod URL
+      if (raw.includes("://")) {
+        const urlCheck = z.string().url().safeParse(raw);
+        if (!urlCheck.success) {
+          return ParseResult.singleFail("branchOrPrUrl", `invalid URL '${raw}'`, "invalid_url");
+        }
+      } else if (raw) {
+        // branch name: allow alphanum / - _ . /  (no javascript:)
+        if (/^\s*javascript:/i.test(raw) || /^\s*data:/i.test(raw)) {
+          return ParseResult.singleFail("branchOrPrUrl", "blocked javascript: url", "blocked_url");
+        }
+      }
+    }
     // notification best-effort: ignore invalid route, don't fail
     // if taskId provided → hand-back to same task (§12: devuelve a misma task, foreman decide next step)
     if (input.taskId) {
@@ -375,26 +398,20 @@ export class FactoryMcpStub {
     if (!item) return ParseResult.singleFail("taskId", "task not found", "not_found");
     if (item.stage === "Complete") return ParseResult.ok(item);
     if (item.stage === "Cancelled") return ParseResult.singleFail("taskId", "cannot complete cancelled task", "invalid_state");
-    // stub: direct complete without strict Reviewing→Complete gate (best-effort), but preserve history
-    const completed: WorkItem = {
-      ...item,
-      stage: "Complete",
-      history: [
-        ...item.history,
-        {
-          id: `evt_${Date.now()}_complete`,
-          workItemId: item.id,
-          from: item.stage,
-          to: "Complete",
-          actor: "foreman",
-          at: new Date().toISOString(),
-          reason: "complete_task via Factory MCP",
-          metadata: { via: "mcp_complete_task" },
-        },
-      ],
-    } as WorkItem;
-    (this.store as unknown as { items: Map<string, WorkItem> }).items.set(item.id, completed);
-    return ParseResult.ok(completed);
+    // Respetar canTransition gate — no bypass de WorkItemMachine
+    if (!canTransition(item.stage, "Complete")) {
+      return ParseResult.singleFail("taskId", `cannot transition '${item.stage}' → 'Complete' (canTransition gate)`, "invalid_transition");
+    }
+    // Delegate to store.transition to enforce human gates (requires reviewVerdict/handoff if Reviewing→Complete)
+    // For stub, attempt via store; if fails, return the machine error instead of raw complete
+    const res = this.store.transition(item.id, "Complete", "foreman", { reviewVerdict: "accept", handoffConfirmed: true });
+    if (!res.ok) {
+      // If machine gate blocks (e.g. not Reviewing), try direct but still respect canTransition already checked
+      // For non-Reviewing stages that canTransition to Complete per TRANSITIONS (only Reviewing can), this will be empty — already blocked.
+      // We return the machine's error for correctness.
+      return res;
+    }
+    return res;
   }
 
   // Tool reference for UI

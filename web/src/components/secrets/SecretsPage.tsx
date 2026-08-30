@@ -5,6 +5,7 @@ import { useMemo } from "react";
 import { useFactoryBundle } from "../../lib/factory/hooks/useFactoryBundle";
 import { resolveAllSecretsView, resolveAllMcpView } from "../../lib/factory/domain/secrets.derive";
 import { FactorySettingsHeader } from "../settings/FactorySettingsHeader";
+import { SecretsRedacted, redactSecret } from "./SecretsRedacted";
 
 function Badge({ children, tone = "zinc" }: { children: React.ReactNode; tone?: "zinc" | "violet" | "emerald" | "amber" | "red" }) {
   const cls =
@@ -21,12 +22,8 @@ function Badge({ children, tone = "zinc" }: { children: React.ReactNode; tone?: 
 }
 
 function MaskedSecret({ name }: { name: string }) {
-  return (
-    <span className="inline-flex items-center gap-1.5 font-mono text-[12px] tabular-nums">
-      <span className="text-zinc-800">{name}</span>
-      <span className="rounded bg-zinc-900 px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-white">••••••••</span>
-    </span>
-  );
+  // Nunca renderizar secretName completo — solo •••• + últimos 4
+  return <SecretsRedacted value={name} canCopy={false} />;
 }
 
 export function SecretsPage() {
@@ -85,7 +82,7 @@ export function SecretsPage() {
                     )}
                   </ul>
                   <div className="mt-2 text-[11px] text-zinc-400">
-                    Real de <span className="font-mono">SAMPLE_FACTORY_FULL</span>: SENTRY_AUTH_TOKEN
+                    Real de <span className="font-mono">SAMPLE_FACTORY_FULL</span>: <span className="font-mono">••••</span> (redacted)
                   </div>
                 </div>
                 <div className="rounded-[8px] border border-zinc-200 bg-zinc-50 p-3">
@@ -103,7 +100,7 @@ export function SecretsPage() {
                       ))
                     )}
                   </ul>
-                  <div className="mt-2 text-[11px] text-zinc-400">Real: SHARED_SECRET</div>
+                  <div className="mt-2 text-[11px] text-zinc-400">Real: <span className="font-mono">••••</span> (redacted)</div>
                 </div>
               </div>
             )}
@@ -138,7 +135,7 @@ export function SecretsPage() {
                               <span className="flex flex-wrap gap-1">
                                 {row.inheritedOrOverridden.map((s) => (
                                   <span key={s} className="rounded bg-zinc-50 px-1.5 py-0.5 font-mono text-[11px] shadow-[0_0_0_1px_rgba(0,0,0,0.06)]">
-                                    {s}
+                                    {redactSecret(s)}
                                   </span>
                                 ))}
                               </span>
@@ -148,7 +145,7 @@ export function SecretsPage() {
                             <span className="flex flex-wrap gap-1">
                               {row.effective.map((s) => (
                                 <span key={s} className="rounded bg-white px-1.5 py-0.5 font-mono text-[11px] shadow-[0_0_0_1px_rgba(0,0,0,0.06)]">
-                                  {s}
+                                  {redactSecret(s)}
                                 </span>
                               ))}
                             </span>
@@ -160,8 +157,7 @@ export function SecretsPage() {
                   </table>
                 </div>
                 <div className="bg-zinc-50 px-3 py-2 text-[11px] text-zinc-400">
-                  Ejemplos reales: foreman → SENTRY_AUTH_TOKEN (per-agent), reviewer → SHARED_SECRET (hereda), implement → NPM_TOKEN (reemplaza).
-                  Skill no amplía acceso — ningún agentType añade secrets implícitos.
+                  Ejemplos reales: foreman → <span className="font-mono">••••</span> (per-agent), reviewer → <span className="font-mono">••••</span> (hereda), implement → <span className="font-mono">••••</span> (reemplaza). Skill no amplía acceso — ningún agentType añade secrets implícitos.
                 </div>
               </div>
             )}
@@ -185,7 +181,7 @@ export function SecretsPage() {
                       {Object.entries(mcpView.factoryWide).map(([k, v]) => (
                         <li key={k} className="flex items-center justify-between rounded-[8px] border bg-white px-2 py-1.5">
                           <span className="font-mono text-[11px]">{k}</span>
-                          <span className="font-mono text-[11px] text-zinc-500">{v}</span>
+                          <span className="font-mono text-[11px] text-zinc-500">{redactSecret(v)}</span>
                         </li>
                       ))}
                     </ul>
@@ -200,7 +196,7 @@ export function SecretsPage() {
                       {Object.entries(mcpView.agentDefaults).map(([k, v]) => (
                         <li key={k} className="flex justify-between rounded-[8px] border bg-white px-2 py-1.5">
                           <span className="font-mono text-[11px]">{k}</span>
-                          <span className="font-mono text-[11px] text-zinc-500">{v}</span>
+                          <span className="font-mono text-[11px] text-zinc-500">{redactSecret(v)}</span>
                         </li>
                       ))}
                     </ul>
@@ -213,12 +209,12 @@ export function SecretsPage() {
                       <li key={a.agentName} className="rounded-[8px] border bg-white px-2 py-1.5">
                         <div className="font-medium text-zinc-800">{a.agentName}</div>
                         <div className="font-mono text-[11px] text-zinc-500">
-                          {Object.keys(a.effective).length ? Object.entries(a.effective).map(([k, v]) => `${k}:${v}`).join(", ") : "—"}
+                          {Object.keys(a.effective).length ? Object.entries(a.effective).map(([k, v]) => `${k}:${redactSecret(v)}`).join(", ") : "—"}
                         </div>
                       </li>
                     ))}
                   </ul>
-                  <div className="mt-2 text-[11px] text-zinc-400">Real: sentry → SENTRY_MCP_SERVER_ID (factory + foreman/triage/implement/security)</div>
+                  <div className="mt-2 text-[11px] text-zinc-400">Real: sentry → <span className="font-mono">••••</span> (factory + foreman/triage/implement/security)</div>
                 </div>
               </div>
             )}
