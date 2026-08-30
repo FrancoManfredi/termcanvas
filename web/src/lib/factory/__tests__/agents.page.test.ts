@@ -14,7 +14,7 @@ import {
 import { parseAgentMd } from "../parsers/agent.parser";
 
 
-// Helpers — fabricate rich agents covering all WarpFactories §4 + §7 variants
+// Helpers — fabricate rich agents covering all WarpFactories §4 + §7 variants (redacted placeholders per security fix)
 function makeBundleWithVariants() {
   const registry = new FactoryRegistry();
   const triageRaw = `---
@@ -25,14 +25,14 @@ harness:
   model: claude-4-5-haiku
   auth:
     source: managedSecret
-    secretName: ANTHROPIC_API_KEY
+    secretName: <REPLACE_ME>
 runner: linux-build
 workerHost: warp
 secrets:
-  - TRIAGE_TOKEN
+  - <REPLACE_ME>
 mcpServers:
   sentry:
-    warpId: SENTRY_MCP_SERVER_ID
+    warpId: <REPLACE_ME>
 ---
 
 Triage investigates the request, gathers evidence, scope and complexity.
@@ -54,11 +54,11 @@ harness:
   model: gpt-4o
   auth:
     source: managedSecret
-    secretName: OPENAI_API_KEY
+    secretName: <REPLACE_ME>
 runner: linux-build
 workerHost: warp
 secrets:
-  - NPM_TOKEN
+  - <REPLACE_ME>
 ---
 
 Implement continues the branch from spec, writes code, tests and visual evidence.
@@ -77,10 +77,10 @@ description: Security analysis for every PR
 runner: mac
 mcpServers:
   sentry:
-    warpId: SENTRY_MCP_SERVER_ID
+    warpId: <REPLACE_ME>
 secrets:
-  - SECURITY_TOKEN
-  - EXTRA_SECRET
+  - <REPLACE_ME>
+  - <REPLACE_ME>
 ---
 
 Custom security agent audits PRs for vulnerabilities.
@@ -264,20 +264,20 @@ body`;
     expect(r.value!.factory.agentDefaults.runner).toBe("linux-build");
   });
 
-  it("11. secrets exposed per agent and factory-wide", () => {
+  it("11. secrets exposed per agent and factory-wide (redacted placeholder)", () => {
     const r = makeBundleWithVariants();
     expect(r.ok).toBe(true);
     const foreman = r.value!.agents.find((a) => a.name === "foreman")!;
-    expect(foreman.secrets).toEqual(expect.arrayContaining(["SENTRY_AUTH_TOKEN"]));
+    expect(foreman.secrets).toEqual(expect.arrayContaining(["<REPLACE_ME>"]));
     const security = r.value!.agents.find((a) => a.name === "security")!;
-    expect(security.secrets).toEqual(["SECURITY_TOKEN", "EXTRA_SECRET"]);
+    expect(security.secrets).toEqual(["<REPLACE_ME>", "<REPLACE_ME>"]);
   });
 
-  it("12. mcpServers exposed per agent", () => {
+  it("12. mcpServers exposed per agent (placeholder)", () => {
     const r = makeBundleWithVariants();
     const foreman = r.value!.agents.find((a) => a.name === "foreman")!;
     expect(foreman.mcpServers).toHaveProperty("sentry");
-    expect(foreman.mcpServers!.sentry.warpId).toBe("SENTRY_MCP_SERVER_ID");
+    expect(foreman.mcpServers!.sentry.warpId).toBe("<REPLACE_ME>");
   });
 
   it("13. workerHost exposed when set", () => {
@@ -405,7 +405,7 @@ describe("AgentsPage — UI contract (static GitHub-backed read-only, WarpFactor
     expect(container.textContent).toMatch(/Routes approved|Own each work item/i);
   });
 
-  it("25. AgentDetail shows harness when present, model when present, runner, workerHost, secrets, mcpServers, and read-only link", async () => {
+  it("25. AgentDetail shows harness when present, model when present, runner, workerHost, secrets (redacted), mcpServers, and read-only button", async () => {
     if (!AgentDetail) return;
     const bundle = makeBundleWithVariants();
     expect(bundle.ok).toBe(true);
@@ -413,15 +413,14 @@ describe("AgentsPage — UI contract (static GitHub-backed read-only, WarpFactor
     const factory = bundle.value!.factory;
     render(React.createElement(AgentDetail, { agent: withHarness, factory }));
     expect(screen.getAllByText(new RegExp(withHarness.harness!.type, "i")).length).toBeGreaterThan(0);
-    // secrets
-    if (withHarness.secrets?.length) {
-      expect(screen.getAllByText(new RegExp(withHarness.secrets[0], "i")).length).toBeGreaterThan(0);
-    }
+    // secrets are redacted — should show •••• pattern, not full secret
+    // redacted display: check for bullets
+    expect(screen.getAllByText(/••••/).length).toBeGreaterThan(0);
     // instructions non-empty
     expect(screen.getAllByText(new RegExp(withHarness.instructions.slice(0, 12), "i")).length).toBeGreaterThan(0);
-    // read-only link to file
-    const link = screen.getByRole("link");
-    expect(link.getAttribute("href")).toMatch(/agent\.md/);
+    // read-only button (sanitized rawPath) — was link, now button per M2
+    const btn = screen.getByRole("button", { name: new RegExp(withHarness.rawPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i") });
+    expect(btn).toBeInTheDocument();
     expect(screen.getAllByText(/read.only|GitHub-backed/i).length).toBeGreaterThan(0);
   });
 

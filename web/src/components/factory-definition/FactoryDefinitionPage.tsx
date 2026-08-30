@@ -179,7 +179,7 @@ export function FactoryDefinitionPage({ mode = "warp-managed" }: FactoryDefiniti
                       <a
                         href={githubFileUrl(primaryRepo.owner, primaryRepo.name, iss.file, iss.line)}
                         target="_blank"
-                        rel="noreferrer"
+                        rel="noreferrer noopener"
                         className="ml-1 font-sans text-violet-600 hover:underline"
                       >
                         ↗ GitHub
@@ -239,7 +239,7 @@ export function FactoryDefinitionPage({ mode = "warp-managed" }: FactoryDefiniti
             <a
               href={githubFileUrl(primaryRepo.owner, primaryRepo.name, selected.path, 7)}
               target="_blank"
-              rel="noreferrer"
+              rel="noreferrer noopener"
               className="font-medium text-violet-600 hover:underline"
             >
               {selected.path}#L7 ↗

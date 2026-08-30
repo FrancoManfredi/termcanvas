@@ -3,10 +3,11 @@
 import { useMemo } from "react";
 import { useFactoryBundle } from "../../lib/factory/hooks/useFactoryBundle";
 import { resolveAllMcpView } from "../../lib/factory/domain/secrets.derive";
+import { redactSecret } from "../secrets/SecretsRedacted";
 
 const TEAM_MCPS_MOCK: Array<{ name: string; warpId: string; scope: string; installed: boolean }> = [
-  { name: "sentry", warpId: "SENTRY_MCP_SERVER_ID", scope: "team-level", installed: true },
-  { name: "linear-mcp", warpId: "LINEAR_MCP_ID", scope: "team-level", installed: false },
+  { name: "sentry", warpId: "<REPLACE_ME>", scope: "team-level", installed: true },
+  { name: "linear-mcp", warpId: "<REPLACE_ME>", scope: "team-level", installed: false },
 ];
 
 export function McpsPage() {
@@ -43,7 +44,7 @@ export function McpsPage() {
                     <li key={m.name} className="flex items-center justify-between rounded-[8px] border bg-white px-3 py-2">
                       <div>
                         <div className="font-mono text-[12px] font-medium text-zinc-800">{m.name}</div>
-                        <div className="font-mono text-[11px] text-zinc-400">{m.warpId}</div>
+                        <div className="font-mono text-[11px] text-zinc-400">{redactSecret(m.warpId)}</div>
                       </div>
                       <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${m.installed ? "bg-emerald-50 text-emerald-700" : "bg-zinc-100 text-zinc-500"}`}>
                         {m.installed ? "installed" : "available"}
@@ -62,14 +63,14 @@ export function McpsPage() {
                     <li className="rounded-[8px] border bg-white px-3 py-2">
                       <div className="text-[12px] font-medium text-zinc-800">factory.yaml mcpServers</div>
                       <div className="font-mono text-[11px] text-zinc-500">
-                        {Object.keys(mcpView.factoryWide).length ? Object.entries(mcpView.factoryWide).map(([k, v]) => `${k}: ${v}`).join(", ") : "—"}
+                        {Object.keys(mcpView.factoryWide).length ? Object.entries(mcpView.factoryWide).map(([k, v]) => `${k}: ${redactSecret(v)}`).join(", ") : "—"}
                       </div>
                     </li>
                     {mcpView.byAgent.slice(0, 3).map((a) => (
                       <li key={a.agentName} className="rounded-[8px] border bg-white px-3 py-2">
                         <div className="text-[12px] font-medium text-zinc-800">{a.agentName} — {a.agentType}</div>
                         <div className="font-mono text-[11px] text-zinc-500">
-                          {Object.keys(a.effective).length ? Object.entries(a.effective).map(([k, v]) => `${k}:${v}`).join(", ") : "—"}
+                          {Object.keys(a.effective).length ? Object.entries(a.effective).map(([k, v]) => `${k}:${redactSecret(v)}`).join(", ") : "—"}
                         </div>
                       </li>
                     ))}

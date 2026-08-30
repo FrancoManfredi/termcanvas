@@ -177,13 +177,22 @@ export function agentTypeDoesNotExpandSecrets(agentType: string): boolean {
   return true; // by design, no agentType adds implicit secrets
 }
 
-/** Validate alias charset per WarpFactories.md §7 alias: [A-Za-z0-9 ._-] max 60 */
+/** Validate alias charset per WarpFactories.md §7 alias: [A-Za-z0-9 ._-] max 60 — trim + estricto */
 export function isValidAlias(alias: string): boolean {
-  if (alias.length === 0 || alias.length > 60) return false;
-  return /^[A-Za-z0-9 ._-]+$/.test(alias);
+  if (typeof alias !== "string") return false;
+  const trimmed = alias.trim();
+  if (trimmed.length === 0 || trimmed.length > 60) return false;
+  if (trimmed !== alias) return false; // reject not trimmed
+  if (/^\s*$/.test(alias)) return false;
+  return /^[A-Za-z0-9 ._-]+$/.test(trimmed);
 }
 
-/** Validate mcp entry has required warpId */
+/** Validate mcp entry has required warpId — trim + rechaza whitespace */
 export function isValidMcpWarpId(warpId: unknown): boolean {
-  return typeof warpId === "string" && warpId.length > 0;
+  if (typeof warpId !== "string") return false;
+  if (/^\s*$/.test(warpId)) return false;
+  const trimmed = warpId.trim();
+  if (trimmed.length === 0) return false;
+  if (trimmed !== warpId) return false;
+  return trimmed.length > 0;
 }

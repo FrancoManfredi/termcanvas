@@ -13,8 +13,10 @@ import {
 
 const aliasSchema = z
   .string()
+  .trim()
   .max(60, "alias max 60 chars")
   .regex(/^[A-Za-z0-9 ._-]+$/, "alias: allowed [A-Za-z0-9 ._-]")
+  .refine((v) => !/^\s*$/.test(v), "alias cannot be whitespace")
   .optional();
 
 const repositorySchema = z.object({

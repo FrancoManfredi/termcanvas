@@ -320,15 +320,18 @@ describe("mcp.stub — Factory MCP 19 tools (WarpFactories.md §12, E14 US-121�
     expect(ctx.stub.get_conversation("unknown")).toEqual([]);
   });
 
-  it("51. complete_task marks Complete (no claim needed)", () => {
-    const created = ctx.stub.send_task({ factoryName: "payments-factory", title: "to complete", note: "note" }).getOrThrow();
+  it("51. complete_task marks Complete (no claim needed) — respects canTransition", () => {
+    // Task must be in Reviewing to allow Complete per WorkItemMachine (security fix)
+    const created = ctx.store.create({ factoryName: "payments-factory", title: "to complete", source: "mcp", createdBy: "mcp-agent", foremanDecision: { shouldSkipTriage: true, shouldSkipPlanning: true } }).getOrThrow();
+    ctx.store.transition(created.id, "Reviewing", "implement");
     const r = ctx.stub.complete_task(created.id);
     expect(r.ok).toBe(true);
     expect(r.getOrThrow().stage).toBe("Complete");
   });
 
   it("52. complete_task on already Complete idempotent", () => {
-    const created = ctx.stub.send_task({ factoryName: "payments-factory", title: "already done", note: "note" }).getOrThrow();
+    const created = ctx.store.create({ factoryName: "payments-factory", title: "already done", source: "mcp", createdBy: "mcp-agent", foremanDecision: { shouldSkipTriage: true, shouldSkipPlanning: true } }).getOrThrow();
+    ctx.store.transition(created.id, "Reviewing", "implement");
     ctx.stub.complete_task(created.id);
     expect(ctx.stub.complete_task(created.id).ok).toBe(true);
   });

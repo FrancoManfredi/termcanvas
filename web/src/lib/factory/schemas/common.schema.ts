@@ -5,10 +5,11 @@ import { z } from "zod";
 
 export const ownerNameSchema = z
   .string()
+  .trim()
   .min(1, "owner required")
   .regex(/^[A-Za-z0-9_.-]+$/, "owner: allowed [A-Za-z0-9._-]")
   .transform((v) => {
-    return v;
+    return v.trim();
   });
 
 export const harnessTypeSchema = z.enum(["oz", "claude", "claude-code", "codex", "gemini"]);
@@ -34,7 +35,14 @@ export const harnessSchema = z
     }
   });
 
-export const mcpServerRefSchema = z.object({ warpId: z.string().min(1) });
+export const mcpServerRefSchema = z.object({
+  warpId: z
+    .string()
+    .trim()
+    .min(1, "warpId required")
+    .refine((v) => !/^\s*$/.test(v), "warpId cannot be whitespace")
+    .refine((v) => v.trim() === v, "warpId must be trimmed"),
+});
 
 export const credentialStrategySchema = z.enum(["EXECUTOR", "CREATOR"]);
 

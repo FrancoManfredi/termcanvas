@@ -52,12 +52,44 @@ export class WorkItemStore {
     this.listeners.forEach((cb) => cb());
   }
 
+  private isAllowedPrUrl(url: string): boolean {
+    try {
+      const u = new URL(url.trim());
+      if (u.protocol !== "https:") return false;
+      if (u.hostname !== "github.com") return false;
+      // must be /owner/repo/(pull|issues)/... or generic github path
+      if (!u.pathname.startsWith("/")) return false;
+      // reject javascript:, data:, etc already via protocol check
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   create(input: CreateWorkItemInput): ParseResult<WorkItem> {
     if (!input.factoryName || !this.knownFactories.has(input.factoryName)) {
       return ParseResult.singleFail("factoryName", `unknown factory '${input.factoryName}'`, "unknown_factory");
     }
-    if (!input.title?.trim()) {
+    const trimmedTitle = input.title?.trim() ?? "";
+    if (!trimmedTitle) {
       return ParseResult.singleFail("title", "title required", "missing_title");
+    }
+    if (trimmedTitle.length > 200) {
+      return ParseResult.singleFail("title", "title max 200 chars", "title_too_long");
+    }
+    if (input.description && input.description.length > 5000) {
+      return ParseResult.singleFail("description", "description max 5000 chars", "description_too_long");
+    }
+    if (input.linkedPRs) {
+      for (const pr of input.linkedPRs) {
+        const trimmed = pr.trim();
+        if (/^\s*javascript:/i.test(trimmed) || /^\s*data:/i.test(trimmed) || /^\s*vbscript:/i.test(trimmed)) {
+          return ParseResult.singleFail("linkedPRs", `blocked javascript: url '${pr}'`, "blocked_url");
+        }
+        if (!this.isAllowedPrUrl(pr)) {
+          return ParseResult.singleFail("linkedPRs", `linkedPRs must be https://github.com/* URL, got '${pr}'`, "invalid_pr_url");
+        }
+      }
     }
     if (!input.createdBy?.trim()) {
       return ParseResult.singleFail("createdBy", "createdBy required", "missing_createdBy");
@@ -81,7 +113,7 @@ export class WorkItemStore {
     const item: WorkItem = {
       id,
       factoryName: input.factoryName,
-      title: input.title,
+      title: trimmedTitle,
       description: input.description,
       source: input.source,
       sourceRef: input.sourceRef,

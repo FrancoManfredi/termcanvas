@@ -1,11 +1,15 @@
 import type { AgentDefinition, FactoryDefinition } from "../../lib/factory/domain/types";
+import { redactSecret } from "../secrets/SecretsRedacted";
 
 
 function getEffectiveHarness(agent: AgentDefinition, factory: FactoryDefinition): string {
   if (agent.harness) {
     const parts: string[] = [agent.harness.type];
     if (agent.harness.model) parts.push(agent.harness.model);
-    if (agent.harness.auth) parts.push(`auth:${agent.harness.auth.source}${agent.harness.auth.secretName ? `:${agent.harness.auth.secretName}` : ""}`);
+    if (agent.harness.auth) {
+      const redacted = agent.harness.auth.secretName ? redactSecret(agent.harness.auth.secretName) : "";
+      parts.push(`auth:${agent.harness.auth.source}${redacted ? `:${redacted}` : ""}`);
+    }
     const v = parts.join(" · ");
     return v;
   }
@@ -63,9 +67,9 @@ export function AgentDetail({ agent, factory }: AgentDetailProps) {
       return "—";
     }
     const parts: string[] = [];
-    if (factory.secrets?.length) parts.push(`factory: ${factory.secrets.join(", ")}`);
-    if (factory.agentDefaults.secrets?.length) parts.push(`defaults: ${factory.agentDefaults.secrets.join(", ")}`);
-    if (agent.secrets?.length) parts.push(agent.secrets.join(", "));
+    if (factory.secrets?.length) parts.push(`factory: ${factory.secrets.map(redactSecret).join(", ")}`);
+    if (factory.agentDefaults.secrets?.length) parts.push(`defaults: ${factory.agentDefaults.secrets.map(redactSecret).join(", ")}`);
+    if (agent.secrets?.length) parts.push(agent.secrets.map(redactSecret).join(", "));
     const v = parts.join(" · ") || "—";
     return v;
   }
@@ -76,7 +80,7 @@ export function AgentDetail({ agent, factory }: AgentDetailProps) {
       return "—";
     }
     const v = Object.entries(servers)
-      .map(([k, v]) => `${k} (${v.warpId})`)
+      .map(([k, v]) => `${k} (${redactSecret(v.warpId)})`)
       .join(", ");
     return v;
   }
@@ -85,6 +89,11 @@ export function AgentDetail({ agent, factory }: AgentDetailProps) {
     const v = agent.instructions?.trim() ?? "";
     return v || "—";
   }
+
+  function isValidRawPath(p: string): boolean {
+    return /^[a-z0-9\/._-]+\.md$/.test(p);
+  }
+  const safeRawPath = isValidRawPath(agent.rawPath) ? agent.rawPath : "";
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-white">
@@ -97,16 +106,20 @@ export function AgentDetail({ agent, factory }: AgentDetailProps) {
           </span>
         </div>
         {agent.description && <p className="mt-1 text-[12.5px] leading-snug text-zinc-600">{agent.description}</p>}
-        <p className="mt-1 font-mono text-[11px] text-zinc-500">{agent.rawPath}</p>
+        <p className="mt-1 font-mono text-[11px] text-zinc-500">{safeRawPath || agent.rawPath}</p>
       </div>
 
       {/* Read-only banner — GitHub-backed */}
       <div className="border-b border-amber-200 bg-amber-50 px-4 py-2">
         <p className="text-[11px] font-medium text-amber-800">
           GitHub-backed — read-only. Config lives in{" "}
-          <a href={`#${agent.rawPath}`} className="font-mono underline decoration-amber-300 underline-offset-2 hover:text-amber-900">
-            {agent.rawPath}
-          </a>{" "}
+          {safeRawPath ? (
+            <button type="button" onClick={() => { window.location.hash = safeRawPath; }} className="font-mono underline decoration-amber-300 underline-offset-2 hover:text-amber-900">
+              {safeRawPath}
+            </button>
+          ) : (
+            <span className="font-mono text-zinc-500">{agent.rawPath}</span>
+          )}{" "}
           — edit via PR.
         </p>
         <p className="mt-0.5 text-[11px] text-amber-700">Read-only — GitHub-backed</p>
