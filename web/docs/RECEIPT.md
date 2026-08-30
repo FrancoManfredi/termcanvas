@@ -1,4 +1,4 @@
-# RECEIPT — TermCanvas Warp Factories Simulator (LOCAL, Ola 5 HARDENING CORE + Olas 6-8 + hotfix valid_routing)
+# RECEIPT — TermCanvas Warp Factories Simulator (LOCAL, Ola 5 HARDENING CORE + Olas 6-8 + hotfix valid_routing + Ola 12 PREVIEW PROD)
 
 > **Gate canónico Ola 5 (P0-01..P0-04):** `pnpm --filter web check` = `tsc --noEmit && tsc -b && vitest run --pool=threads && vite build && oxlint`
 > **Instrucción:** toda afirmación "verde/completo" debe citar `commit · comando · salida` de este receipt. Prohibido "build verde" sin calificar.
@@ -10,7 +10,7 @@ branch: workbuddy/main-c2128e3a
 base:   origin/main 2627957509fa0e89d6a424374b83b61a1406fea3
 prev:   d64cdf3ff316db7744468fec43685cd0a9ed593b
 worktree: C:\Users\Estudiante UCU\WorkBuddy\Worktrees\web\main-c2128e3a
-fecha:  2026-08-30 (Ola 5 HARDENING CORE 5pts + Ola 6 persistencia v1→v2 + file:line LineCounter + Ola 7 polish Help ?×5 + presets 5 + Dashboard 9 tooltips + DEMO-5MIN + Ola 8 ADR ports + VITE_FACTORY_BACKEND + trigger 2026-11-01 + hotfix valid_routing preset factory-aware)
+fecha:  2026-08-30 (Ola 5 HARDENING CORE 5pts + Ola 6 persistencia v1→v2 + file:line LineCounter + Ola 7 polish Help ?×5 + presets 5 + Dashboard 9 tooltips + DEMO-5MIN + Ola 8 ADR ports + VITE_FACTORY_BACKEND + trigger 2026-11-01 + hotfix valid_routing preset factory-aware + Ola 12 PREVIEW PROD 2pts dist/ 2319 modules + preview 200)
 commit: HEAD workbuddy/main-c2128e3a feat(web) O5-O8 · base origin/main 2627957509fa0e89d6a424374b83b61a1406fea3 · ver git rev-parse --short HEAD (actual) / git log --oneline -1 · pnpm check 39/902
 ```
 
@@ -39,9 +39,16 @@ pnpm --filter web build
 pnpm --filter web exec oxlint
 # → 0 warnings / 0 errors (158 archivos, ignorePatterns dist-verify/**, dist/**, node_modules/**)
 
+# 6 — vite preview (prod artifact, Ola 12 PREVIEW PROD)
+pnpm --filter web exec vite preview --port 4173 --strictPort
+# → 200 http://localhost:4173/ (dist/ existe, 53 files, 2319 modules transformed, index.html 1.22kB) — verificado 2026-08-30
+# → dev en 5174 también 200 (http://localhost:5174/ ocupado por pnpm dev, 1145B), preview 4173 usa mismo artifact dist/ que vite build (2319 modules) — DoD Ola 12
+# → asset check: 200 /assets/index-BZoxflHb.css 52406B (ETag W/"4cb-…", Cache-Control no-cache)
+# alternativa documentada: si 4173/5174 ocupados, `pnpm --filter web build && ls dist/` genera dist/ 2319 modules y preview serviría idéntico artifact
+
 # Gate único (atajo)
 pnpm --filter web check
-# → verde (5 subcomandos: tsc --noEmit && tsc -b && vitest --pool=threads && vite build && oxlint)
+# → verde (5 subcomandos: tsc --noEmit && tsc -b && vitest --pool=threads && vite build && oxlint) — verificado 2026-08-30 Ola 12: 39/902 + 2319 modules + oxlint 0
 
 pnpm --filter web run check:quick
 # → verde (tsc -b && vitest --pool=threads, para pre-commit)
@@ -89,6 +96,13 @@ pnpm --filter web run check:quick
 - Hotfix local: `github.routing.derive.ts` factory-aware 5 presets + `github.routing.test.ts` valid_routing.
 - **Total: 39 archivos / 902 tests, tsc --noEmit 0, tsc -b 0, vite 2319 modules, oxlint 0.**
 
+## Ola 12 — PREVIEW PROD (validación artifact prod, 2026-08-30)
+
+- **Build aislado:** `pnpm --filter web build` → `2319 modules transformed` → `dist/` existe (53 files: `index.html 1.22kB` + `assets/` 52.40kB css, vendor ~182kB, parse ~183kB, anim ~133kB, etc.) — `tsc -b && vite build` verde, mismo que `pnpm check` paso 4. Evidencia: `vite v8.2.2 building client environment for production... ✓ 2319 modules transformed ✓ built in 697ms` + `Get-ChildItem dist → 53 files, index.html 1227B`.
+- **Preview prod:** `pnpm --filter web exec vite preview --port 4173 --strictPort` → `200 http://localhost:4173/` (Content-Type text/html 1227B, ETag `W/"4cb-…"`, Cache-Control no-cache, Connection keep-alive) + asset `200 /assets/index-BZoxflHb.css 52406B`; verificado con `Invoke-WebRequest` 2026-08-30. `5174` ocupado por dev también `200 http://localhost:5174/` (1145B). Preview sirve **mismo `dist/` artifact** que build (2319 modules) — no rebuild, solo static serve. Si ports ocupados, DoD permite documentar que `pnpm --filter web build` genera `dist/` y preview usa mismo artifact.
+- **Gate verde:** `pnpm --filter web check` → `39/39 902/902 + 2319 modules + oxlint 0` — verificado Ola 12 post-build aislado (Duration 26.72s).
+- **Constraints Ola 12:** no se tocó `web/src/**` (solo `web/docs/RECEIPT.md`); `tsc -b 0` verde; DoD cumplido.
+
 ## Validez
 
 - OCP estricto: ninguna firma/semántica de export existente mutada; 847 tests previos siguen verdes (+4 navIcons + 51 Olas 6-8/hotfix).
@@ -98,4 +112,4 @@ pnpm --filter web run check:quick
 
 ---
 
-*Generado Ola 5 HARDENING CORE + Olas 6-8 backend-ready + hotfix valid_routing — gate que desbloquea olas 6-8. Pegar este bloque como receipt en tickets/report/docs. Commit·pnpm check·39/902*
+*Generado Ola 5 HARDENING CORE + Olas 6-8 backend-ready + hotfix valid_routing + Ola 12 PREVIEW PROD — gate que desbloquea olas 6-8 y valida artifact prod (dist/ 2319 modules + preview 200). Pegar este bloque como receipt en tickets/report/docs. Commit·pnpm check·39/902·vite preview 200*

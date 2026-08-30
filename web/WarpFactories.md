@@ -1517,7 +1517,8 @@ Endpoints schemas son **unauthenticated**.
 ## 17. Checklist de Replicación (para TermCanvas Web)
 
 > Qué llevar a TermCanvas Web en los próximos días, mapeado directo a Warp. Priorizado P0→P2.
-> **Estado al 2026-08-30 — implementación local validada: 33 archivos Vitest, 847 tests, TypeScript y oxlint en verde; build Vite verificado.**
+> **Estado al 2026-08-30 — implementación local validada: 39 archivos / 902 tests, TypeScript y oxlint en verde; build Vite verificado. Demo 5 min: `docs/DEMO-5MIN.md` · Receipt canónico: `docs/RECEIPT.md:3` — `pnpm --filter web check` verde `39/902`.**
+> **Guion ejecutable:** `docs/DEMO-5MIN.md` (5 min sin credenciales) — ver también `docs/RECEIPT.md:3` gate canónico `39/902`.
 >
 > Las integraciones externas permanecen como superficies/mock locales cuando requieren credenciales o servicios live. Playwright MCP y debugger MCP no estuvieron disponibles en esta ejecución.
 

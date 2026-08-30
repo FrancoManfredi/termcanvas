@@ -1,5 +1,7 @@
 # TermCanvas Web — Factory Platform
 
+> **Demo 5 min:** [`docs/DEMO-5MIN.md`](docs/DEMO-5MIN.md) — guion ejecutable sin credenciales · Receipt `docs/RECEIPT.md:3` — `pnpm --filter web check` verde `39/902`
+
 Monorepo workspace `web` (pnpm). Instalación y scripts con **pnpm** (no npm).
 
 ```bash
