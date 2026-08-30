@@ -86,6 +86,16 @@ export function ScorersPage() {
         <p className="mt-1 text-[12px] leading-snug text-zinc-500">
           Factory: {content.factory!.name} · Each scorer: name (identity), description, agents ≥1, output classification, labels[value/score/description], passingScore threshold, samplingRate default 25 (0 stop auto), model judge, selfImprovement, rubric. Read from real FactoryRegistry.
         </p>
+        <div className="mt-2 rounded-[8px] border border-amber-200 bg-amber-50 px-3 py-2">
+          <p className="text-[11px] font-medium text-amber-800">Invariante scorer_invariant: ≥1 label con score ≥ passingScore y ≥1 con score &lt; passingScore — file:line si falla</p>
+          <p className="mt-1 text-[11px] text-amber-700">samplingRate 0 | 25 (default 25) — 0 = stop auto pero on-demand sigue · re-score reemplaza · threshold solo display · scorers/scorer.md</p>
+        </div>
+        {selectedScorer && !deriveScorer(selectedScorer).invariantValid && (
+          <div className="mt-2 rounded-[8px] border border-red-200 bg-red-50 px-3 py-2">
+            <p className="font-mono text-[11px] font-medium text-red-700">{selectedScorer.rawPath}:4 — labels — scorer_invariant</p>
+            <p className="mt-1 text-[11px] text-red-600">≥1 label con score ≥ passingScore y ≥1 con score &lt; passingScore</p>
+          </div>
+        )}
       </div>
 
       <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">

@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { render, screen } from "@testing-library/react";
 import * as React from "react";
-import { DASHBOARD_TOOLTIPS } from "../domain/dashboard.derive";
+import { bucketCost, COST_BUCKETS, DASHBOARD_TOOLTIPS, deriveDashboardWithDisclaimers } from "../domain/dashboard.derive";
 import { MetricCard } from "../../../components/dashboard/MetricCard";
 
 describe("dashboard.disclaimers — P1-04 (T12 US-096→101)", () => {
@@ -50,5 +50,59 @@ describe("dashboard.disclaimers — P1-04 (T12 US-096→101)", () => {
       expect(tooltip, `tooltip missing for ${key}`).toBeDefined();
       expect(tooltip.trim().length, key).toBeGreaterThan(2);
     }
+  });
+
+  // O15 — Cost buckets exactos + bucketCost invariante
+  it("COST_BUCKETS S 100 M 500 L 1000 XL Infinity exactos", () => {
+    expect(COST_BUCKETS.S).toBe(100);
+    expect(COST_BUCKETS.M).toBe(500);
+    expect(COST_BUCKETS.L).toBe(1000);
+    expect(COST_BUCKETS.XL).toBe(Infinity);
+  });
+
+  it.each([
+    [0, "S"],
+    [100, "S"],
+    [101, "M"],
+    [500, "M"],
+    [501, "L"],
+    [1000, "L"],
+    [1001, "XL"],
+    [9999, "XL"],
+  ] as const)("bucketCost %i → %s", (cost, bucket) => {
+    expect(bucketCost(cost)).toBe(bucket);
+  });
+
+  it("deriveDashboardWithDisclaimers retorna 8 métricas con tooltip no vacío", () => {
+    const metrics = deriveDashboardWithDisclaimers({ workItems: [], bundle: null });
+    expect(metrics).toHaveLength(8);
+    const ids = metrics.map((m) => m.id);
+    expect(ids).toEqual(["total_runs", "prs_opened", "prs_merged", "autonomy", "cycle_time", "cost_per_pr", "scorer_cards", "self_improvement"]);
+    for (const m of metrics) {
+      expect(m.tooltip.trim().length, m.id).toBeGreaterThan(0);
+      expect(m.trace.length, m.id).toBeGreaterThan(0);
+    }
+  });
+
+  it("deriveDashboardWithDisclaimers disclaimers contienen merged>opened, Autonomy push, S/M/L/XL, sin date filter", () => {
+    const metrics = deriveDashboardWithDisclaimers({ workItems: [], bundle: null });
+    const byId = Object.fromEntries(metrics.map((m) => [m.id, m.tooltip])) as Record<string, string>;
+    expect(byId.prs_merged.toLowerCase()).toContain("merged>opened");
+    expect(byId.autonomy.toLowerCase()).toContain("autonomy push");
+    expect(byId.cost_per_pr).toContain("S/M/L/XL");
+    expect(byId.self_improvement.toLowerCase()).toContain("sin date filter");
+  });
+
+  it("Cost S/M/L/XL disclaimer menciona 100/500/1000 créditos", () => {
+    const tip = DASHBOARD_TOOLTIPS.costPerPr;
+    expect(tip).toContain("100");
+    expect(tip).toContain("500");
+    expect(tip).toContain("1000");
+  });
+
+  it("Most expensive PRs tooltip menciona requiere code host + S/M/L/XL 100/500/1000", () => {
+    const tip = DASHBOARD_TOOLTIPS.mostExpensivePrs;
+    expect(tip.toLowerCase()).toContain("code host");
+    expect(tip).toContain("100");
   });
 });

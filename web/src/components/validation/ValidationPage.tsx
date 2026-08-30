@@ -42,6 +42,29 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
+function CopyFileLineButton({ fileLine }: { fileLine: string }) {
+  const [copied, setCopied] = useState(false);
+  function handleCopy() {
+    if (typeof navigator !== "undefined" && navigator.clipboard) {
+      void navigator.clipboard.writeText(fileLine).then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1200);
+      });
+    }
+  }
+  return (
+    <button
+      onClick={handleCopy}
+      className="ml-1 rounded bg-zinc-800 px-1 py-0.5 text-[10px] font-medium text-white hover:bg-zinc-700"
+      type="button"
+      aria-label={`Copy ${fileLine}`}
+      title="Copy file:line"
+    >
+      {copied ? "✓" : "⧉"}
+    </button>
+  );
+}
+
 function CodeBlock({ path, raw, language }: { path: string; raw: string; language: string }) {
   return (
     <div className="overflow-hidden rounded-[8px] border border-zinc-200 bg-white">
@@ -70,6 +93,22 @@ function formatIssuePath(path: string): { fileLine: string; field: string } {
     if (lastDot !== -1) return { fileLine: path, field: "" };
   }
   return { fileLine: path, field: "" };
+}
+
+function getIssuePriority(issue: { code?: string }): number {
+  const c = issue.code ?? "";
+  if (c === "yaml_syntax" || c === "frontmatter_syntax") return 0;
+  if (c === "reasoningLevel_only_codex") return 1;
+  if (c === "free_only_oz") return 2;
+  if (c === "exactly_one_foreman" || c === "foreman_count") return 3;
+  if (c === "scorer_invariant") return 4;
+  if (c === "missing_runner") return 5;
+  if (c.includes("proto")) return 6;
+  return 10;
+}
+
+function sortWorstFirst<T extends { code?: string }>(issues: T[]): T[] {
+  return [...issues].sort((a, b) => getIssuePriority(a) - getIssuePriority(b));
 }
 
 export function ValidationPage() {
@@ -196,7 +235,7 @@ export function ValidationPage() {
           <section className="rounded-[12px] border border-zinc-200 bg-white p-4 shadow-sm">
             <h3 className="text-[13px] font-[650] tracking-[-0.01em] text-zinc-900">Validación live — factory.yaml de ejemplo (FactoryRegistry)</h3>
             <p className="mt-1 text-[11.5px] text-zinc-500">
-              DIP: lee de <span className="font-mono">FactoryRegistry</span>. Edita el YAML y valida — usa mismo parser que <span className="font-mono">{SCHEMA_URLS.v1alpha1}</span> y <span className="font-mono">{VALIDATE_TOOL}</span> con <span className="font-mono">file:line</span> real via <span className="font-mono">yaml LineCounter</span>.
+              DIP: lee de <span className="font-mono">FactoryRegistry</span>. Edita el YAML y valida — usa mismo parser que <span className="font-mono">{SCHEMA_URLS.v1alpha1}</span> y <span className="font-mono">{VALIDATE_TOOL}</span> con <span className="font-mono">file:line</span> real via <span className="font-mono">yaml LineCounter</span>. Soporta <span className="font-mono">factory.yaml</span> + <span className="font-mono">agents/*</span> + <span className="font-mono">automations/*</span> + <span className="font-mono">runners/*</span> + <span className="font-mono">scorers/*</span> + <span className="font-mono">skills/*</span> — 6 artefactos.
             </p>
             <div className="mt-3 grid gap-3 lg:grid-cols-[1.1fr_0.9fr]">
               <div>
@@ -236,13 +275,13 @@ export function ValidationPage() {
                 </div>
               </div>
               <div>
-                <div className="text-[11px] font-[600] tracking-[0.06em] uppercase text-zinc-500">Resultado — FactoryParser + FactoryRegistry</div>
+                <div className="text-[11px] font-[600] tracking-[0.06em] uppercase text-zinc-500">Resultado — FactoryParser + FactoryRegistry (worst-first)</div>
                 <div className={["mt-1 rounded-[8px] border px-3 py-2", liveResult.ok ? "border-emerald-200 bg-emerald-50" : "border-red-200 bg-red-50"].join(" ")}>
                   {liveResult.ok ? (
                     <p className="text-[12px] font-medium text-emerald-700">✓ valid — qué aplicaría: atómico, factory sigue en última válida si falla (WarpFactories.md §7 PR checks)</p>
                   ) : (
                     <ul className="space-y-1.5">
-                      {liveResult.issues.map((iss, i) => {
+                      {sortWorstFirst(liveResult.issues).map((iss, i) => {
                         const { fileLine, field } = formatIssuePath(iss.file);
                         const hasLine = fileLine.includes(":");
                         return (
@@ -250,6 +289,7 @@ export function ValidationPage() {
                             <span className={hasLine ? "shrink-0 rounded bg-red-100 px-1.5 py-0.5 text-[10px] font-bold text-red-800" : "shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-bold text-zinc-600"}>
                               {fileLine}
                             </span>
+                            {hasLine ? <CopyFileLineButton fileLine={fileLine} /> : null}
                             <span className="text-red-700">
                               {field ? <span className="font-semibold">{field} · </span> : null}
                               {iss.message} {iss.code ? <span className="text-[10px] text-red-500">({iss.code})</span> : null}
@@ -261,7 +301,7 @@ export function ValidationPage() {
                   )}
                 </div>
                 <p className="mt-2 text-[11px] text-zinc-500">
-                  Cada PR contra <span className="font-mono">main</span> recibe check <span className="font-mono">warp/factory-config</span>: annota fields inválidos y refs con file+line, resume qué aplicaría. Merge atómico o nada — Warp-managed nunca queda inválida (valida al guardar).
+                  Cada PR contra <span className="font-mono">main</span> recibe check <span className="font-mono">warp/factory-config</span>: annota fields inválidos y refs con file+line, resume qué aplicaría. Merge atómico o nada — Warp-managed nunca queda inválida (valida al guardar). 6 artefactos con <span className="font-mono">file:line</span> y sort worst-first.
                 </p>
                 {showRawBundleResult && (
                   <div className="mt-3 rounded-[8px] border border-zinc-200 bg-zinc-50 px-3 py-2">
@@ -270,11 +310,12 @@ export function ValidationPage() {
                       <p className="mt-1 text-[11px] text-emerald-700">✓ bundle ok — factory {showRawBundleResult.value?.factory.name} · agents {showRawBundleResult.value?.agents.length} · runners {showRawBundleResult.value?.runners.length}</p>
                     ) : (
                       <ul className="mt-1 space-y-1">
-                        {showRawBundleResult.issues.map((iss, i) => {
+                        {sortWorstFirst(showRawBundleResult.issues as unknown as { path: string; message: string; code: string }[]).map((iss, i) => {
                           const { fileLine, field } = formatIssuePath(iss.path);
                           return (
                             <li key={i} className="flex gap-1.5 font-mono text-[11px] leading-snug text-red-600">
                               <span className="shrink-0 rounded bg-red-100 px-1 py-0.5 text-[10px] font-bold text-red-800">{fileLine}</span>
+                              <CopyFileLineButton fileLine={fileLine} />
                               <span>{field ? `${field} · ` : ""}{iss.message} <span className="text-[10px] text-red-400">({iss.code})</span></span>
                             </li>
                           );
@@ -335,7 +376,7 @@ export function ValidationPage() {
           </section>
 
           <div className="rounded-[8px] border border-dashed border-zinc-300 bg-white px-3 py-2 text-[11px] text-zinc-500">
-            Ref: Schemas <span className="font-mono">{SCHEMA_URLS.base}[/v1alpha1]</span> son <span className="font-mono">{SCHEMA_AUTH}</span> — ver WarpFactories.md §7 Machine-readable schema y §16 Referencias y Ejemplos Oficiales. WarpFactories-UserStories.md E06 US-059, E07 US-064→066. Validación via <span className="font-mono">{VALIDATE_TOOL}</span> y <span className="font-mono">FactoryRegistry</span> DIP. <span className="font-mono">yaml LineCounter</span> provee file:line real — fallback a string search si no resuelve.
+            Ref: Schemas <span className="font-mono">{SCHEMA_URLS.base}[/v1alpha1]</span> son <span className="font-mono">{SCHEMA_AUTH}</span> — ver WarpFactories.md §7 Machine-readable schema y §16 Referencias y Ejemplos Oficiales. WarpFactories-UserStories.md E06 US-059, E07 US-064→066. Validación via <span className="font-mono">{VALIDATE_TOOL}</span> y <span className="font-mono">FactoryRegistry</span> DIP. <span className="font-mono">yaml LineCounter</span> provee file:line real — fallback a string search si no resuelve. 6 artefactos con file:line dinámico (<span className="font-mono">factory.yaml, agents/, automations/, runners/, scorers/, skills/</span>).
           </div>
         </div>
       </div>

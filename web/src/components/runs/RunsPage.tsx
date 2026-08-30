@@ -123,6 +123,14 @@ export function RunsPage({ scope, factoryName }: Props) {
         </div>
       </div>
 
+      {/* Source: WarpFactories.md §10 · US-104..106 — team vs factory scope + timeline/cost/Sub-agents */}
+      {/* Scope banner: team vs factory, New → foreman */}
+      <div className="border-b border-violet-200 bg-violet-50 px-4 py-2">
+        <p className="text-[11px] leading-relaxed text-violet-800">
+          Scope <span className="font-mono font-medium">{scope}</span> — {scope === "team" ? "todos los runs accesibles (cross-factory)" : `solo runs de factory ${factoryName ?? ""}`} · New → foreman (valida factory existe) · timeline/cost/Sub-agents/View session disponibles en detalle
+        </p>
+      </div>
+
       {/* Filters */}
       <div className="flex flex-wrap items-center gap-2 border-b border-zinc-200 bg-white px-4 py-2">
         <div className="flex items-center gap-2">

@@ -101,6 +101,29 @@ export function IntegrationsPage() {
                 Fuente WarpFactories.md §9 tabla + deep dives Slack/GitHub/GitLab/Linear/Jira/Schedule/Factory/API/MCP. Factory trigger: work_item_stage_changed.
               </div>
             </div>
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              <span className="text-[11px] font-medium text-zinc-600">Deep dives:</span>
+              {[
+                { label: "GitLab", anchor: "GitLab Deep Dive" },
+                { label: "Slack", anchor: "Slack Deep Dive" },
+                { label: "Linear", anchor: "Linear Deep Dive" },
+                { label: "Jira", anchor: "Jira Deep Dive" },
+                { label: "Schedule", anchor: "Schedule Deep Dive" },
+                { label: "Factory", anchor: "Factory Deep Dive" },
+              ].map((d) => (
+                <button
+                  key={d.label}
+                  data-testid={`deep-dive-link-${d.label.toLowerCase()}`}
+                  onClick={() => {
+                    const el = document.querySelector(`[data-nav="${d.anchor}"]`) as HTMLElement | null;
+                    el?.click();
+                  }}
+                  className="rounded-full bg-zinc-900 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-zinc-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/20"
+                >
+                  {d.label} deep dive
+                </button>
+              ))}
+            </div>
           </section>
 
           <section className="grid grid-cols-1 gap-3 lg:grid-cols-2">

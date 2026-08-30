@@ -8,6 +8,31 @@ import type { DashboardMetrics, MostExpensivePR, ScorerCard, SelfImprovementPR }
 // OCP: agregar métrica = agregar función pura y campo en DashboardMetrics, UI itera sin cambio
 // Source: WarpFactories.md §10 · US-096→101
 
+// Source: WarpFactories.md §12 · US-101 — cost buckets exactos
+export const COST_BUCKETS = { S: 100, M: 500, L: 1000, XL: Infinity } as const;
+
+export type CostBucket = keyof typeof COST_BUCKETS;
+
+export function bucketCost(cost: number): CostBucket {
+  if (cost <= COST_BUCKETS.S) return "S";
+  if (cost <= COST_BUCKETS.M) return "M";
+  if (cost <= COST_BUCKETS.L) return "L";
+  return "XL";
+}
+
+export interface DashboardMetric {
+  readonly id: "total_runs" | "prs_opened" | "prs_merged" | "autonomy" | "cycle_time" | "cost_per_pr" | "scorer_cards" | "self_improvement";
+  readonly label: string;
+  readonly value: string | number;
+  readonly tooltip: string;
+  readonly trace: string;
+}
+
+export interface DashboardInput {
+  readonly workItems: readonly WorkItem[];
+  readonly bundle: FactoryBundle | null;
+}
+
 export const DASHBOARD_TOOLTIPS = {
   totalRuns: "Todos los agent runs (incl. evaluation/benchmark/self-improvement). Breakdown por stage/source/status. Higher run count con flat PR count puede indicar retries/measurement.",
   prsOpened: "PRs únicos creados por factory work, contados una vez por PR URL.",
@@ -19,6 +44,75 @@ export const DASHBOARD_TOOLTIPS = {
   selfImprovementPrs: "Los 3 newest Self-improvement PRs, sin importar el date range (sin date filter).",
   mostExpensivePrs: "PRs de mayor costo. Requiere code host para detalle enriquecido. Cost S/M/L/XL 100/500/1000.",
 } as const satisfies Record<string, string>;
+
+// Helper para mapear 8 métricas con disclaimer/tooltip — usado por DashboardPage y tests O15
+export function deriveDashboardWithDisclaimers(input: DashboardInput): readonly DashboardMetric[] {
+  const metrics = deriveDashboardMetricsFromItems([...input.workItems] as WorkItem[], input.bundle);
+  const list: DashboardMetric[] = [
+    {
+      id: "total_runs",
+      label: "Total runs",
+      value: metrics.totalRuns.total,
+      tooltip: DASHBOARD_TOOLTIPS.totalRuns,
+      trace: "WarpFactories.md §12 · US-096",
+    },
+    {
+      id: "prs_opened",
+      label: "PRs opened",
+      value: metrics.prsOpened,
+      tooltip: DASHBOARD_TOOLTIPS.prsOpened,
+      trace: "WarpFactories.md §12 · US-097",
+    },
+    {
+      id: "prs_merged",
+      label: "PRs merged",
+      value: metrics.prsMerged,
+      tooltip: DASHBOARD_TOOLTIPS.prsMerged,
+      trace: "WarpFactories.md §12 · US-098",
+    },
+    {
+      id: "autonomy",
+      label: "Autonomy %",
+      value: metrics.autonomyPct ?? 0,
+      tooltip: DASHBOARD_TOOLTIPS.autonomyPct,
+      trace: "WarpFactories.md §12 · US-099",
+    },
+    {
+      id: "cycle_time",
+      label: "PR cycle time",
+      value: metrics.prCycleTimeMedianMs ?? 0,
+      tooltip: DASHBOARD_TOOLTIPS.prCycleTime,
+      trace: "WarpFactories.md §12 · US-100",
+    },
+    {
+      id: "cost_per_pr",
+      label: "Cost per PR",
+      value: metrics.costPerPrMedian ?? 0,
+      tooltip: DASHBOARD_TOOLTIPS.costPerPr,
+      trace: "WarpFactories.md §12 · US-101",
+    },
+    {
+      id: "scorer_cards",
+      label: "Scorer cards",
+      value: metrics.scorerCards.length,
+      tooltip: DASHBOARD_TOOLTIPS.scorerCards,
+      trace: "WarpFactories.md §12 · US-101",
+    },
+    {
+      id: "self_improvement",
+      label: "Self-improvement PRs",
+      value: metrics.selfImprovementPrs.length,
+      tooltip: DASHBOARD_TOOLTIPS.selfImprovementPrs,
+      trace: "WarpFactories.md §12 · US-101",
+    },
+  ];
+  return list;
+}
+
+// alias exigido por PLAN O15 interface exacta
+export function deriveDashboardMetricsWithTooltips(input: DashboardInput): readonly DashboardMetric[] {
+  return deriveDashboardWithDisclaimers(input);
+}
 
 export function median(values: number[]): number | null {
   if (values.length === 0) {

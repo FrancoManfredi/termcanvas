@@ -16,6 +16,7 @@ import {
   getOutputValue,
   isSelfImprovementEnabled,
   classifyLabel,
+  validateScorerDefinition,
 } from "../domain/scorer.derive";
 import { parseScorerMd } from "../parsers/scorer.parser";
 
@@ -291,5 +292,80 @@ model: m
 ---
 `;
     expect(parseScorerMd(raw, "scorers/x/scorer.md").ok).toBe(false);
+  });
+
+  // O15 — validateScorerDefinition con file:line + samplingRate 0|25 + scorer_invariant
+  it("31. validateScorerDefinition ok para scorer válido con samplingRate 25", () => {
+    const s = makeScorer({ samplingRate: 25 });
+    const res = validateScorerDefinition(s);
+    expect(res.ok).toBe(true);
+  });
+
+  it("32. validateScorerDefinition ok para samplingRate 0 (stop auto)", () => {
+    const s = makeScorer({ samplingRate: 0 });
+    const res = validateScorerDefinition(s);
+    expect(res.ok).toBe(true);
+    expect(isAutoScoringEnabled(s)).toBe(false);
+  });
+
+  it("33. validateScorerDefinition ok para samplingRate undefined (default 25)", () => {
+    const s = makeScorer({ samplingRate: undefined as unknown as number });
+    const res = validateScorerDefinition(s);
+    expect(res.ok).toBe(true);
+  });
+
+  it("34. validateScorerDefinition fails scorer_invariant con file:line code", () => {
+    const s = makeScorer({ labels: [{ value: "a", score: 1 }, { value: "b", score: 1 }], rawPath: "scorers/bad/scorer.md" });
+    const res = validateScorerDefinition(s);
+    expect(res.ok).toBe(false);
+    expect(res.issues[0].code).toBe("scorer_invariant");
+    expect(res.issues[0].path).toContain("scorers/bad/scorer.md:4");
+    expect(res.issues[0].message).toContain("≥1");
+  });
+
+  it("35. validateScorerDefinition invariant fail si solo failing", () => {
+    const s = makeScorer({ labels: [{ value: "a", score: 0 }, { value: "b", score: 0 }], passingScore: 1, rawPath: "scorers/x/scorer.md" });
+    const res = validateScorerDefinition(s);
+    expect(res.ok).toBe(false);
+    expect(res.issues[0].code).toBe("scorer_invariant");
+  });
+
+  it("36. validateScorerDefinition fails si samplingRate no es 0 ni 25", () => {
+    const s = makeScorer({ samplingRate: 50 });
+    const res = validateScorerDefinition(s);
+    expect(res.ok).toBe(false);
+    expect(res.issues[0].code).toBe("samplingRate_invalid");
+    expect(res.issues[0].path).toContain("samplingRate");
+  });
+
+  it("37. threshold solo display — cambiar passingScore no invalida samplingRate, re-score reemplaza", () => {
+    const s1 = makeScorer({ passingScore: 0.7, labels: [{ value: "a", score: 1 }, { value: "b", score: 0 }] });
+    const res1 = validateScorerDefinition(s1);
+    expect(res1.ok).toBe(true);
+    // threshold display: passing vs failing cambian pero invariant sigue ok
+    expect(getPassingLabels(s1).length).toBe(1);
+    expect(getFailingLabels(s1).length).toBe(1);
+  });
+
+  it("38. scorer_invariant message exacta contiene ≥1 failing y passing", () => {
+    void makeScorer({ labels: [{ value: "only", score: 0 }], passingScore: 0.5, rawPath: "scorers/my/scorer.md" });
+    // single label cannot satisfy both; need at least 2 labels
+    const s3 = makeScorer({ labels: [{ value: "a", score: 1 }, { value: "b", score: 1 }], passingScore: 1, rawPath: "scorers/my/scorer.md" });
+    const res3 = validateScorerDefinition(s3);
+    expect(res3.issues[0].message).toMatch(/passingScore/);
+  });
+
+  it("39. validateScorerDefinition preserves file:line en error samplingRate", () => {
+    const s = makeScorer({ samplingRate: 100, rawPath: "scorers/invalid/scorer.md" });
+    const res = validateScorerDefinition(s);
+    expect(res.issues[0].path).toContain("scorers/invalid/scorer.md");
+    expect(res.issues[0].path).toContain("samplingRate");
+  });
+
+  it("40. re-score reemplaza — segundo validate ok tras fix invariant", () => {
+    let s = makeScorer({ labels: [{ value: "a", score: 1 }, { value: "b", score: 1 }], rawPath: "scorers/fix/scorer.md" });
+    expect(validateScorerDefinition(s).ok).toBe(false);
+    s = { ...s, labels: [{ value: "a", score: 1 }, { value: "b", score: 0 }] };
+    expect(validateScorerDefinition(s).ok).toBe(true);
   });
 });

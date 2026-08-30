@@ -13,7 +13,7 @@ export const ownerNameSchema = z
     return v.trim();
   });
 
-export const harnessTypeSchema = z.enum(["oz"]);
+export const harnessTypeSchema = z.enum(["oz", "claude", "codex", "gemini"]);
 
 export const harnessSchema = z
   .object({
@@ -27,12 +27,26 @@ export const harnessSchema = z
       })
       .optional(),
   })
+  .strict()
   .superRefine((val, ctx) => {
-    if (val.auth) {
-      ctx.addIssue({ code: "custom", message: "harness type 'oz' must not have auth (solo oz, sin credenciales externas)", path: ["auth"] });
+    if (val.reasoningLevel !== undefined && val.type !== "codex") {
+      ctx.addIssue({
+        code: "custom",
+        message: "reasoningLevel solo aplica a codex",
+        path: ["reasoningLevel"],
+        params: { code: "reasoningLevel_only_codex" },
+      } as never);
     }
-    if (val.reasoningLevel) {
-      ctx.addIssue({ code: "custom", message: "reasoningLevel no aplica para oz", path: ["reasoningLevel"] });
+    if (val.auth) {
+      if (val.type === "oz") {
+        ctx.addIssue({
+          code: "custom",
+          message: "harness type 'oz' must not have auth (solo oz, sin credenciales externas)",
+          path: ["auth"],
+          params: { code: "invalid_auth" },
+        } as never);
+      }
+      // auth source case-sensitive: enum already case-sensitive, no extra
     }
   });
 
@@ -92,8 +106,10 @@ export function zodToParseIssues(
   return error.issues.map((i) => {
     const filteredPath = i.path.filter((k): k is string | number => typeof k === "string" || typeof k === "number");
     const basePath = filteredPath.length ? `${file}.${String(filteredPath.join("."))}` : file;
+    // Extract custom code from params if present (e.g. reasoningLevel_only_codex)
+    const customCode = (i as unknown as { params?: { code?: string } }).params?.code ?? (i as unknown as { code?: string }).code ?? i.code;
     if (!raw) {
-      return { path: basePath, message: i.message, code: i.code };
+      return { path: basePath, message: i.message, code: customCode };
     }
     // Prefer LineCounter (yaml) for file+line real — ~20 LOC wrapper, exact offset.
     let line: number | undefined;
@@ -104,11 +120,16 @@ export function zodToParseIssues(
     // Fallback to string search if LineCounter didn't resolve (no dep nueva).
     if (line === undefined) {
       line = findLineForPath(raw, filteredPath);
+      // Si raw es frontmatter slice (no contiene "---") y file es .md, las líneas de raw empiezan en 2 del file (después de opening ---)
+      // Ajustar offset +1 para que file:line sea real cuando fallback se usa en frontmatter
+      if (line !== undefined && file.endsWith(".md") && !raw.includes("---")) {
+        line = line + 1;
+      }
     }
     if (line) {
-      return { path: `${file}:${line} — ${String(filteredPath.join("."))}`, message: i.message, code: i.code };
+      return { path: `${file}:${line} — ${String(filteredPath.join("."))}`, message: i.message, code: customCode };
     }
-    return { path: basePath, message: i.message, code: i.code };
+    return { path: basePath, message: i.message, code: customCode };
   });
 }
 

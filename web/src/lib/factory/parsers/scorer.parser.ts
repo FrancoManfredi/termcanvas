@@ -4,7 +4,7 @@ import { ParseResult } from "../domain/result";
 import type { ScorerDefinition } from "../domain/types";
 import type { IScorerParser } from "./contracts";
 import { parseFrontmatter } from "./frontmatter.utils";
-
+import { parseFrontmatterWithLineCounter } from "../domain/validation.lineCounter";
 
 function extractScorerSlug(file: string): string {
   const parts = file.split("/").filter(Boolean);
@@ -23,7 +23,8 @@ export class ScorerParser implements IScorerParser {
     const validated = scorerFrontmatterSchema.safeParse(fm);
     if (!validated.success) {
       const fmRaw = raw.split("---")[1] ?? "";
-      return ParseResult.fail(zodToParseIssues(validated.error, file, fmRaw));
+      const { lineCounter } = parseFrontmatterWithLineCounter(raw);
+      return ParseResult.fail(zodToParseIssues(validated.error, file, fmRaw, lineCounter));
     }
     if (!rubric) return ParseResult.singleFail(file, "scorer.md rubric body must not be empty", "missing_body");
 

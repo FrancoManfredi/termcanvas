@@ -3,6 +3,15 @@
 
 import type { FactoryBundle } from "../store/factoryRegistry";
 import type { FactoryIntegration } from "./types";
+import type { IntegrationTrigger } from "./integrations.deep";
+import {
+  SLACK_TRIGGERS,
+  LINEAR_INTEGRATION_TRIGGERS,
+  JIRA_TRIGGERS,
+  GITLAB_INTEGRATION_TRIGGERS,
+  SCHEDULE_TRIGGERS,
+  FACTORY_STAGE_TRIGGERS,
+} from "./integrations.deep";
 
 type IntegrationType = FactoryIntegration["type"]; // "slack"|"linear"|"jira"
 
@@ -163,6 +172,37 @@ export function validateMcpWarpId(warpId: string): boolean {
   if (trimmed.length === 0) return false;
   if (trimmed !== warpId) return false; // reject not trimmed
   return trimmed.length > 0;
+}
+
+// ── O14 helpers — catalog queries (pure) ─────────────────────────────────────
+// Source: WarpFactories.md §6 · T10/T11 · US-068..093
+export function getIntegrationTriggers(provider: string): readonly IntegrationTrigger[] {
+  const p = provider.trim().toLowerCase();
+  if (p === "slack") return SLACK_TRIGGERS;
+  if (p === "linear") return LINEAR_INTEGRATION_TRIGGERS;
+  if (p === "jira") return JIRA_TRIGGERS;
+  if (p === "gitlab") return GITLAB_INTEGRATION_TRIGGERS;
+  if (p === "schedule") return SCHEDULE_TRIGGERS;
+  if (p === "factory") return FACTORY_STAGE_TRIGGERS;
+  if (p === "github") {
+    // minimal GitHub triggers — 20 events exist but expose core 3 for catalog
+    return [
+      { provider: "github", event: "issue_created", label: "Issue created", description: "GitHub issue abierto", filters: ["Repo", "labels"], trace: "WarpFactories.md §6 · US-034" },
+      { provider: "github", event: "pull_request_opened", label: "PR opened", description: "PR abierto", filters: ["Repo", "branches"], trace: "WarpFactories.md §6" },
+      { provider: "github", event: "pull_request_labeled", label: "PR labeled", description: "PR etiquetado", filters: ["Repo", "labels"], trace: "WarpFactories.md §6" },
+    ] as const as readonly IntegrationTrigger[];
+  }
+  return [];
+}
+
+export function getTriggerFilters(provider: string, event: string): readonly string[] {
+  const triggers = getIntegrationTriggers(provider);
+  const found = triggers.find((t) => t.event === event);
+  return found?.filters ?? [];
+}
+
+export function isTriggerSupported(provider: string, event: string): boolean {
+  return getIntegrationTriggers(provider).some((t) => t.event === event);
 }
 
 // M5 runtime guard: hasTrackerConflict is now also enforced in deriveProviderStatuses above

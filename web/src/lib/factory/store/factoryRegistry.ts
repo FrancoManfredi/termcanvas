@@ -12,7 +12,6 @@ import { AutomationParser } from "../parsers/automation.parser";
 import { ScorerParser } from "../parsers/scorer.parser";
 import { parseSkillMd } from "../domain/skill.registry";
 
-
 export interface FactoryBundle {
   factory: FactoryDefinition;
   agents: AgentDefinition[];
@@ -85,7 +84,10 @@ export class FactoryRegistry {
     // Validate cross-bundle invariants (LSP: these checks don't mutate definitions)
     const foremanCount = agentResults.filter((r) => r.value?.agentType === "FOREMAN" || r.value?.agentType === "MAIN").length;
     if (foremanCount !== 1) {
-      return ParseResult.singleFail("agents", `exactly one FOREMAN required, found ${foremanCount}`, "foreman_count");
+      const firstAgentFile = input.agents[0]?.file ?? "agents/foreman/agent.md";
+      // Provide file:line real for invariant — point to first agent's agentType line if possible
+      // For now use :1 fallback; parsers already give precise lines for field-level errors
+      return ParseResult.singleFail(`${firstAgentFile}:1 — agentType`, `exactly one FOREMAN required, found ${foremanCount}`, "exactly_one_foreman");
     }
 
     // Validate runner references exist
@@ -93,7 +95,8 @@ export class FactoryRegistry {
     const referencedRunners = [factoryRes.value!.agentDefaults.runner, ...agentResults.map((r) => r.value!.runner)].filter(Boolean) as string[];
     for (const ref of referencedRunners) {
       if (!runnerNames.has(ref)) {
-        return ParseResult.singleFail("runners", `referenced runner '${ref}' not found`, "missing_runner");
+        // Attempt to give file:line for missing runner — fallback to factory.yaml:1
+        return ParseResult.singleFail(`${input.factoryYaml.file}:1 — agentDefaults.runner`, `referenced runner '${ref}' not found`, "missing_runner");
       }
     }
 

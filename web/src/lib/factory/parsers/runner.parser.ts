@@ -1,10 +1,10 @@
 import { parseYamlSafe } from "./yaml.utils";
+import { parseYamlWithLineCounter } from "../domain/validation.lineCounter";
 import { runnerYamlSchema } from "../schemas/runner.schema";
 import { zodToParseIssues } from "../schemas/common.schema";
 import { ParseResult } from "../domain/result";
 import type { RunnerDefinition } from "../domain/types";
 import type { IRunnerParser } from "./contracts";
-
 
 function extractRunnerName(file: string): string {
   const base = file.split("/").pop() ?? file;
@@ -20,7 +20,8 @@ export class RunnerParser implements IRunnerParser {
     }
     const validated = runnerYamlSchema.safeParse(yamlRes.value);
     if (!validated.success) {
-      return ParseResult.fail(zodToParseIssues(validated.error, file, raw));
+      const { lineCounter } = parseYamlWithLineCounter(raw);
+      return ParseResult.fail(zodToParseIssues(validated.error, file, raw, lineCounter));
     }
     const def: RunnerDefinition = {
       name: extractRunnerName(file),

@@ -25,7 +25,7 @@ describe("NAV_ICONS exhaustiveness (P0-04 · OLA 5)", () => {
     }
   });
 
-  it("NAV_ITEMS has 29 ids (6 team + 23 factory) — regression guard", () => {
-    expect(NAV_ITEMS).toHaveLength(29);
+  it("NAV_ITEMS has 31 ids (6 team + 25 factory) — regression guard", () => {
+    expect(NAV_ITEMS).toHaveLength(31);
   });
 });

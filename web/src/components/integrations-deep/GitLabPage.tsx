@@ -11,6 +11,7 @@ import {
   GITLAB_DEFINITION_HOSTING_NOTE,
   GITLAB_FILTERS,
   GITLAB_MR_ACTIONS,
+  GITLAB_PREMIUM_GATE,
 } from "../../lib/factory/domain/integrations.deep";
 
 export function GitLabPage() {
@@ -21,10 +22,11 @@ export function GitLabPage() {
           <span className="grid h-7 w-7 place-items-center rounded-[8px] bg-orange-500 text-[12px] font-bold text-white">GL</span>
           <h2 className="text-[14px] font-[600] tracking-[-0.01em] text-zinc-900">GitLab — deep dive</h2>
           <span className="rounded-full bg-zinc-900 px-2 py-0.5 text-[11px] font-medium text-white">GitLab.com only</span>
+          <span className="rounded-full bg-amber-500 px-2 py-0.5 text-[11px] font-medium text-white">{GITLAB_PLAN_REQUIRED.join(" · ")} · Premium gate</span>
         </div>
         <p className="mt-2 text-[12px] leading-relaxed text-zinc-500">
           Fuente: <code className="rounded bg-zinc-50 px-1 font-mono text-[11px]">factories/integrations/gitlab</code> — WarpFactories.md §9.
-          No self-managed; self-managed solo standalone cloud agents vía access token.
+          No self-managed; self-managed solo standalone cloud agents vía access token. <span className="font-medium text-amber-700">{GITLAB_PREMIUM_GATE}</span>
         </p>
       </header>
 
@@ -65,22 +67,25 @@ export function GitLabPage() {
             </ul>
           </div>
           <div className="rounded-[10px] border border-zinc-200 bg-zinc-50 p-3">
-            <div className="text-[11px] font-[600] tracking-[0.06em] uppercase text-zinc-500">Bot account</div>
-            <div className="mt-1 text-[12px] font-medium text-zinc-800">One bot per factory</div>
+            <div className="text-[11px] font-[600] tracking-[0.06em] uppercase text-zinc-500">Bot account — *-warp-*</div>
+            <div className="mt-1 text-[12px] font-medium text-zinc-800">One bot per factory — patrón *-warp-*</div>
             <ul className="mt-1 space-y-1 text-[11px] leading-relaxed text-zinc-600">
               <li>
                 • Nombrado desde factory alias + <code className="rounded bg-white px-1 font-mono text-[11px]">-warp-</code> + short unique ID
               </li>
               <li>
-                • Patrón: <code className="rounded bg-white px-1 font-mono text-[11px]">{GITLAB_BOT.namingPattern}</code>
+                • Patrón: <code className="rounded bg-white px-1 font-mono text-[11px]">{GITLAB_BOT.namingPattern}</code> — contiene <span className="font-medium">-warp-</span>
               </li>
               <li>
-                • Ej: <code className="rounded bg-white px-1 font-mono text-[11px]">{GITLAB_BOT.example}</code>
+                • Ej: <code className="rounded bg-white px-1 font-mono text-[11px]">{GITLAB_BOT.example}</code> (acepta *-warp-* validación)
               </li>
               <li>
-                • Holds <span className="font-medium">{GITLAB_BOT.role} role exactly on selected projects</span>
+                • Holds <span className="font-medium">{GITLAB_BOT.role} role exactly on selected projects</span> — Developer exacto
               </li>
-              <li>• Bot es factory identity; runs auth como bot; username es handle mention</li>
+              <li>• Bot es factory identity; runs auth como bot; username es handle mention; validar con isValidGitLabBotName</li>
+              <li className="rounded bg-white px-2 py-1">
+                • Demo: <code className="font-mono">acme-support-warp-01k2x3y4z5</code> — válido ✅ | <code className="font-mono">badname</code> — inválido ❌
+              </li>
             </ul>
           </div>
         </div>

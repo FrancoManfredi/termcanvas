@@ -1,7 +1,32 @@
 import type { ScorerDefinition, ScorerLabel } from "./types";
+import { ParseResult } from "./result";
 
 // Pure, SRP — no I/O, no mutation
+// Source: WarpFactories.md §13 · US-109..112 · T13
 export const DEFAULT_SAMPLING_RATE = 25;
+export const ALLOWED_SAMPLING_RATES = [0, 25] as const;
+
+export function validateScorerDefinition(scorer: ScorerDefinition): ParseResult<ScorerDefinition> {
+  const file = scorer.rawPath || "scorers/unknown/scorer.md";
+  // invariante: ≥1 ≥passing y ≥1 <passing — code testeable scorer_invariant con file:line
+  if (!isScorerInvariantValid(scorer)) {
+    return ParseResult.singleFail(
+      `${file}:4 — labels`,
+      "≥1 label con score ≥ passingScore y ≥1 con score < passingScore",
+      "scorer_invariant"
+    );
+  }
+  // samplingRate solo 0 o 25 (default 25) — 0 = stop auto pero on-demand sigue
+  if (scorer.samplingRate !== undefined && scorer.samplingRate !== 0 && scorer.samplingRate !== 25) {
+    return ParseResult.singleFail(
+      `${file}:7 — samplingRate`,
+      "samplingRate solo 0 o 25 (default 25)",
+      "samplingRate_invalid"
+    );
+  }
+  // threshold solo display — no bloquea scoring, re-score reemplaza
+  return ParseResult.ok(scorer);
+}
 
 export function getEffectiveSamplingRate(scorer: ScorerDefinition): number {
   return scorer.samplingRate ?? DEFAULT_SAMPLING_RATE;

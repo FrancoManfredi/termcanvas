@@ -1,4 +1,4 @@
-// SRP: container with tabs for the 4 deep dives — OCP via registry, no switch edits for new provider beyond adding entry
+// SRP: container with tabs for the 6 deep dives — OCP via registry, no switch edits for new provider beyond adding entry
 // DIP: imports pure pages, no store
 
 import { useState } from "react";
@@ -6,6 +6,8 @@ import { GitLabPage } from "./GitLabPage";
 import { SlackPage } from "./SlackPage";
 import { LinearPage } from "./LinearPage";
 import { JiraPage } from "./JiraPage";
+import { SchedulePage } from "./SchedulePage";
+import { FactoryPage } from "./FactoryPage";
 import type { DeepDiveProvider } from "../../lib/factory/domain/integrations.deep";
 
 const TABS: { id: DeepDiveProvider; label: string; short: string }[] = [
@@ -13,6 +15,8 @@ const TABS: { id: DeepDiveProvider; label: string; short: string }[] = [
   { id: "slack", label: "Slack", short: "Add to Slack · 👀 · Home tab" },
   { id: "linear", label: "Linear", short: "OAuth · agent_session_created" },
   { id: "jira", label: "Jira", short: "Cloud + Rovo · case-insensitive" },
+  { id: "schedule", label: "Schedule", short: "cron_fired · @daily/@every 1h UTC" },
+  { id: "factory", label: "Factory", short: "work_item_stage_changed" },
 ];
 
 export function IntegrationsDeepDivesPage({ initialTab = "gitlab" as DeepDiveProvider }: { initialTab?: DeepDiveProvider }) {
@@ -62,6 +66,8 @@ export function IntegrationsDeepDivesPage({ initialTab = "gitlab" as DeepDivePro
           {active === "slack" && <SlackPage />}
           {active === "linear" && <LinearPage />}
           {active === "jira" && <JiraPage />}
+          {active === "schedule" && <SchedulePage />}
+          {active === "factory" && <FactoryPage />}
         </div>
       </div>
     </div>

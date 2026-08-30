@@ -14,23 +14,35 @@ function hashForItem(id: string): string {
   return hex;
 }
 
+// Source: WarpFactories.md §10 · US-102 — Activity kanban Created by=you + 4 active por defecto
+export const ACTIVITY_DEFAULT_CREATED_BY = "you";
+export const ACTIVITY_DEFAULT_INCLUDE_TERMINALS = false;
+
 function seedIfEmpty() {
   const store = getWorkItemStore();
   if (store.size() > 0) {
     return;
   }
-  // Triage 4
-  store.create({ factoryName: "payments-factory", title: "Update pin UI to left hover", description: "Origin Slack thread", source: "slack_mention", createdBy: "Benjamin Holmes", sourceRef: "slack:thread" });
-  store.create({ factoryName: "payments-factory", title: "Replace ASCII caret with chevron icon", source: "github_issue", createdBy: "Benjamin Holmes" });
-  store.create({ factoryName: "payments-factory", title: "Debug GitHub Permissions Issue", source: "github_issue", createdBy: "Benjamin Holmes" });
-  store.create({ factoryName: "payments-factory", title: "Add Paste Option for Grok Auth Code", source: "github_issue", createdBy: "Benjamin Holmes" });
+  // Determinístico, sin Math.random — OCP puro domain + UI
+  const creator = ACTIVITY_DEFAULT_CREATED_BY;
+  // Triage 4 — todos con createdBy=you para default filter
+  store.create({ factoryName: "payments-factory", title: "Update pin UI to left hover", description: "Origin Slack thread", source: "slack_mention", createdBy: creator, sourceRef: "slack:thread" });
+  store.create({ factoryName: "payments-factory", title: "Replace ASCII caret with chevron icon", source: "github_issue", createdBy: creator });
+  store.create({ factoryName: "payments-factory", title: "Debug GitHub Permissions Issue", source: "github_issue", createdBy: creator });
+  store.create({ factoryName: "payments-factory", title: "Add Paste Option for Grok Auth Code", source: "github_issue", createdBy: creator });
   // Reviewing 3
-  const r1 = store.create({ factoryName: "payments-factory", title: "Adjust Pin Icon Alignment", source: "github_issue", createdBy: "Benjamin Holmes", foremanDecision: { shouldSkipTriage: true, shouldSkipPlanning: true, reason: "image" } });
+  const r1 = store.create({ factoryName: "payments-factory", title: "Adjust Pin Icon Alignment", source: "github_issue", createdBy: creator, foremanDecision: { shouldSkipTriage: true, shouldSkipPlanning: true, reason: "image" } });
   if (r1.ok) store.transition(r1.value!.id, "Reviewing", "implement");
-  const r2 = store.create({ factoryName: "payments-factory", title: "Fix Hubble Factory Triager Issue", source: "github_issue", createdBy: "Benjamin Holmes", foremanDecision: { shouldSkipTriage: true, shouldSkipPlanning: true, reason: "image" } });
+  const r2 = store.create({ factoryName: "payments-factory", title: "Fix Hubble Factory Triager Issue", source: "github_issue", createdBy: creator, foremanDecision: { shouldSkipTriage: true, shouldSkipPlanning: true, reason: "image" } });
   if (r2.ok) store.transition(r2.value!.id, "Reviewing", "implement");
-  const r3 = store.create({ factoryName: "payments-factory", title: "Add /resume Command Suggestion", source: "github_issue", createdBy: "Benjamin Holmes", foremanDecision: { shouldSkipTriage: true, shouldSkipPlanning: true, reason: "image" } });
+  const r3 = store.create({ factoryName: "payments-factory", title: "Add /resume Command Suggestion", source: "github_issue", createdBy: creator, foremanDecision: { shouldSkipTriage: true, shouldSkipPlanning: true, reason: "image" } });
   if (r3.ok) store.transition(r3.value!.id, "Reviewing", "implement");
+  // Terminales para includeTerminals toggle — no visibles por defecto (includeTerminals false)
+  const t1 = store.create({ factoryName: "payments-factory", title: "Self-improvement: enforce test evidence", source: "github_issue", createdBy: creator, foremanDecision: { shouldSkipTriage: true, shouldSkipPlanning: true, reason: "self-improvement" } });
+  if (t1.ok) {
+    store.transition(t1.value!.id, "Reviewing", "implement");
+    store.transition(t1.value!.id, "Complete", "foreman", { reviewVerdict: "accept", handoffConfirmed: true });
+  }
 }
 
 const stageConfig: Record<WorkItemStage, { bg: string; dot: string; label: string }> = {
@@ -44,9 +56,9 @@ const stageConfig: Record<WorkItemStage, { bg: string; dot: string; label: strin
 
 export function ActivityBoard() {
   const [search, setSearch] = useState("");
-  const [createdBy, setCreatedBy] = useState("Benjamin Holmes");
+  const [createdBy, setCreatedBy] = useState(ACTIVITY_DEFAULT_CREATED_BY);
   const [stages, setStages] = useState<WorkItemStage[]>([]);
-  const [includeTerminals, setIncludeTerminals] = useState(false);
+  const [includeTerminals, setIncludeTerminals] = useState(ACTIVITY_DEFAULT_INCLUDE_TERMINALS);
   // Tri-state selection: undefined = derive the first Triage item, null = detail explicitly closed.
   const [selection, setSelection] = useState<string | null | undefined>(undefined);
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({ Planning: true, Building: true });
@@ -174,10 +186,11 @@ export function ActivityBoard() {
         )}
         <button
           onClick={() => {
-            setCreatedBy("Benjamin Holmes");
+            setCreatedBy(ACTIVITY_DEFAULT_CREATED_BY);
           }}
           className="grid h-6 w-6 place-items-center rounded-full border border-dashed border-zinc-300 text-zinc-500 hover:bg-zinc-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/20"
           aria-label="Agregar filtro Created by"
+          title="Created by=you"
         >
           <Plus className="h-3 w-3" />
         </button>

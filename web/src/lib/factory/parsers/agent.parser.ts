@@ -4,7 +4,7 @@ import { ParseResult } from "../domain/result";
 import type { AgentDefinition } from "../domain/types";
 import type { IAgentParser } from "./contracts";
 import { parseFrontmatter } from "./frontmatter.utils";
-
+import { parseFrontmatterWithLineCounter } from "../domain/validation.lineCounter";
 
 function extractNameFromPath(file: string): string {
   const parts = file.split("/").filter(Boolean);
@@ -31,9 +31,10 @@ export class AgentParser implements IAgentParser {
 
     const validated = agentFrontmatterSchema.safeParse(fm);
     if (!validated.success) {
-      // Pass raw frontmatter YAML for line resolution (frontmatter block)
+      // Pass raw frontmatter YAML for line resolution with LineCounter + offset
       const fmRaw = raw.split("---")[1] ?? "";
-      return ParseResult.fail(zodToParseIssues(validated.error, file, fmRaw));
+      const { lineCounter } = parseFrontmatterWithLineCounter(raw);
+      return ParseResult.fail(zodToParseIssues(validated.error, file, fmRaw, lineCounter));
     }
 
     if (!body) {

@@ -237,3 +237,62 @@ describe("mock connected/disconnected status", () => {
     expect(statuses["Factory"]).toBe("connected");
   });
 });
+
+// ── O14 catalog helpers — getIntegrationTriggers / isTriggerSupported ───────────
+describe("O14 — integrations.derive helpers", () => {
+  it("29 getIntegrationTriggers slack has 5", async () => {
+    const { getIntegrationTriggers } = await import("../domain/integrations.derive");
+    expect(getIntegrationTriggers("slack")).toHaveLength(5);
+    expect(getIntegrationTriggers("SLACK")).toHaveLength(5);
+  });
+  it("30 getIntegrationTriggers linear 6, jira 1, gitlab 2, schedule 1, factory 1", async () => {
+    const { getIntegrationTriggers } = await import("../domain/integrations.derive");
+    expect(getIntegrationTriggers("linear")).toHaveLength(6);
+    expect(getIntegrationTriggers("jira")).toHaveLength(1);
+    expect(getIntegrationTriggers("gitlab")).toHaveLength(2);
+    expect(getIntegrationTriggers("schedule")).toHaveLength(1);
+    expect(getIntegrationTriggers("factory")).toHaveLength(1);
+  });
+  it("31 isTriggerSupported true/false", async () => {
+    const { isTriggerSupported } = await import("../domain/integrations.derive");
+    expect(isTriggerSupported("slack", "reaction_added")).toBe(true);
+    expect(isTriggerSupported("slack", "issue_created")).toBe(false);
+    expect(isTriggerSupported("jira", "agent_session_created")).toBe(true);
+    expect(isTriggerSupported("jira", "issue_created")).toBe(false);
+    expect(isTriggerSupported("gitlab", "bot_mentioned")).toBe(true);
+    expect(isTriggerSupported("schedule", "cron_fired")).toBe(true);
+    expect(isTriggerSupported("factory", "work_item_stage_changed")).toBe(true);
+  });
+  it("32 getTriggerFilters returns filters for event", async () => {
+    const { getTriggerFilters } = await import("../domain/integrations.derive");
+    expect(getTriggerFilters("slack", "reaction_added")).toEqual(expect.arrayContaining(["Conversations", "emoji"]));
+    expect(getTriggerFilters("slack", "app_mention")).toContain("Conversations");
+    expect(getTriggerFilters("linear", "agent_session_created")).toEqual(["Teams"]);
+    expect(getTriggerFilters("jira", "agent_session_created")).toEqual(expect.arrayContaining(["Jira projects"]));
+    expect(getTriggerFilters("gitlab", "merge_request")).toEqual(expect.arrayContaining(["Project"]));
+    expect(getTriggerFilters("schedule", "cron_fired")).toContain("Cron");
+  });
+  it("33 unknown provider returns empty + false", async () => {
+    const { getIntegrationTriggers, isTriggerSupported, getTriggerFilters } = await import("../domain/integrations.derive");
+    expect(getIntegrationTriggers("unknown")).toHaveLength(0);
+    expect(isTriggerSupported("unknown", "anything")).toBe(false);
+    expect(getTriggerFilters("unknown", "anything")).toEqual([]);
+  });
+  it("34 github has at least 1 trigger", async () => {
+    const { getIntegrationTriggers, isTriggerSupported } = await import("../domain/integrations.derive");
+    expect(getIntegrationTriggers("github").length).toBeGreaterThan(0);
+    expect(isTriggerSupported("github", "issue_created")).toBe(true);
+  });
+  it("35 schedule presets and helpers", async () => {
+    const { SCHEDULE_PRESETS, describeSchedule, isValidCron } = await import("../domain/schedule.derive");
+    expect(SCHEDULE_PRESETS.some((p) => p.cron === "@daily")).toBe(true);
+    expect(SCHEDULE_PRESETS.some((p) => p.cron === "@every 1h")).toBe(true);
+    expect(isValidCron("0 9 * * 1")).toBe(true);
+    expect(isValidCron("@daily")).toBe(true);
+    expect(isValidCron("@every 1h")).toBe(true);
+    expect(isValidCron("not a cron")).toBe(false);
+    expect(describeSchedule("0 9 * * 1")).toMatch(/lunes/);
+    expect(describeSchedule("@daily")).toMatch(/diario/);
+    expect(describeSchedule("@every 1h")).toMatch(/hora/);
+  });
+});

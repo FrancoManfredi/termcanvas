@@ -12,6 +12,8 @@ import {
   GITLAB_BOT_RESPONSE,
   GITLAB_DEFINITION_HOSTING_SUPPORTED,
   GITLAB_DEFINITION_HOSTING_NOTE,
+  GITLAB_INTEGRATION_TRIGGERS,
+  GITLAB_PREMIUM_GATE,
   isGitLabHostSupported,
   isGitLabPlanSufficient,
   formatGitLabBotName,
@@ -27,6 +29,9 @@ import {
   SLACK_FILTERS,
   SLACK_REACTION_INTAKE_EXAMPLE,
   SLACK_HOME_TAB_STAGES,
+  SLACK_HOME_TABS,
+  SLACK_TRIGGERS,
+  SLACK_OVERLAPPING_WARNING,
   isSlackInviteRequired,
   getSlackMentionReaction,
   isSlackEventSupported,
@@ -38,9 +43,11 @@ import {
   LINEAR_CONNECT_METHOD,
   LINEAR_DEFAULT_AUTOMATION_EVENT,
   LINEAR_AGENT_SESSION_NARROW_LIMIT,
+  LINEAR_NARROW_NOTE,
   LINEAR_TRIGGERS,
   LINEAR_ISSUE_TRIGGERS,
   LINEAR_EVENTS_OUTPUTS,
+  LINEAR_INTEGRATION_TRIGGERS,
   isLinearNarrowEditableInEditor,
   doesLinearCommentCauseLoop,
   shouldLinearFollowUpContinueSameWorkItem,
@@ -53,6 +60,8 @@ import {
   JIRA_FILTERS,
   JIRA_STATUSES,
   JIRA_AGENT_CAPABILITIES,
+  JIRA_TRIGGERS,
+  JIRA_CASE_INSENSITIVE_NOTE,
   isJiraHostSupported,
   isJiraServerSupported,
   isJiraTriggerSupported,
@@ -61,6 +70,11 @@ import {
   isJiraKeywordCaseInsensitive,
   getJiraStatuses,
   canJiraAgentDo,
+  // Schedule / Factory
+  SCHEDULE_PRESETS,
+  SCHEDULE_TRIGGERS,
+  FACTORY_STAGE_TRIGGERS,
+  INTEGRATION_CONSTRAINTS,
   DEEP_DIVE_PROVIDERS,
 } from "../domain/integrations.deep";
 
@@ -350,7 +364,120 @@ describe("Jira deep dive - statuses + capabilities", () => {
 
 // ── Registry OCP ──────────────────────────────────────────────────────────────
 describe("registry", () => {
-  it("58 DEEP_DIVE_PROVIDERS has 4: gitlab/slack/linear/jira", () => {
-    expect([...DEEP_DIVE_PROVIDERS]).toEqual(["gitlab", "slack", "linear", "jira"]);
+  it("58 DEEP_DIVE_PROVIDERS has 6: gitlab/slack/linear/jira/schedule/factory", () => {
+    expect([...DEEP_DIVE_PROVIDERS]).toEqual(["gitlab", "slack", "linear", "jira", "schedule", "factory"]);
+  });
+});
+
+// ── O14 — Slack reaction intake + overlapping ─────────────────────────────────
+describe("O14 Slack — reaction_added intake + overlapping warning", () => {
+  it("59 SLACK_TRIGGERS has 5 entries US-068", () => {
+    expect(SLACK_TRIGGERS).toHaveLength(5);
+    expect(SLACK_TRIGGERS.map((t) => t.event)).toEqual(["app_mention", "message_posted", "message_dm", "reaction_added", "member_joined_channel"]);
+  });
+  it("60 reaction_added filters include Conversations + emoji + reacted-message authors", () => {
+    const r = SLACK_TRIGGERS.find((t) => t.event === "reaction_added")!;
+    expect(r.filters).toEqual(expect.arrayContaining(["Conversations", "emoji", "reacted-message authors"]));
+    expect(r.trace).toMatch(/US-068/);
+  });
+  it("61 reaction intake example channels[intake] emojis[ticket]", () => {
+    expect(SLACK_REACTION_INTAKE_EXAMPLE.channels[0]).toMatch(/intake/);
+    expect(SLACK_REACTION_INTAKE_EXAMPLE.emojis).toContain("ticket");
+  });
+  it("62 overlapping warning code two-runs with anchor", () => {
+    expect(SLACK_OVERLAPPING_WARNING.code).toMatch(/overlapping/);
+    expect(SLACK_OVERLAPPING_WARNING.anchor).toBe("two-runs");
+    expect(SLACK_OVERLAPPING_WARNING.note).toMatch(/2 runs/);
+  });
+  it("63 SLACK_HOME_TABS same as SLACK_HOME_TAB_STAGES", () => {
+    expect(SLACK_HOME_TABS.map((t) => t.stage)).toEqual([...SLACK_HOME_TAB_STAGES]);
+    expect(SLACK_HOME_TABS).toHaveLength(6);
+  });
+  it("64 slack overlapping warning appears in Troubleshoooting anchor list", () => {
+    expect(SLACK_OVERLAPPING_WARNING.trace).toMatch(/US-069/);
+  });
+});
+
+// ── O14 — Linear narrow ───────────────────────────────────────────────────────
+describe("O14 Linear — narrow + loop caution", () => {
+  it("65 LINEAR_INTEGRATION_TRIGGERS has 6", () => {
+    expect(LINEAR_INTEGRATION_TRIGGERS).toHaveLength(6);
+    expect(LINEAR_INTEGRATION_TRIGGERS.some((t) => t.event === "agent_session_created")).toBe(true);
+  });
+  it("66 agent_session_created narrow solo en files", () => {
+    expect(LINEAR_AGENT_SESSION_NARROW_LIMIT).toBe("solo en files");
+    expect(LINEAR_NARROW_NOTE).toMatch(/solo en files/);
+    expect(isLinearNarrowEditableInEditor()).toBe(false);
+    const sess = LINEAR_INTEGRATION_TRIGGERS.find((t) => t.event === "agent_session_created")!;
+    expect(sess.filters).toEqual(["Teams"]);
+    expect(sess.description).toMatch(/solo en files/);
+  });
+  it("67 linear loop caution agent_session + comment_created → 2 runs", () => {
+    expect(doesLinearCommentCauseLoop(true, true)).toBe(true);
+    expect(INTEGRATION_CONSTRAINTS.linear_loop.note).toMatch(/2 runs/);
+    expect(INTEGRATION_CONSTRAINTS.linear_narrow.note).toMatch(/solo en files/);
+  });
+});
+
+// ── O14 — Jira case-insensitive ───────────────────────────────────────────────
+describe("O14 Jira — project_keys + keywords case-insensitive", () => {
+  it("68 JIRA_TRIGGERS single agent_session_created with case-insensitive filters", () => {
+    expect(JIRA_TRIGGERS).toHaveLength(1);
+    expect(JIRA_TRIGGERS[0].event).toBe("agent_session_created");
+    expect(JIRA_TRIGGERS[0].filters.join(" ")).toMatch(/case-insensitive/);
+    expect(JIRA_CASE_INSENSITIVE_NOTE).toMatch(/case-insensitive/);
+  });
+  it("69 doesJiraKeywordMatch case-insensitive demo", () => {
+    expect(doesJiraKeywordMatch("Please INVESTIGATE this bug", ["investigate"])).toBe(true);
+    expect(doesJiraProjectMatch("ENG", ["eng"])).toBe(true);
+    expect(INTEGRATION_CONSTRAINTS.jira_case_insensitive.code).toBe("jira_case_insensitive");
+  });
+  it("70 Jira project_keys empty → match all", () => {
+    expect(doesJiraProjectMatch("ANY", [])).toBe(true);
+  });
+});
+
+// ── O14 — GitLab Premium + bot *-warp-* ───────────────────────────────────────
+describe("O14 GitLab — Premium gate + bot *-warp-*", () => {
+  it("71 GITLAB_INTEGRATION_TRIGGERS merge_request + bot_mentioned", () => {
+    expect(GITLAB_INTEGRATION_TRIGGERS).toHaveLength(2);
+    expect(GITLAB_INTEGRATION_TRIGGERS.map((t) => t.event)).toEqual(["merge_request", "bot_mentioned"]);
+  });
+  it("72 Premium gate note mentions Premium/Ultimate", () => {
+    expect(GITLAB_PREMIUM_GATE).toMatch(/Premium/);
+    expect(GITLAB_PREMIUM_GATE).toMatch(/Ultimate/);
+    expect(INTEGRATION_CONSTRAINTS.gitlab_premium.note).toMatch(/Premium/);
+  });
+  it("73 bot pattern *-warp-* and example valid", () => {
+    expect(GITLAB_BOT.namingPattern).toBe("<alias>-warp-<shortID>");
+    expect(isValidGitLabBotName("acme-support-warp-01k2x3y4z5")).toBe(true);
+    expect(isValidGitLabBotName("badname")).toBe(false);
+    expect(INTEGRATION_CONSTRAINTS.gitlab_bot_pattern.note).toMatch(/-warp-/);
+  });
+  it("74 draft factory/<slug> branch prefix", () => {
+    expect(GITLAB_INTEGRATION_TRIGGERS[0].filters).toContain("Project");
+  });
+});
+
+// ── O14 — Schedule / Factory ─────────────────────────────────────────────────
+describe("O14 Schedule / Factory — cron + work_item_stage_changed", () => {
+  it("75 SCHEDULE_PRESETS includes @daily and @every 1h UTC with name", () => {
+    expect(SCHEDULE_PRESETS.some((p) => p.cron === "@daily")).toBe(true);
+    expect(SCHEDULE_PRESETS.some((p) => p.cron === "@every 1h")).toBe(true);
+    expect(SCHEDULE_PRESETS.find((p) => p.cron === "0 9 * * 1")?.name).toBe("weekly-dependency-audit");
+  });
+  it("76 SCHEDULE_TRIGGERS cron_fired with Cron filter", () => {
+    expect(SCHEDULE_TRIGGERS).toHaveLength(1);
+    expect(SCHEDULE_TRIGGERS[0].event).toBe("cron_fired");
+    expect(SCHEDULE_TRIGGERS[0].filters).toContain("Cron");
+  });
+  it("77 FACTORY_STAGE_TRIGGERS work_item_stage_changed", () => {
+    expect(FACTORY_STAGE_TRIGGERS).toHaveLength(1);
+    expect(FACTORY_STAGE_TRIGGERS[0].event).toBe("work_item_stage_changed");
+    expect(FACTORY_STAGE_TRIGGERS[0].provider).toBe("factory");
+  });
+  it("78 constraints contain schedule_utc and overlapping", () => {
+    expect(INTEGRATION_CONSTRAINTS.schedule_utc.note).toMatch(/UTC/);
+    expect(INTEGRATION_CONSTRAINTS.slack_overlapping.code).toBe("overlapping_slack_triggers");
   });
 });

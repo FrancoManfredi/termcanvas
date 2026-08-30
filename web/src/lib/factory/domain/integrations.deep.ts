@@ -2,6 +2,17 @@
 // DIP: pure data + pure helpers, no store / no side effects
 // OCP: add provider = add constant + helpers, no edit of other providers
 
+// ── IntegrationTrigger — catalogo puro O14 §3 ──────────────────────────────────
+// Source: WarpFactories.md §6, §8, §10 · US-067..093 · T10/T11
+export interface IntegrationTrigger {
+  readonly provider: "slack" | "linear" | "jira" | "gitlab" | "schedule" | "factory" | "github";
+  readonly event: string;
+  readonly label: string;
+  readonly description: string;
+  readonly filters: readonly string[];
+  readonly trace: string;
+}
+
 // ── GitLab ───────────────────────────────────────────────────────────────────
 export const GITLAB_HOST = "gitlab.com" as const;
 export const GITLAB_SELF_MANAGED_SUPPORTED = false as const;
@@ -113,6 +124,50 @@ export const SLACK_REACTION_INTAKE_EXAMPLE = {
   emojis: ["ticket"],
 } as const;
 
+// US-068 — 5 triggers Slack como IntegrationTrigger + string events SLACK_EVENTS
+export const SLACK_TRIGGERS: readonly IntegrationTrigger[] = [
+  {
+    provider: "slack",
+    event: "app_mention",
+    label: "App mention",
+    description: "Mención a la app en channel/thread — requiere app invitada",
+    filters: ["Conversations", "authors/members", "keywords"],
+    trace: "WarpFactories.md §6 · US-068",
+  },
+  {
+    provider: "slack",
+    event: "message_posted",
+    label: "Message posted",
+    description: "Mensaje en channel donde la app está invitada",
+    filters: ["Conversations", "authors/members"],
+    trace: "WarpFactories.md §6 · US-068",
+  },
+  {
+    provider: "slack",
+    event: "message_dm",
+    label: "DM / IM",
+    description: "Mensaje directo a la app — requiere linked account",
+    filters: ["authors/members"],
+    trace: "WarpFactories.md §6 · US-068",
+  },
+  {
+    provider: "slack",
+    event: "reaction_added",
+    label: "Reaction added",
+    description: "Reacción con emoji en mensaje — ej intake ticket",
+    filters: ["Conversations", "emoji", "reacted-message authors", "keywords"],
+    trace: "WarpFactories.md §6 · US-068",
+  },
+  {
+    provider: "slack",
+    event: "member_joined_channel",
+    label: "Member joined channel",
+    description: "Usuario se une al channel",
+    filters: ["Conversations"],
+    trace: "WarpFactories.md §6 · US-068",
+  },
+] as const;
+
 export const SLACK_HOME_TAB_STAGES = [
   "Triage",
   "Planning",
@@ -121,6 +176,31 @@ export const SLACK_HOME_TAB_STAGES = [
   "Complete",
   "Cancelled",
 ] as const;
+
+// alias O14 §3 — keep both names
+export const SLACK_HOME_TABS: readonly { stage: string; label: string }[] = [
+  { stage: "Triage", label: "Triage" },
+  { stage: "Planning", label: "Planning" },
+  { stage: "Building", label: "Building" },
+  { stage: "Reviewing", label: "Reviewing" },
+  { stage: "Complete", label: "Complete" },
+  { stage: "Cancelled", label: "Cancelled" },
+] as const;
+
+export const SLACK_PRIVACY_DETAIL = {
+  readsOnlyWhere: "mencionada/DM o suscripta por automation",
+  usesMessageContent: true,
+  usesAttachments: true,
+  mapsEmailToWarpAccount: true,
+  note: "Data per Warp Privacy Policy — case-insensitive email mapping",
+} as const;
+
+export const SLACK_OVERLAPPING_WARNING = {
+  code: "overlapping_slack_triggers",
+  note: "Un Slack message puede matchear >1 automation (app_mention + message_posted mismo channel → 2 runs)",
+  anchor: "two-runs",
+  trace: "WarpFactories.md §6 · US-069",
+} as const;
 
 export function isSlackInviteRequired(): boolean {
   return SLACK_INVITE_REQUIRED;
@@ -219,6 +299,59 @@ export function isLinearTriggerSupported(event: string): boolean {
   return (LINEAR_TRIGGERS as readonly string[]).includes(event);
 }
 
+export const LINEAR_INTEGRATION_TRIGGERS: readonly IntegrationTrigger[] = [
+  {
+    provider: "linear",
+    event: "issue_created",
+    label: "Issue created",
+    description: "Linear issue creado — filtra por Teams/labels/project/state",
+    filters: ["Teams", "labels", "project", "workflow state", "assignee", "mentioned user"],
+    trace: "WarpFactories.md §6 · US-086",
+  },
+  {
+    provider: "linear",
+    event: "issue_labeled",
+    label: "Issue labeled",
+    description: "Issue etiquetado",
+    filters: ["Teams", "labels", "project", "workflow state", "assignee", "mentioned user"],
+    trace: "WarpFactories.md §6 · US-086",
+  },
+  {
+    provider: "linear",
+    event: "issue_state_changed",
+    label: "Issue state changed",
+    description: "Cambio de workflow state",
+    filters: ["Teams", "labels", "project", "workflow state", "assignee", "mentioned user"],
+    trace: "WarpFactories.md §6 · US-086",
+  },
+  {
+    provider: "linear",
+    event: "issue_assigned",
+    label: "Issue assigned",
+    description: "Issue asignado",
+    filters: ["Teams", "labels", "project", "workflow state", "assignee", "mentioned user"],
+    trace: "WarpFactories.md §6 · US-086",
+  },
+  {
+    provider: "linear",
+    event: "comment_created",
+    label: "Comment created",
+    description: "Comentario en issue — incluye specific issue filter",
+    filters: ["Teams", "labels", "project", "workflow state", "assignee", "mentioned user", "specific issue"],
+    trace: "WarpFactories.md §6 · US-087",
+  },
+  {
+    provider: "linear",
+    event: "agent_session_created",
+    label: "Agent session created",
+    description: "Linear inicia agent session — narrow solo en files, no en editor",
+    filters: ["Teams"],
+    trace: "WarpFactories.md §6 · US-088",
+  },
+] as const;
+
+export const LINEAR_NARROW_NOTE = "solo en files — session routing no es editable desde automation editor" as const;
+
 // ── Jira ─────────────────────────────────────────────────────────────────────
 export const JIRA_CLOUD_ONLY = true as const;
 export const JIRA_SERVER_SUPPORTED = false as const;
@@ -227,6 +360,19 @@ export const JIRA_ROVO_REQUIRED = true as const;
 export const JIRA_ONLY_EVENT = "agent_session_created" as const;
 export const JIRA_FILTERS = ["Jira projects", "assignment keywords (case-insensitive)"] as const;
 export const JIRA_FILTER_KEYS = ["project_keys", "keywords"] as const;
+
+export const JIRA_TRIGGERS: readonly IntegrationTrigger[] = [
+  {
+    provider: "jira",
+    event: "agent_session_created",
+    label: "Agent session created",
+    description: "Dispara cuando assign/mention Warp en Jira Cloud — project_keys + keywords case-insensitive",
+    filters: ["Jira projects", "assignment keywords (case-insensitive)"],
+    trace: "WarpFactories.md §6 · US-090",
+  },
+] as const;
+
+export const JIRA_CASE_INSENSITIVE_NOTE = "project_keys + keywords case-insensitive" as const;
 
 export const JIRA_STATUSES = [
   "submitted",
@@ -285,6 +431,67 @@ export function canJiraAgentDo(capability: string): boolean {
   return (JIRA_AGENT_CAPABILITIES as readonly string[]).includes(capability);
 }
 
+export const GITLAB_INTEGRATION_TRIGGERS: readonly IntegrationTrigger[] = [
+  {
+    provider: "gitlab",
+    event: "merge_request",
+    label: "Merge request",
+    description: "MR opened/updated/closed/reopened/merged/approved — filtra por Project/Actions/Base branch",
+    filters: ["Project", "Actions", "Base branch"],
+    trace: "WarpFactories.md §6 · US-081",
+  },
+  {
+    provider: "gitlab",
+    event: "bot_mentioned",
+    label: "Bot mentioned",
+    description: "New comment menciona bot *-warp-* — solo filtro Project",
+    filters: ["Project"],
+    trace: "WarpFactories.md §6 · US-081",
+  },
+] as const;
+
+export const GITLAB_PREMIUM_GATE = "GitLab.com only — Premium/Ultimate requerido para service accounts + group webhooks" as const;
+
+// ── Schedule / Factory — O14 US-092 / US-093 ──────────────────────────────────
+export const SCHEDULE_PRESETS: readonly { readonly cron: string; readonly name?: string; readonly trace: string }[] = [
+  { cron: "0 9 * * 1", name: "weekly-dependency-audit", trace: "WarpFactories.md §6 · US-092" },
+  { cron: "@daily", trace: "WarpFactories.md §6 · US-092" },
+  { cron: "@every 1h", trace: "WarpFactories.md §6 · US-092" },
+] as const;
+
+export const SCHEDULE_TRIGGERS: readonly IntegrationTrigger[] = [
+  {
+    provider: "schedule",
+    event: "cron_fired",
+    label: "Cron fired",
+    description: "Schedule trigger — cron 5 campos o @daily/@every 1h UTC, siempre UTC, optional name",
+    filters: ["Cron"],
+    trace: "WarpFactories.md §6 · US-092",
+  },
+] as const;
+
+export const FACTORY_STAGE_TRIGGERS: readonly IntegrationTrigger[] = [
+  {
+    provider: "factory",
+    event: "work_item_stage_changed",
+    label: "Work item stage changed",
+    description: "Automatizar sobre el propio pipeline — stage change del work item",
+    filters: [],
+    trace: "WarpFactories.md §6 · US-093",
+  },
+] as const;
+
+export const INTEGRATION_CONSTRAINTS: Record<string, { note: string; code: string }> = {
+  slack_overlapping: { note: "app_mention + message_posted mismo channel → 2 runs", code: "overlapping_slack_triggers" },
+  linear_narrow: { note: "agent_session_created narrow solo en files", code: "linear_narrow_only_files" },
+  linear_loop: { note: "agent_session + comment_created → 2 runs si solapan", code: "linear_loop_caution" },
+  jira_cloud_only: { note: "Jira Cloud only — no Server/DC", code: "jira_cloud_only" },
+  jira_case_insensitive: { note: "project_keys + keywords case-insensitive", code: "jira_case_insensitive" },
+  gitlab_premium: { note: "GitLab.com only — Premium/Ultimate", code: "gitlab_premium" },
+  gitlab_bot_pattern: { note: "bot *-warp-* Developer role exactly", code: "gitlab_bot_pattern" },
+  schedule_utc: { note: "schedule siempre UTC — 5 campos o @daily/@every 1h", code: "schedule_utc" },
+} as const;
+
 // ── Registry (OCP) ───────────────────────────────────────────────────────────
-export const DEEP_DIVE_PROVIDERS = ["gitlab", "slack", "linear", "jira"] as const;
+export const DEEP_DIVE_PROVIDERS = ["gitlab", "slack", "linear", "jira", "schedule", "factory"] as const;
 export type DeepDiveProvider = (typeof DEEP_DIVE_PROVIDERS)[number];

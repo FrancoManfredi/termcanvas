@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { useWorkItems } from "../../lib/factory/hooks/useWorkItems";
 import { useFactoryBundle } from "../../lib/factory/hooks/useFactoryBundle";
-import { DASHBOARD_TOOLTIPS, deriveDashboardMetrics } from "../../lib/factory/domain/dashboard.derive";
+import { COST_BUCKETS, bucketCost, DASHBOARD_TOOLTIPS, deriveDashboardMetrics } from "../../lib/factory/domain/dashboard.derive";
 import { MetricCard } from "./MetricCard";
 
 function formatCost(value: number | null): string {
@@ -158,6 +158,15 @@ export function DashboardPage() {
               {metrics.costPerPrList.length > 0 && (
                 <div className="mt-1 text-[11px] text-zinc-400">Min {formatCost(Math.min(...metrics.costPerPrList))} · Max {formatCost(Math.max(...metrics.costPerPrList))}</div>
               )}
+              <div className="mt-2 flex flex-wrap gap-1">
+                <span className="rounded-full bg-zinc-900 px-2 py-0.5 text-[10px] font-medium text-white">S ≤{COST_BUCKETS.S}</span>
+                <span className="rounded-full border border-zinc-200 bg-white px-2 py-0.5 text-[10px] font-medium text-zinc-600">M ≤{COST_BUCKETS.M}</span>
+                <span className="rounded-full border border-zinc-200 bg-white px-2 py-0.5 text-[10px] font-medium text-zinc-600">L ≤{COST_BUCKETS.L}</span>
+                <span className="rounded-full border border-zinc-200 bg-white px-2 py-0.5 text-[10px] font-medium text-zinc-600">XL &gt;{COST_BUCKETS.L}</span>
+              </div>
+              {metrics.mostExpensivePrs.length > 0 && (
+                <div className="mt-2 text-[11px] text-zinc-500">Bucket ejemplo: {bucketCost(metrics.mostExpensivePrs[0].cost)}</div>
+              )}
             </MetricCard>
 
             <MetricCard
@@ -186,7 +195,7 @@ export function DashboardPage() {
             </MetricCard>
           </div>
 
-          {/* Row 3: Most expensive + Self-improvement */}
+          {/* Row 3: Most expensive + Self-improvement — 8th MetricCard es Self-improvement */}
           <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
             <div className="rounded-[12px] border border-zinc-200 bg-white p-4">
               <div className="flex items-center gap-1.5">
@@ -220,7 +229,7 @@ export function DashboardPage() {
                           </a>
                         </div>
                         <span className="ml-3 shrink-0 rounded-full bg-white px-2 py-1 text-[11px] font-medium tabular-nums text-zinc-700 shadow-[0_0_0_1px_rgba(0,0,0,0.06)]">
-                          {formatCost(pr.cost)}
+                          {formatCost(pr.cost)} · {bucketCost(pr.cost)}
                         </span>
                       </li>
                     );
@@ -229,28 +238,16 @@ export function DashboardPage() {
               )}
             </div>
 
-            <div className="rounded-[12px] border border-zinc-200 bg-white p-4">
-              <div className="flex items-center gap-1.5">
-                <div className="text-[11px] font-[600] tracking-[0.06em] uppercase text-zinc-500">Self-improvement PRs</div>
-                <span
-                  className="group relative inline-flex"
-                  tabIndex={0}
-                  aria-label={DASHBOARD_TOOLTIPS.selfImprovementPrs}
-                  title={DASHBOARD_TOOLTIPS.selfImprovementPrs}
-                >
-                  <span className="grid h-4 w-4 place-items-center rounded-full border border-zinc-200 bg-white text-[10px] font-bold leading-none text-zinc-500">
-                    ⓘ
-                  </span>
-                  <span className="pointer-events-none absolute left-1/2 top-full z-10 mt-1.5 hidden max-w-[260px] -translate-x-1/2 rounded-[6px] border border-zinc-200 bg-zinc-900 px-2 py-1 text-[11px] text-white group-hover:block group-focus:block" role="tooltip">
-                    {DASHBOARD_TOOLTIPS.selfImprovementPrs}
-                  </span>
-                </span>
-              </div>
-              <div className="mt-1 text-[11px] text-zinc-500">Los 3 newest Self-improvement PRs, sin importar el date range</div>
+            <MetricCard
+              title="Self-improvement PRs"
+              value={metrics.selfImprovementPrs.length}
+              subtitle="Los 3 newest Self-improvement PRs, sin importar el date range (sin date filter)"
+              tooltip={DASHBOARD_TOOLTIPS.selfImprovementPrs}
+            >
               {metrics.selfImprovementPrs.length === 0 ? (
-                <p className="mt-3 text-[12px] text-zinc-400">Sin PRs</p>
+                <p className="text-[11px] text-zinc-400">Sin PRs</p>
               ) : (
-                <ul className="mt-3 space-y-2">
+                <ul className="space-y-2">
                   {metrics.selfImprovementPrs.map((pr) => {
                     return (
                       <li key={pr.prUrl} className="rounded-[8px] border border-zinc-200 bg-zinc-50 px-3 py-2">
@@ -264,7 +261,7 @@ export function DashboardPage() {
                   })}
                 </ul>
               )}
-            </div>
+            </MetricCard>
           </div>
 
           {/* Charts placeholder: opened vs merged + breakdown */}

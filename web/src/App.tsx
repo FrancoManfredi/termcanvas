@@ -107,6 +107,10 @@ export default function App() {
         return <IntegrationsDeepDivesPage initialTab="linear" />;
       case "Jira Deep Dive":
         return <IntegrationsDeepDivesPage initialTab="jira" />;
+      case "Schedule Deep Dive":
+        return <IntegrationsDeepDivesPage initialTab="schedule" />;
+      case "Factory Deep Dive":
+        return <IntegrationsDeepDivesPage initialTab="factory" />;
       case "Secrets":
         return <SecretsPage />;
       case "Integrations":

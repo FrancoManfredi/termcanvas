@@ -5,6 +5,7 @@ import {
   JIRA_ONLY_EVENT,
   JIRA_STATUSES,
   JIRA_AGENT_CAPABILITIES,
+  JIRA_CASE_INSENSITIVE_NOTE,
 } from "../../lib/factory/domain/integrations.deep";
 
 export function JiraPage() {
@@ -43,19 +44,27 @@ export function JiraPage() {
           <span className="font-medium">Solo event</span> <code className="rounded bg-zinc-50 px-1 font-mono text-[11px]">{JIRA_ONLY_EVENT}</code> (dispara cuando assign/mention Warp).
           Filtros: <code className="font-mono text-[11px]">project_keys</code> (match work items en esos projects),{" "}
           <code className="font-mono text-[11px]">keywords</code> (assignment text contiene cualquiera,{" "}
-          <span className="font-medium">case-insensitive</span>).
+          <span className="rounded bg-amber-100 px-1 font-medium">case-insensitive</span> — {JIRA_CASE_INSENSITIVE_NOTE}).
         </p>
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          <span className="rounded-full bg-[#0052cc] px-2.5 py-1 font-mono text-[11px] font-medium text-white">project_keys</span>
+          <span className="rounded-full bg-zinc-900 px-2.5 py-1 font-mono text-[11px] font-medium text-white">keywords</span>
+          <span className="rounded-full bg-amber-500 px-2.5 py-1 text-[11px] font-medium text-white">case-insensitive</span>
+        </div>
         <pre className="mt-2 overflow-x-auto rounded-[8px] bg-zinc-50 p-2 font-mono text-[11px] leading-relaxed text-zinc-700">
 {`# factory.yaml
-integrations: [{type: jira}]
-# automations/jira-assignment/automation.md
-triggers:
+ integrations: [{type: jira}]
+ # automations/jira-assignment/automation.md — project_keys case-insensitive demo
+ triggers:
   - provider: jira
     event: agent_session_created
     filter:
-      project_keys: [ENG]
+      project_keys: [ENG] # case-insensitive: eng === ENG
       keywords: [investigate, fix]  # matchea si assignment text contiene investigate/fix, case-insensitive`}
         </pre>
+        <div className="mt-2 rounded-[8px] bg-zinc-50 px-3 py-2 text-[11px] leading-relaxed text-zinc-600">
+          <span className="font-medium">Demo case-insensitive:</span> keywords [investigate, FIX] matchea assignmentText &quot;Please INVESTIGATE this bug&quot; → true; project_keys [eng] matchea workItemProject &quot;ENG&quot; → true. Omit field → match everything.
+        </div>
         <p className="mt-2 text-[11px] text-zinc-500">
           Must match every field seteado; within field any value match; omit field → match everything. Jira event offered to every automation en connected
           workspace → another team&apos;s broader filter puede disparar su propio run en mismo work item; filters don&apos;t control access.

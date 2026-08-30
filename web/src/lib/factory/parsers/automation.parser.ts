@@ -4,7 +4,7 @@ import { ParseResult } from "../domain/result";
 import type { AutomationDefinition } from "../domain/types";
 import type { IAutomationParser } from "./contracts";
 import { parseFrontmatter } from "./frontmatter.utils";
-
+import { parseFrontmatterWithLineCounter } from "../domain/validation.lineCounter";
 
 function extractAutomationName(file: string): string {
   const parts = file.split("/").filter(Boolean);
@@ -23,7 +23,8 @@ export class AutomationParser implements IAutomationParser {
     const validated = automationFrontmatterSchema.safeParse(fm);
     if (!validated.success) {
       const fmRaw = raw.split("---")[1] ?? "";
-      return ParseResult.fail(zodToParseIssues(validated.error, file, fmRaw));
+      const { lineCounter } = parseFrontmatterWithLineCounter(raw);
+      return ParseResult.fail(zodToParseIssues(validated.error, file, fmRaw, lineCounter));
     }
     if (!body) return ParseResult.singleFail(file, "automation.md body (prompt) must not be empty", "missing_body");
 

@@ -11,7 +11,9 @@ import {
   SLACK_REACTION_INTAKE_EXAMPLE,
   SLACK_HOME_TAB_STAGES,
   SLACK_PRIVACY,
+  SLACK_OVERLAPPING_WARNING,
 } from "../../lib/factory/domain/integrations.deep";
+import { HelpLink } from "../help/HelpLinks";
 
 export function SlackPage() {
   return (
@@ -93,16 +95,21 @@ export function SlackPage() {
           Filtros WarpFactories §9: <span className="font-medium">{SLACK_FILTERS.join(" · ")}</span>
         </div>
         <div className="mt-3 rounded-[8px] bg-zinc-50 p-3">
-          <div className="text-[11px] font-medium text-zinc-700">Ejemplo reaction intake:</div>
+          <div className="text-[11px] font-medium text-zinc-700">Ejemplo reaction intake — reaction_added channels[intake] emojis[ticket]:</div>
           <pre className="mt-1 overflow-x-auto rounded-[8px] bg-white p-2 font-mono text-[11px] leading-relaxed text-zinc-700">
-{`# slack-reaction-intake/automation.md
-triggers:
+{`# slack-reaction-intake/automation.md — US-068 reaction_added
+ triggers:
   - provider: slack
     event: reaction_added
     filter:
-      channels: [${SLACK_REACTION_INTAKE_EXAMPLE.channels.join(", ")}]
-      emojis: [${SLACK_REACTION_INTAKE_EXAMPLE.emojis.join(", ")}]`}
+      channels: [${SLACK_REACTION_INTAKE_EXAMPLE.channels.join(", ")}] # intake channel
+      emojis: [${SLACK_REACTION_INTAKE_EXAMPLE.emojis.join(", ")}] # ticket emoji`}
           </pre>
+          <div className="mt-2 flex items-center gap-2 text-[11px] text-zinc-600">
+            <span className="rounded-full bg-zinc-900 px-2 py-0.5 font-mono text-[11px] text-white">channels: [intake]</span>
+            <span className="rounded-full bg-violet-600 px-2 py-0.5 font-mono text-[11px] text-white">emojis: [ticket]</span>
+            <span className="text-zinc-500">demo US-068 — reaction_added filtra por channels + emojis + reacted-message authors</span>
+          </div>
         </div>
       </section>
 
@@ -110,9 +117,18 @@ triggers:
         <h3 className="text-[12px] font-[600] tracking-[0.06em] uppercase text-zinc-500">Constraints</h3>
         <ul className="mt-2 space-y-1.5 text-[12px] leading-relaxed text-zinc-600">
           <li>• Conversations picker solo muestra channels donde la app está invitada → invite + refresh.</li>
-          <li className="rounded-[8px] bg-amber-50 px-2 py-1.5 text-amber-800">
-            • <span className="font-medium">Un Slack message puede matchear &gt;1 automation</span> (app_mention + message_posted mismo channel → 2 runs) →
-            narrow/remove overlapping.
+          <li className="flex items-start gap-2 rounded-[8px] bg-amber-50 px-2 py-1.5 text-amber-800">
+            <span className="mt-0.5 shrink-0">•</span>
+            <span>
+              <span className="font-medium">Un Slack message puede matchear &gt;1 automation</span> ({SLACK_OVERLAPPING_WARNING.note}) → narrow/remove
+              overlapping.{" "}
+              <span className="inline-flex items-center gap-1">
+                <HelpLink anchor="two-runs" label="Ver Troubleshooting — two-runs (overlapping Slack triggers)" />{" "}
+                <a href="#two-runs" className="font-medium text-violet-700 underline-offset-2 hover:underline">
+                  Troubleshooting#two-runs
+                </a>
+              </span>
+            </span>
           </li>
           <li>
             • <span className="font-medium">Solo new content cuenta</span>; edits ignorados.

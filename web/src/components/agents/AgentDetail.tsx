@@ -1,7 +1,6 @@
 import type { AgentDefinition, FactoryDefinition } from "../../lib/factory/domain/types";
 import { redactSecret } from "../secrets/secrets.redact";
 
-
 function getEffectiveHarness(agent: AgentDefinition, factory: FactoryDefinition): string {
   if (agent.harness) {
     const parts: string[] = [agent.harness.type];
@@ -23,6 +22,26 @@ function getEffectiveHarness(agent: AgentDefinition, factory: FactoryDefinition)
     return `${factory.agentDefaults.model} (inherited)`;
   }
   return "—";
+}
+
+function getEffectiveReasoningLevel(agent: AgentDefinition, factory: FactoryDefinition): string {
+  const rl = agent.harness?.reasoningLevel ?? factory.agentDefaults.harness?.reasoningLevel;
+  if (rl) return rl;
+  return "—";
+}
+
+function getEffectiveAuth(agent: AgentDefinition, factory: FactoryDefinition): string {
+  const auth = agent.harness?.auth ?? factory.agentDefaults.harness?.auth;
+  if (!auth) return "—";
+  const extra = auth.secretName ? `:${redactSecret(auth.secretName)}` : "";
+  return `${auth.source}${extra}`;
+}
+
+function isFreeGateViolation(agent: AgentDefinition, factory: FactoryDefinition): boolean {
+  const type = agent.harness?.type ?? factory.agentDefaults.harness?.type;
+  if (!type) return false;
+  // Simulacion LOCAL Free plan: solo oz permitido; otros requieren Pro
+  return type !== "oz";
 }
 
 function getEffectiveRunner(agent: AgentDefinition, factory: FactoryDefinition): string {
@@ -81,7 +100,6 @@ export interface AgentDetailProps {
 }
 
 export function AgentDetail({ agent, factory }: AgentDetailProps) {
-
   function renderSecrets(): string {
     if (!agent.secrets?.length && !factory.agentDefaults.secrets?.length && !factory.secrets?.length) {
       return "—";
@@ -114,6 +132,9 @@ export function AgentDetail({ agent, factory }: AgentDetailProps) {
     return /^[a-z0-9/._-]+\.md$/.test(p);
   }
   const safeRawPath = isValidRawPath(agent.rawPath) ? agent.rawPath : "";
+  const freeViolation = isFreeGateViolation(agent, factory);
+  const reasoningLevel = getEffectiveReasoningLevel(agent, factory);
+  const authDisplay = getEffectiveAuth(agent, factory);
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-white">
@@ -152,7 +173,10 @@ export function AgentDetail({ agent, factory }: AgentDetailProps) {
             <div className="rounded-[8px] border border-zinc-200 bg-zinc-50 px-3 py-2">
               <p className="text-[10px] font-[600] tracking-[0.06em] uppercase text-zinc-500">Harness / Model</p>
               <p className="mt-0.5 font-mono text-[12px] text-zinc-800">{getEffectiveHarness(agent, factory)}</p>
-              <p className="mt-1 text-[10px] text-zinc-400">Solo oz + model:auto en LOCAL (sin auth)</p>
+              <p className="mt-1 text-[10px] text-zinc-400">Solo oz + model:auto en LOCAL (sin auth) — Free solo oz, Pro para claude/codex/gemini</p>
+              {freeViolation ? (
+                <p className="mt-1 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800">Free solo permite harness oz — usa plan Pro para claude/codex/gemini</p>
+              ) : null}
             </div>
             <div className="rounded-[8px] border border-zinc-200 bg-zinc-50 px-3 py-2">
               <p className="text-[10px] font-[600] tracking-[0.06em] uppercase text-zinc-500">Runner</p>
@@ -166,6 +190,18 @@ export function AgentDetail({ agent, factory }: AgentDetailProps) {
               <p className="text-[10px] font-[600] tracking-[0.06em] uppercase text-zinc-500">Agent Type</p>
               <p className="mt-0.5 text-[12px] font-medium text-zinc-800">{agent.agentType}</p>
               <p className="mt-1 text-[10px] leading-snug text-zinc-500"><span className="font-[600] text-zinc-700">{getOptimizationHint(agent.agentType).label}:</span> {getOptimizationHint(agent.agentType).detail}</p>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-[8px] border border-zinc-200 bg-white px-3 py-2">
+              <p className="text-[10px] font-[600] tracking-[0.06em] uppercase text-zinc-500">Reasoning Level</p>
+              <p className="mt-0.5 font-mono text-[12px] text-zinc-800">{reasoningLevel}</p>
+              <p className="mt-1 text-[10px] text-zinc-400">Solo codex — reasoningLevel solo aplica a codex (code: reasoningLevel_only_codex)</p>
+            </div>
+            <div className="rounded-[8px] border border-zinc-200 bg-white px-3 py-2">
+              <p className="text-[10px] font-[600] tracking-[0.06em] uppercase text-zinc-500">Auth</p>
+              <p className="mt-0.5 font-mono text-[12px] text-zinc-800">{authDisplay}</p>
+              <p className="mt-1 text-[10px] text-zinc-400">managedSecret | workerEnvironment — oz sin auth</p>
             </div>
           </div>
           <div className="rounded-[8px] border border-violet-200 bg-violet-50 px-3 py-2">

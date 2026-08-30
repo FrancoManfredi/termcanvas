@@ -62,6 +62,8 @@ export const NAV_ICONS: Record<NavItemId, LucideIcon> = {
   "Slack Deep Dive": Waypoints,
   "Linear Deep Dive": Waypoints,
   "Jira Deep Dive": Waypoints,
+  "Schedule Deep Dive": Waypoints,
+  "Factory Deep Dive": Waypoints,
 };
 
 const TEAM_ITEMS = navItemsByScope("team");

@@ -10,7 +10,7 @@ export interface RepositoryRef {
 
 export type CredentialStrategy = "EXECUTOR" | "CREATOR";
 
-export type HarnessType = "oz";
+export type HarnessType = "oz" | "claude" | "codex" | "gemini";
 
 export interface HarnessConfig {
   type: HarnessType;

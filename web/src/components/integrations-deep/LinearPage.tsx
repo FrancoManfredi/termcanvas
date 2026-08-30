@@ -8,7 +8,9 @@ import {
   LINEAR_TRIGGERS,
   LINEAR_ISSUE_TRIGGERS,
   LINEAR_EVENTS_OUTPUTS,
+  LINEAR_NARROW_NOTE,
 } from "../../lib/factory/domain/integrations.deep";
+import { HelpLink } from "../help/HelpLinks";
 
 export function LinearPage() {
   return (
@@ -45,16 +47,22 @@ export function LinearPage() {
         <p className="mt-1 text-[12px] leading-relaxed text-zinc-600">
           Para narrow por creator/keyword, editar <code className="font-mono text-[11px]">{LINEAR_DEFAULT_AUTOMATION_EVENT}</code> trigger en definition files;{" "}
           <span className="font-medium">session routing no es editable desde automation editor</span> — <span className="rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-800">{LINEAR_AGENT_SESSION_NARROW_LIMIT}</span>.
+          <span className="ml-1 text-[11px] text-zinc-500">{LINEAR_NARROW_NOTE}</span>
         </p>
         <pre className="mt-2 overflow-x-auto rounded-[8px] bg-zinc-50 p-2 font-mono text-[11px] leading-relaxed text-zinc-700">
-{`# automations/linear-session/automation.md
-triggers:
+{`# automations/linear-session/automation.md — narrow demo US-088
+ triggers:
   - provider: linear
     event: agent_session_created
     filter:
       teams: [ENG]
-# narrow por creator/keyword solo editable en files, no en editor`}
+      # narrow demo: creator/keyword solo en files
+      # teams: [ENG] + keywords: [urgent] — pero narrow solo en files
+ # narrow por creator/keyword solo editable en files, no en editor`}
         </pre>
+        <div className="mt-2 rounded-[8px] bg-amber-50 px-3 py-2 text-[11px] leading-relaxed text-amber-800">
+          <span className="font-medium">Narrow demo:</span> agent_session_created con Teams=[ENG] → solo en definition files puede agregar creator/keyword filter; en automation editor verás badge <span className="rounded bg-white px-1.5 py-0.5 font-mono">solo en files</span>. Para distinguir routing (session) de triggers (issue), filtrar distinto.
+        </div>
       </section>
 
       <section className="rounded-[12px] border border-zinc-200 bg-white p-4">
@@ -98,10 +106,17 @@ triggers:
       </section>
 
       <section className="rounded-[12px] border border-amber-200 bg-amber-50 p-4">
-        <h3 className="text-[12px] font-[600] tracking-[0.06em] uppercase text-amber-800">Loop caution — 2 runs</h3>
+        <div className="flex items-center gap-2">
+          <h3 className="text-[12px] font-[600] tracking-[0.06em] uppercase text-amber-800">Loop caution — 2 runs</h3>
+          <HelpLink anchor="two-runs" label="Ver Troubleshooting — two-runs (Linear loop)" />
+          <a href="#two-runs" className="text-[11px] font-medium text-violet-700 underline-offset-2 hover:underline">
+            Troubleshooting#two-runs
+          </a>
+        </div>
         <p className="mt-1 text-[12px] leading-relaxed text-amber-800">
           One comment puede matchear 2 routes: comment que crea agent session también matchea <code className="font-mono">Comment created</code> → si ambos
-          point to factory, single action dispara 2 runs → scopear para que un path own cada kind.
+          point to factory, single action dispara 2 runs → scopear para que un path own cada kind.{" "}
+          <span className="font-mono text-[11px]">agent_session + comment_created → 2 runs si solapan</span>
         </p>
       </section>
 

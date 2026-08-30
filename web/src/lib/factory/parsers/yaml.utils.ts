@@ -2,6 +2,7 @@ import { parse as yamlParse } from "yaml";
 import type { ParseResult } from "../domain/result";
 import { ParseResult as PR } from "../domain/result";
 import { parseYamlWithLineCounter as domainParse } from "../domain/validation.lineCounter";
+import { parseFrontmatterWithLineCounter as domainParseFM } from "../domain/validation.lineCounter";
 import type { YamlWithLines } from "../domain/validation.lineCounter";
 
 // SRP: only YAML parsing, no domain validation
@@ -44,4 +45,12 @@ export function parseYamlSafe<T>(raw: string, file: string): ParseResult<T> {
 
 export function parseYamlWithLineCounter(raw: string): YamlWithLines {
   return domainParse(raw);
+}
+
+/**
+ * Re-export frontmatter wrapper sin romper parseYamlSafe — OCP.
+ * Permite a parsers de markdown obtener LineCounter con offset para file:line real.
+ */
+export function parseFrontmatterWithLineCounter(raw: string): YamlWithLines {
+  return domainParseFM(raw);
 }

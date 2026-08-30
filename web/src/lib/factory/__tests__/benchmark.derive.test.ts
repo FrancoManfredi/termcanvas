@@ -10,6 +10,7 @@ import {
   mockSelfImprovementPRs,
 } from "../domain/benchmark.derive";
 import type { BenchmarkDefinition, BenchmarkTrial } from "../domain/benchmark.types";
+import { CREDIT_DISCLAIMER } from "../domain/benchmark.types";
 
 function makeDef(over: Partial<BenchmarkDefinition> = {}): BenchmarkDefinition {
   return {
@@ -274,5 +275,83 @@ describe("benchmark.derive — WarpFactories §11 Measure and Improve", () => {
     };
     const trials = mockBenchmarkTrials(def);
     expect(trials.length).toBe(100);
+  });
+
+  // O15 — Benchmark: no winner + Correctness + credit no model + Repetitions
+  it("33. no winner invariant — deriveBenchmark nunca elige ganador aunque haya claro mejor", () => {
+    const def = makeDef();
+    const clearWinnerTrials: BenchmarkTrial[] = [];
+    for (const task of def.tasks) {
+      for (let rep = 1; rep <= def.repetitions; rep++) {
+        clearWinnerTrials.push({ taskId: task.id, configId: "cfg1", repetition: rep, correctnessPass: true, scorerPass: {}, costCredits: 10 });
+        clearWinnerTrials.push({ taskId: task.id, configId: "cfg2", repetition: rep, correctnessPass: false, scorerPass: {}, costCredits: 5 });
+      }
+    }
+    const derived = deriveBenchmark(def, clearWinnerTrials);
+    expect(derived.winnerChosen).toBe(false);
+    // sorted best first pero not winner
+    expect(derived.configResults[0].correctnessPassRate).toBe(1);
+  });
+
+  it("34. Correctness built-in es 0|1 por trial vs success criteria", () => {
+    const def = makeDef();
+    const trials = mockBenchmarkTrials(def);
+    for (const t of trials) expect(typeof t.correctnessPass).toBe("boolean");
+    const derived = deriveBenchmark(def, trials);
+    for (const cr of derived.configResults) expect(cr.correctnessPassRate).toBeGreaterThanOrEqual(0);
+  });
+
+  it("35. credit no model — avgCostCredits es solo credits sin model usage field", () => {
+    const def = makeDef();
+    const trials = mockBenchmarkTrials(def);
+    const derived = deriveBenchmark(def, trials);
+    for (const cr of derived.configResults) {
+      expect((cr as any).modelUsage).toBeUndefined();
+      expect(typeof cr.avgCostCredits).toBe("number");
+    }
+  });
+
+  it("36. Repetitions display — repetitions por task+config exacta", () => {
+    const def = makeDef({ repetitions: 3 });
+    const trials = mockBenchmarkTrials(def);
+    expect(trials.length).toBe(def.tasks.length * def.configs.length * 3);
+    for (const task of def.tasks) {
+      for (const cfg of def.configs) {
+        expect(trials.filter((t) => t.taskId === task.id && t.configId === cfg.id).length).toBe(3);
+      }
+    }
+  });
+
+  it("37. Benchmark no combina signals — configResults tiene passRate, cost, quality separados", () => {
+    const def = mockBenchmarkDefinition();
+    const derived = deriveBenchmark(def, mockBenchmarkTrials(def));
+    for (const cr of derived.configResults) {
+      expect(typeof cr.correctnessPassRate).toBe("number");
+      expect(typeof cr.avgCostCredits).toBe("number");
+      expect(cr.avgQuality === null || typeof cr.avgQuality === "number").toBe(true);
+      expect(cr.perTaskPass).toBeDefined();
+    }
+  });
+
+  it("38. Correctness per-task existe para cada task", () => {
+    const def = makeDef();
+    const derived = deriveBenchmark(def, mockBenchmarkTrials(def));
+    for (const cr of derived.configResults) {
+      for (const tid of def.tasks.map((t) => t.id)) {
+        expect(typeof cr.perTaskPass[tid]).toBe("number");
+      }
+    }
+  });
+
+  it("39. Repetitions mayor da más confianza — 1 vs 5 repetitions trials escala linear", () => {
+    const def1 = makeDef({ repetitions: 1 });
+    const def5 = makeDef({ repetitions: 5 });
+    expect(mockBenchmarkTrials(def5).length).toBe(mockBenchmarkTrials(def1).length * 5);
+  });
+
+  it("40. no winner disclaimer existe como texto en BenchmarksPage (credit no model)", () => {
+    // verifica constante CREDIT_DISCLAIMER contiene credit no model
+    expect(CREDIT_DISCLAIMER.toLowerCase()).toContain("credit");
+    expect(CREDIT_DISCLAIMER.toLowerCase()).toContain("model");
   });
 });

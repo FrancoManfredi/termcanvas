@@ -36,6 +36,8 @@ export const FACTORY_NAV_IDS = [
   "Slack Deep Dive",
   "Linear Deep Dive",
   "Jira Deep Dive",
+  "Schedule Deep Dive",
+  "Factory Deep Dive",
 ] as const;
 
 /** Every navigable page of the app. Adding a member here breaks `tsc` until its case exists in App.tsx. */
@@ -45,7 +47,7 @@ export type NavItemId = (typeof TEAM_NAV_IDS)[number] | (typeof FACTORY_NAV_IDS)
 export type NavScope = "team" | "factory";
 
 /** Tab preselected when the item opens the deep-dives container. */
-export type DeepDiveTab = "gitlab" | "slack" | "linear" | "jira";
+export type DeepDiveTab = "gitlab" | "slack" | "linear" | "jira" | "schedule" | "factory";
 
 export interface NavItem {
   readonly id: NavItemId;
@@ -93,6 +95,8 @@ const FACTORY_ITEMS: readonly NavItem[] = [
   { id: "Slack Deep Dive", label: "Slack Deep Dive", scope: "factory", trace: "§9 · US-067→072", deepDiveTab: "slack" },
   { id: "Linear Deep Dive", label: "Linear Deep Dive", scope: "factory", trace: "§9 · US-086→091", deepDiveTab: "linear" },
   { id: "Jira Deep Dive", label: "Jira Deep Dive", scope: "factory", trace: "§9 · US-092→096", deepDiveTab: "jira" },
+  { id: "Schedule Deep Dive", label: "Schedule Deep Dive", scope: "factory", trace: "§6 · US-092", deepDiveTab: "schedule" },
+  { id: "Factory Deep Dive", label: "Factory Deep Dive", scope: "factory", trace: "§6 · US-093", deepDiveTab: "factory" },
 ];
 
 /** Complete, ordered catalogue. Team block first, then the factory block. */
