@@ -12,12 +12,10 @@ import { isBackendEnabled } from './lib/factory/config/featureFlags.ts'
 import type { FactoryWorkspaceStore } from './lib/factory/store/factoryWorkspace.store.ts'
 import type { WorkItemStore } from './lib/factory/store/workItem.store.ts'
 
-// DIP: composición raíz — único if fail-closed local (ADR-002 9.4)
-// Si VITE_FACTORY_BACKEND !== "remote" → LocalAdapter (memory/localStorage); si "remote" → RemoteAdapter (FetchTransport + SQLite)
+// DIP: composición raíz — único if fail-closed local (ADR-002 9.4) + quickstart_fullscreen flag (ADR-003 Q4 solo en App.tsx)
+// isQuickstartFullscreenEnabled() se lee únicamente en App.tsx gate (no aquí) para evitar flash y mantener flag solo en composición raíz
 const adapters = isBackendEnabled() ? createFactoryAdapters("remote") : createFactoryAdapters("local")
 
-// Los providers existentes esperan FactoryWorkspaceStore / WorkItemStore concretos; los adapters satisfacen los ports y se castean
-// Este es el ÚNICO lugar donde se lee VITE_FACTORY_BACKEND (prohibido en domain/páginas)
 const workspaceStore = adapters.factoryRepo as unknown as FactoryWorkspaceStore
 const workItemStore = adapters.workItemRepo as unknown as WorkItemStore
 

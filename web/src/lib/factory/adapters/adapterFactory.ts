@@ -1,4 +1,4 @@
-// adapterFactory — composition root helper: un único sitio elige Local vs Remote (ADR-002 9.4)
+// adapterFactory — composition root helper: un único sitio elige Local vs Remote (ADR-002 9.4 + ADR-003)
 // Dominio/UI no conocen la elección; flag solo aquí y en main.tsx (fail-closed local)
 
 import { FactoryWorkspaceStore } from "../store/factoryWorkspace.store";
@@ -13,18 +13,22 @@ import type { BackendMode } from "../config/featureFlags";
 import { FetchTransport } from "./fetchTransport";
 import { RemoteFactoryRepo } from "./remoteFactory.repo";
 import { RemoteWorkItemRepo } from "./remoteWorkItem.repo";
+import type { GitHubAuthPort, GitHubReposPort } from "../ports/github.ports";
+import { LocalGitHubAuthAdapter, RemoteGitHubAuthAdapter } from "./githubAuth.adapter";
+import { LocalGitHubReposAdapter, RemoteGitHubReposAdapter } from "./githubRepos.adapter";
 
 export interface FactoryAdapters {
   readonly factoryRepo: FactoryRepositoryPort;
   readonly workItemRepo: WorkItemRepositoryPort;
   readonly transport: FactoryApiTransportPort;
   readonly mode: BackendMode;
+  readonly githubAuth: GitHubAuthPort;
+  readonly githubRepos: GitHubReposPort;
 }
 
 function createLocalAdapters(): FactoryAdapters {
   const workspaceStore = new FactoryWorkspaceStore(createLocalStoragePort());
   const wiStore = new WorkItemStore(new WorkItemMachine(), workspaceStore.list().map((f) => f.name));
-  // keep knownFactories in sync (same effect as FactoryWorkspaceProvider)
   workspaceStore.subscribe(() => {
     wiStore.addKnownFactories(workspaceStore.list().map((f) => f.name));
   });
@@ -57,6 +61,8 @@ function createLocalAdapters(): FactoryAdapters {
     workItemRepo: wiStore as unknown as WorkItemRepositoryPort,
     transport,
     mode: "local",
+    githubAuth: new LocalGitHubAuthAdapter(),
+    githubRepos: new LocalGitHubReposAdapter(),
   };
 }
 
@@ -65,9 +71,8 @@ function createRemoteAdapters(): FactoryAdapters {
   const transport = new FetchTransport({ baseUrl: cfg.baseUrl, apiKey: cfg.apiKey });
   const factoryRepo = new RemoteFactoryRepo(transport);
   const workItemRepo = new RemoteWorkItemRepo(transport);
-  // hydrate cache best-effort (don't block composition)
   void factoryRepo.hydrate().catch(() => {
-    // ignore hydrating errors in composition — UI will show empty until retry
+    // ignore hydrating errors in composition
   });
   void workItemRepo.hydrate().catch(() => {
     // ignore
@@ -77,6 +82,8 @@ function createRemoteAdapters(): FactoryAdapters {
     workItemRepo,
     transport,
     mode: "remote",
+    githubAuth: new RemoteGitHubAuthAdapter(),
+    githubRepos: new RemoteGitHubReposAdapter(),
   };
 }
 

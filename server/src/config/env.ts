@@ -11,6 +11,10 @@ const envSchema = z.object({
   GITHUB_APP_PRIVATE_KEY: z.string().optional(),
   GITHUB_INSTALLATION_ID: z.string().optional(),
   GITHUB_WEBHOOK_SECRET: z.string().optional(),
+  GITHUB_CLIENT_ID: z.string().optional(),
+  GITHUB_CLIENT_SECRET: z.string().optional(),
+  GITHUB_OAUTH_CALLBACK_URL: z.string().default("http://localhost:5174/auth/callback"),
+  SESSION_SECRET: z.string().optional(),
   NODE_ENV: z.string().default("development"),
 });
 
@@ -23,7 +27,6 @@ export function getEnv(): Env {
   const parsed = envSchema.safeParse(process.env);
   if (!parsed.success) {
     console.warn("[env] validation warnings:", parsed.error.flatten());
-    // fallback to defaults where possible
     cached = envSchema.parse({});
     return cached;
   }
@@ -37,4 +40,8 @@ export function resetEnvCache(): void {
 
 export function hasGitHubAppConfig(env: Env = getEnv()): boolean {
   return Boolean(env.GITHUB_APP_ID && env.GITHUB_APP_PRIVATE_KEY && env.GITHUB_INSTALLATION_ID);
+}
+
+export function hasGitHubOAuthConfig(env: Env = getEnv()): boolean {
+  return Boolean(env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET);
 }

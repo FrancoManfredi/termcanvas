@@ -1,6 +1,7 @@
 // factoryWorkspace.test.ts — SRP: cubre los 8 escenarios Gherkin de Diseño §10 → T-B.
 // DIP: el store se construye con puertos en memoria (determinista) salvo el test de R13.
 // Source: WarpFactories.md §2, §10 Settings Identity, §14 Sizing · US-001, US-002, US-005, US-006
+// ADR-003: DEFAULT_FACTORY_SEED=[] (cero absoluto)
 
 import { describe, it, expect, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
@@ -9,6 +10,7 @@ import { act } from "react";
 import {
   FactoryWorkspaceStore,
   DEFAULT_FACTORY_SEED,
+  LEGACY_SEED_NAMES,
   _resetDefaultWorkspace,
 } from "../store/factoryWorkspace.store";
 import {
@@ -130,7 +132,6 @@ describe("Escenario: Segunda policy sugiere factory separada (US-005)", () => {
     const created = store.create({ name: "payments-factory" });
     const uid = created.value?.uid ?? "";
 
-    // La factory ya tiene DEFAULT_POLICY desde el alta: una policy distinta se rechaza.
     const second = store.setPolicy(uid, ALTERNATE_POLICIES[0]);
     expect(second.ok).toBe(false);
     expect(second.issues[0]?.code).toBe("two_policies");
@@ -198,10 +199,11 @@ describe("Escenario: Persistencia", () => {
     expect(raw ?? "").toContain("local-factory");
   });
 
-  it("un snapshot corrupto cae al seed sin romper la app", () => {
+  it("un snapshot corrupto cae al seed sin romper la app (seed vacío ADR-003)", () => {
     const port = createMemoryPort({ [WORKSPACE_STORAGE_KEY]: "{ esto no es json" });
     const store = new FactoryWorkspaceStore(port, DEFAULT_FACTORY_SEED);
-    expect(store.list().map((f) => f.name)).toEqual(["payments-factory", "termcanvas-factory"]);
+    expect(store.list().map((f) => f.name)).toEqual([]);
+    expect(DEFAULT_FACTORY_SEED).toEqual([]);
   });
 });
 
@@ -234,11 +236,9 @@ describe("Escenario: Crear factory no pisa las conocidas del store (R3)", () => 
 });
 
 describe("Regresiones de diseño", () => {
-  it("R4 — DEFAULT_FACTORY_SEED replica los dos nombres del WorkItemStore", () => {
-    expect(DEFAULT_FACTORY_SEED.map((f) => f.name)).toEqual([
-      "payments-factory",
-      "termcanvas-factory",
-    ]);
+  it("R4 — DEFAULT_FACTORY_SEED es cero absoluto (ADR-003 P0-2)", () => {
+    expect(DEFAULT_FACTORY_SEED).toEqual([]);
+    expect(LEGACY_SEED_NAMES).toEqual(["payments-factory", "termcanvas-factory"]);
   });
 
   it("R5 — getFactoryBundle() sin args mantiene payments-factory/payments", () => {
@@ -278,26 +278,51 @@ describe("Regresiones de diseño", () => {
 
   it("remove es irreversible y re-selecciona la primera disponible (§10 Deletion)", () => {
     const port = createMemoryPort();
-    const store = new FactoryWorkspaceStore(port, DEFAULT_FACTORY_SEED);
-    const [first] = DEFAULT_FACTORY_SEED;
-    const firstUid = first?.uid ?? "";
+    const store = new FactoryWorkspaceStore(port, []);
+    const a = store.create({ name: "alpha-factory" });
+    const b = store.create({ name: "beta-factory" });
+    const firstUid = a.value?.uid ?? "";
+    const secondUid = b.value?.uid ?? "";
 
+    expect(store.getSelectedUid()).toBe(secondUid);
     expect(store.remove(firstUid).ok).toBe(true);
     expect(store.getByUid(firstUid)).toBeUndefined();
     expect(store.remove(firstUid).ok).toBe(false);
-    expect(store.getSelectedUid()).toBe(DEFAULT_FACTORY_SEED[1]?.uid ?? "");
+    expect(store.getSelectedUid()).toBe(secondUid);
+    // si borramos la seleccionada, cae a la primera
+    expect(store.remove(secondUid).ok).toBe(true);
+    expect(store.list()).toHaveLength(1 - 1 + 1 - 1); // 0
+    expect(store.getSelectedUid()).toBe("");
   });
 
   it("togglePinned persiste el pin por factory (§5.3)", () => {
     const port = createMemoryPort();
-    const store = new FactoryWorkspaceStore(port, DEFAULT_FACTORY_SEED);
-    const uid = DEFAULT_FACTORY_SEED[1]?.uid ?? "";
+    const store = new FactoryWorkspaceStore(port, []);
+    const created = store.create({ name: "my-factory" });
+    const uid = created.value?.uid ?? "";
 
     expect(store.getByUid(uid)?.pinned).not.toBe(true);
     expect(store.togglePinned(uid).ok).toBe(true);
     expect(store.getByUid(uid)?.pinned).toBe(true);
 
-    const reloaded = new FactoryWorkspaceStore(port, DEFAULT_FACTORY_SEED);
+    const reloaded = new FactoryWorkspaceStore(port, []);
     expect(reloaded.getByUid(uid)?.pinned).toBe(true);
+  });
+});
+
+describe("ADR-003 P0-2 — migración legacy seeds", () => {
+  it("payload solo seeds → silent clear a vacío", () => {
+    const legacyPayload = {
+      version: 2 as const,
+      selectedUid: "uid_payments-factory_1",
+      factories: [
+        { uid: "uid_payments-factory_1", name: "payments-factory", alias: "payments-factory", description: "Processes approved work for the payments service", repositories: [{ owner: "acme", name: "payments-service" }, { owner: "acme", name: "payments-api" }], integrations: ["slack"], agentToggles: { triage: true, spec: true, implement: true, review: true }, policyId: "default", createdAt: "2026-08-18T00:00:00.000Z", pinned: true },
+        { uid: "uid_termcanvas-factory_2", name: "termcanvas-factory", alias: "termcanvas-factory", description: "Owns the TermCanvas web app surface", repositories: [{ owner: "acme", name: "termcanvas-web" }], integrations: [], agentToggles: { triage: true, spec: true, implement: true, review: true }, policyId: "default", createdAt: "2026-08-18T00:00:01.000Z" },
+      ],
+      exportedAt: "2026-08-30T00:00:00.000Z",
+    };
+    const port = createMemoryPort({ "termcanvas.factory-workspace.v2": JSON.stringify(legacyPayload) });
+    const store = new FactoryWorkspaceStore(port, []);
+    expect(store.list()).toEqual([]);
   });
 });

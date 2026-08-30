@@ -6,6 +6,9 @@ import { createFactoryApiRuntime, resetFactoryApiRunIds } from "../domain/factor
 
 function setup() {
   const workspace = new FactoryWorkspaceStore(createMemoryPort());
+  // ADR-003: crear seeds de prueba explícitamente (ya no vienen por defecto)
+  workspace.create({ name: "payments-factory", alias: "payments-factory" });
+  workspace.create({ name: "termcanvas-factory", alias: "termcanvas-factory" });
   const workItems = new WorkItemStore(undefined, workspace.list().map((factory) => factory.name));
   return createFactoryApiRuntime(workspace, workItems);
 }
@@ -25,19 +28,21 @@ describe("Factory API contract", () => {
 
   it("gets one factory and returns 404 for an unknown uid", () => {
     const runtime = setup();
-    const found = runtime.router.dispatch("GET", "/api/v1/factory/uid_payments-factory_1");
+    const uid = runtime.workspace.list()[0]?.uid ?? "uid_payments-factory_1";
+    const found = runtime.router.dispatch("GET", `/api/v1/factory/${uid}`);
     expect(found.status).toBe(200);
-    expect((found.body as { factory: { alias: string } }).factory.alias).toBe("payments-factory");
+    expect((found.body as { factory: { alias: string } }).factory.alias).toBe(runtime.workspace.list()[0]?.alias ?? "payments-factory");
     expect(runtime.router.dispatch("GET", "/api/v1/factory/nope").status).toBe(404);
   });
 
   it("requires prompt and validates ticket_ref before creating a work item", () => {
     const runtime = setup();
-    const missing = runtime.router.dispatch("POST", "/api/v1/factory/uid_payments-factory_1/runs", {});
+    const uid = runtime.workspace.list()[0]?.uid ?? "";
+    const missing = runtime.router.dispatch("POST", `/api/v1/factory/${uid}/runs`, {});
     expect(missing.status).toBe(400);
     expect((missing.body as { code: string }).code).toBe("missing_prompt");
 
-    const invalid = runtime.router.dispatch("POST", "/api/v1/factory/uid_payments-factory_1/runs", { prompt: "Fix it", ticket_ref: "PAY-123" });
+    const invalid = runtime.router.dispatch("POST", `/api/v1/factory/${uid}/runs`, { prompt: "Fix it", ticket_ref: "PAY-123" });
     expect(invalid.status).toBe(400);
     expect((invalid.body as { code: string }).code).toBe("invalid_ticket_ref");
     expect(runtime.workItems.size()).toBe(0);
@@ -45,7 +50,8 @@ describe("Factory API contract", () => {
 
   it("dispatches a run with derived title and keeps ticket metadata", () => {
     const runtime = setup();
-    const response = runtime.router.dispatch("POST", "/api/v1/factory/uid_payments-factory_1/runs", {
+    const uid = runtime.workspace.list()[0]?.uid ?? "";
+    const response = runtime.router.dispatch("POST", `/api/v1/factory/${uid}/runs`, {
       prompt: "Fix checkout race\nInclude a regression test",
       ticket_ref: "linear:PAY-123",
       ticket_url: "https://linear.app/acme/issue/PAY-123",
@@ -61,7 +67,8 @@ describe("Factory API contract", () => {
 
   it("supports get, follow-up, and cancel through Agent API paths", () => {
     const runtime = setup();
-    const created = runtime.router.dispatch("POST", "/api/v1/factory/uid_payments-factory_1/runs", { prompt: "Investigate" });
+    const uid = runtime.workspace.list()[0]?.uid ?? "";
+    const created = runtime.router.dispatch("POST", `/api/v1/factory/${uid}/runs`, { prompt: "Investigate" });
     const id = (created.body as { id: string }).id;
     expect(runtime.router.dispatch("GET", `/agent/runs/${id}`).status).toBe(200);
 

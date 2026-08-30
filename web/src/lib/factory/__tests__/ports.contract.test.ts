@@ -15,7 +15,13 @@ import { BACKEND_MODE, isBackendEnabled, isBackendEnabledFor } from "../config/f
 import { getFactoryBundle } from "../hooks/useFactoryBundle";
 
 function makeWorkspace(): FactoryWorkspaceStore {
-  return new FactoryWorkspaceStore(createMemoryPort());
+  const ws = new FactoryWorkspaceStore(createMemoryPort());
+  // ADR-003 cero: crear 2 factories de contrato si está vacío
+  if (ws.list().length === 0) {
+    ws.create({ name: "payments-factory", alias: "payments-factory" });
+    ws.create({ name: "termcanvas-factory", alias: "termcanvas-factory" });
+  }
+  return ws;
 }
 
 function makeApiRuntime(): ReturnType<typeof createFactoryApiRuntime> {
@@ -174,40 +180,35 @@ describe("ports.contract — Ola 8 spike (sin backend, solo tipos)", () => {
   it("InMemoryTransport (createFactoryApi) satisface FactoryApiTransportPort via adapter handle(ApiRequest)", async () => {
     const runtime = makeApiRuntime();
     const transport: FactoryApiTransportPort = toInMemoryTransport(runtime);
+    const uid = runtime.workspace.list()[0]?.uid ?? "uid_payments-factory_1";
 
-    // routes() expone catálogo para UI y contrato
     expect(transport.routes().length).toBe(7);
     expect(transport.routes().map((r) => r.id)).toContain("factory.list");
 
-    // GET /api/v1/factory sin search → 200 con 2 factories
     const all = (await transport.handle({ method: "GET", path: "/api/v1/factory" })) as ApiResponse;
     expect(all.status).toBe(200);
     expect((all.body as { factories: readonly unknown[] }).factories).toHaveLength(2);
 
-    // search case-insensitive centralizado en un solo sitio (factoryApi.routes)
     const filtered = (await transport.handle({ method: "GET", path: "/api/v1/factory", query: { search: "PAYMENTS" } })) as ApiResponse;
     expect((filtered.body as { factories: readonly { name: string }[] }).factories.map((f) => f.name)).toEqual(["payments-factory"]);
 
-    // TICKET_REF_PATTERN centralizado — ticket_ref inválido → 400 invalid_ticket_ref
     const invalid = (await transport.handle({
       method: "POST",
-      path: "/api/v1/factory/uid_payments-factory_1/runs",
+      path: `/api/v1/factory/${uid}/runs`,
       body: { prompt: "Fix it", ticket_ref: "PAY-123" },
     })) as ApiResponse;
     expect(invalid.status).toBe(400);
     expect((invalid.body as { code: string }).code).toBe("invalid_ticket_ref");
 
-    // ticket_ref válido → 201 y preserva metadata
     const ok = (await transport.handle({
       method: "POST",
-      path: "/api/v1/factory/uid_payments-factory_1/runs",
+      path: `/api/v1/factory/${uid}/runs`,
       body: { prompt: "Fix checkout race", ticket_ref: "linear:PAY-123" },
     })) as ApiResponse;
     expect(ok.status).toBe(201);
     expect((ok.body as { ticket_ref: string }).ticket_ref).toBe("linear:PAY-123");
 
-    // Adapter permite toCurl sin serializar Request nativo — path + query + body ya están tipados
-    const curlLike = `curl -X POST https://app.warp.dev${"/api/v1/factory/uid_payments-factory_1/runs"} -d '${JSON.stringify({ prompt: "hi" })}'`;
+    const curlLike = `curl -X POST https://app.warp.dev${`/api/v1/factory/${uid}/runs`} -d '${JSON.stringify({ prompt: "hi" })}'`;
     expect(curlLike).toContain("/api/v1/factory");
   });
 

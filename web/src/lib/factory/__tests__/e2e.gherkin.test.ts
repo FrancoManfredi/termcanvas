@@ -96,13 +96,13 @@ Body
   });
 
   it("6. Rollback seguro — VITE_=local vuelve a localStorage v2 sin pedir credenciales y pnpm check sigue verde", () => {
-    // isBackendEnabled should be false without env
     expect(isBackendEnabled()).toBe(false);
-    // local mode uses FactoryWorkspaceStore with memory port (fallback)
     const port = createMemoryPort();
     const ws = new FactoryWorkspaceStore(port);
-    expect(ws.list().length).toBeGreaterThanOrEqual(2);
-    // rollback is just env var change — no data loss for local?
+    // ADR-003 cero: vacío al inicio
+    expect(ws.list().length).toBeGreaterThanOrEqual(0);
+    ws.create({ name: "rollback-factory" });
+    expect(ws.list().length).toBe(1);
     expect(isBackendEnabled()).toBe(false);
   });
 });

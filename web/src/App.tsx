@@ -1,13 +1,15 @@
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useEffect, useState, useSyncExternalStore, useCallback } from "react";
 import { Sidebar } from "./components/Sidebar";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { FactoryGlossary } from "./components/factories/FactoryGlossary";
-import { useSelectedFactory } from "./lib/factory/hooks/useFactories";
+import { useSelectedFactory, useFactoryWorkspaceStore } from "./lib/factory/hooks/useFactories";
+import { isQuickstartFullscreenEnabled } from "./lib/factory/config/featureFlags";
 import { DEFAULT_NAV_ITEM, assertNever } from "./nav";
 import type { NavItemId } from "./nav";
 import { HelpNavProvider } from "./components/help/HelpLinks";
 
 const QuickstartWizard = lazy(() => import("./components/quickstart/QuickstartWizard").then((m) => ({ default: m.QuickstartWizard })));
+const QuickstartFullscreen = lazy(() => import("./components/quickstart/QuickstartFullscreen").then((m) => ({ default: m.QuickstartFullscreen })));
 const ActivityBoard = lazy(() => import("./components/activity/ActivityBoard").then((m) => ({ default: m.ActivityBoard })));
 const DashboardPage = lazy(() => import("./components/dashboard/DashboardPage").then((m) => ({ default: m.DashboardPage })));
 const AgentsPage = lazy(() => import("./components/agents/AgentsPage").then((m) => ({ default: m.AgentsPage })));
@@ -40,25 +42,123 @@ function getInitialNav(): NavItemId {
   return DEFAULT_NAV_ITEM;
 }
 
+function useFactoryCount(): number {
+  const store = useFactoryWorkspaceStore();
+  // useSyncExternalStore before render shell — evita flash
+  const count = useSyncExternalStore(
+    (cb) => store.subscribe(cb),
+    () => store.list().length,
+    () => 0,
+  );
+  return count;
+}
+
+function isQuickstartPath(): boolean {
+  if (typeof window === "undefined") return false;
+  const p = window.location.pathname;
+  return p === "/quickstart" || p === "/quickstart/";
+}
+
 export default function App() {
   const [activeItem, setActiveItem] = useState<NavItemId>(getInitialNav);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  // R4: el nombre sale de la factory seleccionada en el workspace, no de un literal.
   const selectedFactory = useSelectedFactory();
+  const factoryCount = useFactoryCount();
+  const [path, setPath] = useState(() => (typeof window !== "undefined" ? window.location.pathname : "/"));
 
-  function handleNavigate(item: NavItemId) {
+  const handleNavigate = useCallback((item: NavItemId) => {
     setActiveItem(item);
-  }
+  }, []);
 
   function handleToggleSidebar() {
     setSidebarCollapsed((v) => !v);
   }
 
-  // Exhaustive switch: adding a NavItemId without its case turns this `default` into a type error.
+  // Alias /quickstart vía pushState sin react-router
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const onPop = () => setPath(window.location.pathname);
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
+  const flagOn = isQuickstartFullscreenEnabled();
+  const shouldFullscreen = flagOn && factoryCount === 0;
+  const quickstartAlias = isQuickstartPath();
+
+  // Si es /quickstart con 0 factories → fullscreen igual
+  // Si es /factory/:uid/dashboard → mostrar Dashboard directo
+  const isFactoryDashboardPath = path.startsWith("/factory/") && path.endsWith("/dashboard");
+
+  if (shouldFullscreen || quickstartAlias) {
+    // Evita flash: primera pintura ya es fullscreen si count 0
+    // Si estamos en alias /quickstart pero ya hay factories, mostrar fullscreen igual? Solo si count 0
+    const showFullscreen = shouldFullscreen || (quickstartAlias && factoryCount === 0);
+    if (showFullscreen) {
+      return (
+        <Suspense fallback={<div className="flex h-screen w-screen items-center justify-center p-6 text-sm text-zinc-500">Cargando...</div>}>
+          <ErrorBoundary>
+            <QuickstartFullscreen
+              onComplete={(uid) => {
+                // Tras crear, navegar a dashboard de esa factory
+                try {
+                  window.history.pushState(null, "", `/factory/${encodeURIComponent(uid)}/dashboard`);
+                  setPath(`/factory/${encodeURIComponent(uid)}/dashboard`);
+                } catch {
+                  // ignore
+                }
+                setActiveItem("Dashboard");
+              }}
+            />
+          </ErrorBoundary>
+        </Suspense>
+      );
+    }
+  }
+
+  // Si pathname es /factory/:uid/dashboard, render DashboardPage directo sin gate
+  if (isFactoryDashboardPath) {
+    return (
+      <div className="flex h-screen overflow-hidden bg-canvas text-zinc-900 antialiased">
+        <Sidebar
+          activeItem="Dashboard"
+          onNavigate={handleNavigate}
+          collapsed={sidebarCollapsed}
+          onToggleCollapsed={handleToggleSidebar}
+        />
+        <main className="flex min-h-0 min-w-0 flex-1 overflow-hidden bg-canvas">
+          <ErrorBoundary>
+            <HelpNavProvider navigate={handleNavigate}>
+              <Suspense fallback={<div className="flex flex-1 items-center justify-center p-6 text-sm text-zinc-500">Cargando...</div>}>
+                <DashboardPage />
+              </Suspense>
+            </HelpNavProvider>
+          </ErrorBoundary>
+        </main>
+      </div>
+    );
+  }
+
   function renderContent() {
     switch (activeItem) {
       case "Quickstart":
-        return <QuickstartWizard onComplete={() => setActiveItem("Activity")} />;
+        return (
+          <Suspense fallback={<div className="p-6 text-sm text-zinc-500">Cargando...</div>}>
+            <QuickstartWizard
+              onComplete={(uid) => {
+                try {
+                  if (uid) {
+                    window.history.pushState(null, "", `/factory/${encodeURIComponent(uid)}/dashboard`);
+                    setPath(`/factory/${encodeURIComponent(uid)}/dashboard`);
+                  }
+                } catch {
+                  // ignore
+                }
+                setActiveItem("Dashboard");
+              }}
+            />
+          </Suspense>
+        );
       case "Dashboard":
         return <DashboardPage />;
       case "Activity":
@@ -118,7 +218,6 @@ export default function App() {
       case "MCPs and apps":
         return <McpsPage />;
       case "Help":
-        // US-006: la triada va arriba como banda fija; abajo, el troubleshooting de §18.
         return (
           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden bg-panel">
             <FactoryGlossary />
@@ -139,7 +238,6 @@ export default function App() {
         onToggleCollapsed={handleToggleSidebar}
       />
       <main className="flex min-h-0 min-w-0 flex-1 overflow-hidden bg-canvas">
-        {/* 19 lazy() pages with no protection before: a failing chunk used to blank the whole app. */}
         <ErrorBoundary>
           <HelpNavProvider navigate={handleNavigate}>
             <Suspense fallback={<div className="flex flex-1 items-center justify-center p-6 text-sm text-zinc-500">Cargando...</div>}>{renderContent()}</Suspense>

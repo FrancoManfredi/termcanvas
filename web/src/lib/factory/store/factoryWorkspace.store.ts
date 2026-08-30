@@ -2,9 +2,10 @@
 // Observer (igual que WorkItemStore): Map + Set<listener> + version.
 // DIP: persistencia inyectada por puerto; sin localStorage directo; el reloj se inyecta.
 // Source: WarpFactories.md §2, §10 Deletion · US-001, US-002, US-005
+// ADR-003: DEFAULT_FACTORY_SEED=[] + detectLegacySeeds() + soft migration
 
 import { ParseResult } from "../domain/result";
-import { DEFAULT_POLICY, enforceSinglePolicy } from "../domain/factory.policy";
+import { enforceSinglePolicy } from "../domain/factory.policy";
 import type { FactoryPolicy } from "../domain/factory.policy";
 import { validateFactoryCreate, renameFactory } from "../domain/factory.record";
 import type { CreateFactoryInput, FactoryRecord, FactorySummary } from "../domain/factory.record";
@@ -20,37 +21,60 @@ import type { PersistedWorkspaceV2 } from "./workspace.migration";
 import { exportWorkspace, importWorkspace } from "./workspace.export";
 
 /**
- * Seed por defecto. Replica exactamente los dos nombres de `workItemStore.context.ts`
- * para que ningún test existente cambie de comportamiento (R4).
+ * ADR-003 P0-2: cero absoluto — sin seeds.
+ * DEFAULT_FACTORY_SEED=[] es hard removal; tests y devs con legacy storage
+ * son migrados por detectLegacySeeds() en hydrate().
  */
-export const DEFAULT_FACTORY_SEED: readonly FactoryRecord[] = [
-  {
-    uid: "uid_payments-factory_1",
-    name: "payments-factory",
-    alias: "payments-factory",
-    description: "Processes approved work for the payments service",
-    repositories: [
-      { owner: "acme", name: "payments-service" },
-      { owner: "acme", name: "payments-api" },
-    ],
-    integrations: ["slack"],
-    agentToggles: { triage: true, spec: true, implement: true, review: true },
-    policyId: DEFAULT_POLICY.id,
-    createdAt: "2026-08-18T00:00:00.000Z",
-    pinned: true,
-  },
-  {
-    uid: "uid_termcanvas-factory_2",
-    name: "termcanvas-factory",
-    alias: "termcanvas-factory",
-    description: "Owns the TermCanvas web app surface",
-    repositories: [{ owner: "acme", name: "termcanvas-web" }],
-    integrations: [],
-    agentToggles: { triage: true, spec: true, implement: true, review: true },
-    policyId: DEFAULT_POLICY.id,
-    createdAt: "2026-08-18T00:00:01.000Z",
-  },
-];
+export const DEFAULT_FACTORY_SEED: readonly FactoryRecord[] = [];
+
+/**
+ * Legacy seeds que se detectan para migración soft.
+ * Estos son los nombres hardcodeados históricos que deben desaparecer.
+ */
+export const LEGACY_SEED_NAMES = ["payments-factory", "termcanvas-factory"] as const;
+export const LEGACY_SEED_UID_PREFIXES = ["uid_payments-factory_", "uid_termcanvas-factory_"] as const;
+
+/**
+ * Detecta si un record es uno de los seeds legacy.
+ * Criterio ADR-003 Q5: name ∈ seeds && repositories ⊆ acme/* && uid prefix match
+ */
+export function isLegacySeedRecord(record: FactoryRecord): boolean {
+  const isLegacyName = (LEGACY_SEED_NAMES as readonly string[]).includes(record.name);
+  if (!isLegacyName) return false;
+  const hasLegacyUid = LEGACY_SEED_UID_PREFIXES.some((p) => record.uid.startsWith(p));
+  if (!hasLegacyUid) return false;
+  // Repos deben ser acme/* si existen (o vacío)
+  if (record.repositories.length > 0) {
+    const allAcme = record.repositories.every((r) => r.owner === "acme");
+    if (!allAcme) return false;
+  }
+  return true;
+}
+
+export function detectLegacySeeds(factories: readonly FactoryRecord[]): boolean {
+  return factories.some(isLegacySeedRecord);
+}
+
+/**
+ * Clasifica el payload para decidir estrategia de migración soft:
+ * - "only-seeds" → solo seeds legacy (silent clear a [])
+ * - "mixed" → seeds + factories de usuario (requiere banner confirmar)
+ * - "none" → sin seeds
+ */
+export function classifyLegacyPayload(factories: readonly FactoryRecord[]): "only-seeds" | "mixed" | "none" {
+  if (factories.length === 0) return "none";
+  const hasLegacy = factories.some(isLegacySeedRecord);
+  if (!hasLegacy) return "none";
+  const allLegacy = factories.every(isLegacySeedRecord);
+  return allLegacy ? "only-seeds" : "mixed";
+}
+
+/**
+ * Filtra los seeds legacy dejando solo factories de usuario.
+ */
+export function stripLegacySeeds(factories: readonly FactoryRecord[]): readonly FactoryRecord[] {
+  return factories.filter((r) => !isLegacySeedRecord(r));
+}
 
 export class FactoryWorkspaceStore {
   private factories = new Map<string, FactoryRecord>();
@@ -60,6 +84,8 @@ export class FactoryWorkspaceStore {
   private version = 0;
   private port: KeyValuePort;
   private now: () => string;
+  /** Si la última hidratación detectó mixed legacy+user */
+  private pendingLegacyMixed: readonly FactoryRecord[] | null = null;
 
   constructor(
     port: KeyValuePort = createMemoryPort(),
@@ -76,32 +102,87 @@ export class FactoryWorkspaceStore {
   private hydrate(seed: readonly FactoryRecord[]): void {
     // 1. Intentar leer V2 si existe (prioridad)
     const v2 = this.readPersistedV2();
-    if (v2 && v2.factories.length > 0) {
-      for (const record of v2.factories) {
-        this.factories.set(record.uid, record);
-        this.order.push(record.uid);
+    if (v2) {
+      const classification = classifyLegacyPayload(v2.factories);
+      if (classification === "only-seeds") {
+        // Silent clear: payload solo tenía seeds → limpiar a vacío
+        this.factories.clear();
+        this.order = [];
+        this.selectedUid = "";
+        this.persist();
+        return;
       }
-      this.selectedUid = this.factories.has(v2.selectedUid) ? v2.selectedUid : (this.order[0] ?? "");
-      return;
+      if (classification === "mixed") {
+        // Guardar pending para banner; por ahora mantener todo pero marcar pending
+        this.pendingLegacyMixed = v2.factories;
+        // No auto-clear; UI mostrará banner. Cargar todo por ahora.
+        for (const record of v2.factories) {
+          this.factories.set(record.uid, record);
+          this.order.push(record.uid);
+        }
+        this.selectedUid = this.factories.has(v2.selectedUid) ? v2.selectedUid : (this.order[0] ?? "");
+        return;
+      }
+      // No legacy o ya limpio
+      if (v2.factories.length > 0) {
+        for (const record of v2.factories) {
+          this.factories.set(record.uid, record);
+          this.order.push(record.uid);
+        }
+        this.selectedUid = this.factories.has(v2.selectedUid) ? v2.selectedUid : (this.order[0] ?? "");
+        return;
+      }
+      // V2 existe pero vacío explícito (cero absoluto) → respetar vacío, no caer a seed
+      if (v2.factories.length === 0) {
+        this.selectedUid = "";
+        this.persistV2(v2);
+        return;
+      }
     }
     // 2. Si solo hay V1, migrar en memoria, escribir V2 y mantener V1 no destructivo
     const rawV1 = this.port.read(WORKSPACE_STORAGE_KEY);
     if (rawV1) {
       const migrated = migrateIfNeeded(rawV1);
-      if (migrated && migrated.factories.length > 0) {
-        for (const record of migrated.factories) {
-          this.factories.set(record.uid, record);
-          this.order.push(record.uid);
+      if (migrated) {
+        const classification = classifyLegacyPayload(migrated.factories);
+        if (classification === "only-seeds") {
+          this.factories.clear();
+          this.order = [];
+          this.selectedUid = "";
+          this.persist();
+          return;
         }
-        this.selectedUid = this.factories.has(migrated.selectedUid)
-          ? migrated.selectedUid
-          : (this.order[0] ?? "");
-        // Persistir a V2 sin borrar V1
-        this.persistV2(migrated);
-        return;
+        if (classification === "mixed") {
+          this.pendingLegacyMixed = migrated.factories;
+          for (const record of migrated.factories) {
+            this.factories.set(record.uid, record);
+            this.order.push(record.uid);
+          }
+          this.selectedUid = this.factories.has(migrated.selectedUid)
+            ? migrated.selectedUid
+            : (this.order[0] ?? "");
+          this.persistV2(migrated);
+          return;
+        }
+        if (migrated.factories.length > 0) {
+          for (const record of migrated.factories) {
+            this.factories.set(record.uid, record);
+            this.order.push(record.uid);
+          }
+          this.selectedUid = this.factories.has(migrated.selectedUid)
+            ? migrated.selectedUid
+            : (this.order[0] ?? "");
+          this.persistV2(migrated);
+          return;
+        }
+        // V1 vacío explícito → respetar
+        if (migrated.factories.length === 0) {
+          this.selectedUid = "";
+          this.persistV2(migrated);
+          return;
+        }
       }
       // Si rawV1 existe pero no es V1/V2 válido (corrupto) → caer a seed
-      // No propagar error, mantener OCP
     }
     for (const record of seed) {
       this.factories.set(record.uid, record);
@@ -137,21 +218,46 @@ export class FactoryWorkspaceStore {
     try {
       this.port.write(WORKSPACE_STORAGE_KEY_V2, JSON.stringify(payload));
     } catch {
-      // Quota o error de storage: no throw, la app sigue en memoria (DIP)
-      // Import con quota reporta via _applyImport, no via persistV2
+      // Quota o error de storage: no throw
     }
-    // Compatibilidad R13: mantener V1 actualizado best-effort (dual-write)
     try {
       const v1Payload = { selectedUid: payload.selectedUid, factories: payload.factories };
       this.port.write(WORKSPACE_STORAGE_KEY, JSON.stringify(v1Payload));
     } catch {
-      // best-effort, no throw
+      // best-effort
     }
+  }
+
+  /** Retorna el pending mixed legacy para que UI muestre banner */
+  getPendingLegacyMixed(): readonly FactoryRecord[] | null {
+    return this.pendingLegacyMixed;
+  }
+
+  /** Confirma limpieza: borra seeds legacy dejando solo user factories */
+  confirmClearLegacySeeds(): void {
+    if (!this.pendingLegacyMixed) return;
+    const cleaned = stripLegacySeeds(this.list());
+    this.factories.clear();
+    this.order = [];
+    for (const r of cleaned) {
+      this.factories.set(r.uid, r);
+      this.order.push(r.uid);
+    }
+    if (!this.factories.has(this.selectedUid)) {
+      this.selectedUid = this.order[0] ?? "";
+    }
+    this.pendingLegacyMixed = null;
+    this.persist();
+    this.notify();
+  }
+
+  /** Conserva todo (descarta banner sin borrar) */
+  dismissLegacyBanner(): void {
+    this.pendingLegacyMixed = null;
   }
 
   /**
    * Método interno usado por `importWorkspace` para reemplazo atómico con quota handling.
-   * No es parte del API público estable, pero es estable para el puerto de persistencia.
    */
   public _applyImport(payload: PersistedWorkspaceV2): ParseResult<void> {
     const previous = {
@@ -159,7 +265,6 @@ export class FactoryWorkspaceStore {
       order: [...this.order],
       selectedUid: this.selectedUid,
     };
-    // Mutar en memoria
     this.factories.clear();
     this.order = [];
     for (const record of payload.factories) {
@@ -179,7 +284,6 @@ export class FactoryWorkspaceStore {
 
     const result = writeJson(this.port, WORKSPACE_STORAGE_KEY_V2, toPersist);
     if (!result.ok) {
-      // Rollback
       this.factories.clear();
       this.order = [];
       for (const record of previous.factories) {
@@ -192,7 +296,6 @@ export class FactoryWorkspaceStore {
       }
       return ParseResult.singleFail<void>("storage", result.message, "write_error");
     }
-    // Best-effort dual-write a V1 para compatibilidad legacy
     try {
       const v1Payload = { selectedUid: toPersist.selectedUid, factories: toPersist.factories };
       this.port.write(WORKSPACE_STORAGE_KEY, JSON.stringify(v1Payload));

@@ -1,5 +1,6 @@
 // Quickstart data — SRP: canonical copy and demo choices, no state or I/O.
 // Source: WarpFactories.md §14 "Quickstart conceptual" · US-142, US-143, US-144
+// ADR-003: DEMO_REPOS queda solo para tests legacy, Wizard usa repos reales
 
 import type { RepositoryRef } from "./types";
 import type { QuickstartStep } from "./quickstart.wizard";
@@ -32,7 +33,7 @@ export const STEP_COPY: Readonly<Record<QuickstartStep, { title: string; hint: s
   },
   slack: {
     title: "Conectá Slack",
-    hint: "Es opcional: podés sumar Slack ahora o hacerlo después.",
+    hint: "En local lo salteamos por ahora.",
     trace: "§9 · US-067→072",
   },
   agents: {
@@ -42,17 +43,17 @@ export const STEP_COPY: Readonly<Record<QuickstartStep, { title: string; hint: s
   },
   tracker: {
     title: "Elegí tu tracker",
-    hint: "Linear y Jira son opcionales; podés configurarlos más adelante.",
+    hint: "En local lo salteamos — Tracker y Factory MSP no disponibles.",
     trace: "§9 · US-086→096",
   },
   review: {
     title: "Revisá y empezá",
-    hint: "Confirmá el resumen y enviá el primer work item a tu nueva factory.",
+    hint: "Confirmá el resumen y creá tu factory para ir al Dashboard.",
     trace: "§14 · US-143",
   },
 };
 
-/** Four small demo repositories keep the wizard useful without external credentials. */
+/** Four small demo repositories keep tests useful without external credentials — not used in prod wizard (P0-5 repos reales). */
 export const DEMO_REPOS: readonly RepositoryRef[] = [
   { owner: "acme", name: "payments-service" },
   { owner: "acme", name: "payments-api" },

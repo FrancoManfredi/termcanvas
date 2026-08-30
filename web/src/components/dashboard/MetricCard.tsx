@@ -1,9 +1,11 @@
+import type { ReactNode } from "react";
+
 interface MetricCardProps {
   title: string;
   value: string | number;
   subtitle?: string;
   tooltip?: string;
-  children?: React.ReactNode;
+  children?: ReactNode;
 }
 
 export function MetricCard({ title, value, subtitle, tooltip, children }: MetricCardProps) {

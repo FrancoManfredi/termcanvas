@@ -1,5 +1,5 @@
-%% TermCanvas Web — Flujo de llamada del diseño incremental (G1–G4)
-%% Source: WarpFactories.md §3 §9 §14 §19 · WarpFactories-Tickets.md T02 T09 T14 T15
+%% TermCanvas Web — Flujo de llamada del diseño incremental (G1–G4 + ADR-002 O16-O18 + ADR-003 O16+ pulido)
+%% Source: WarpFactories.md §3 §9 §14 §19 · WarpFactories-Tickets.md · PRD-PULIDO-ONBOARDING.md §3
 sequenceDiagram
     autonumber
     actor User as Usuario
@@ -17,7 +17,6 @@ sequenceDiagram
     participant Port as KeyValuePort (localStorage)
 
     Note over User,Port: ── W0/W1 · Navegación única + alta de factory (G5, G3) ──
-
     User->>Sidebar: click "+ Add factory"
     Sidebar->>WizardUI: abre NewFactoryDialog
     User->>WizardUI: escribe name = "payments-factory"
@@ -27,19 +26,16 @@ sequenceDiagram
         WS->>Port: write(WORKSPACE_STORAGE_KEY, JSON)
         WS-->>WizardUI: ParseResult.ok(FactoryRecord)
         WS->>Store: addKnownFactories(["payments-factory"])
-        Note right of Store: aditivo — no pisa el set existente
         WizardUI->>Nav: select(uid) → navigate("Dashboard")
     else alias duplicado o charset inválido
         WS-->>WizardUI: ParseResult.fail([{code:"alias_unique"|"alias_charset"}])
         WizardUI-->>User: error inline en español (US-001, US-002)
     end
-
     User->>Sidebar: intenta aplicar una segunda policy
     Sidebar->>WS: setPolicy(uid, policyB)
     WS-->>User: ParseResult.fail "two_policies" + atajo "Crear factory separada" (US-005)
 
     Note over User,Port: ── W2 · GitHub dual-label routing (G1) ──
-
     User->>Nav: click "GitHub routing"
     Nav->>RoutingUI: monta
     User->>RoutingUI: pega evento (labels, body con ```, isEdit, authorIsBot)
@@ -51,17 +47,15 @@ sequenceDiagram
         RoutingUI->>Routing: evaluateGitHubEvent(automations, event, policy)
         Routing->>Routing: toMockEvent(event)
         Routing->>Engine: findMatchingAutomations(automations, mockEvent)
-        Note right of Engine: automation.engine.ts NO se modifica
         Engine-->>Routing: AutomationDefinition[]
         Routing-->>RoutingUI: { decision, matched }
-        RoutingUI-->>User: "N automations disparan" + continuationKey (dedupe)
+        RoutingUI-->>User: "N automations disparan" + continuationKey
     else routable = false
         Routing-->>RoutingUI: matched = []
         RoutingUI-->>User: "Mention sin label = no arranca" (US-076)
     end
 
     Note over User,Port: ── W3 · Factory API + Agent API (G2) ──
-
     User->>Nav: click "Factory API"
     User->>ApiUI: elige POST /api/v1/factory/{uid}/runs + body JSON
     ApiUI->>Api: handle({ method, path, headers, body })
@@ -77,7 +71,6 @@ sequenceDiagram
         Api-->>ApiUI: 201 DispatchedRun{ run_id, work_item_id, status:"queued" }
         ApiUI-->>User: response + snippets curl y OzAPI (US-151, US-155)
     end
-
     User->>ApiUI: GET /agent/runs/{runId}
     Api->>Store: getById(workItemId)
     Store-->>Api: WorkItem
@@ -90,7 +83,6 @@ sequenceDiagram
     Api-->>ApiUI: 200 { run_id, status:"cancelled" } (US-152)
 
     Note over User,Port: ── W4 · Quickstart wizard 7 pasos (G4) ──
-
     User->>Nav: click "Quickstart"
     Nav->>WizardUI: monta QuickstartWizard (stepIndex 0)
     loop pasos 1..7 (source → repos → identity → slack → agents → tracker → review)
@@ -126,7 +118,6 @@ sequenceDiagram
     participant FT as FetchTransport
     participant Hono as Hono :8787
     participant DB as SQLite data/termcanvas.db
-
     User->>Flag: isBackendEnabled() ? remote : local (fail-closed)
     alt mode remote
         User->>RA: create({ name:"demo-factory" })
@@ -150,7 +141,6 @@ sequenceDiagram
     Note over User,DB: ── O17 · GitHub Real Link — issue real + webhook (GH-P0-01..04) ──
     participant GHS as GitHubAppService
     participant GH as api.github.com
-
     User->>Hono: POST /api/v1/factory/:uid/runs { prompt, ticket_ref }
     Hono->>GHS: createIssue({ owner,repo, title, body+@warp-factory, labels:["factory:alias"] })
     alt B1 real (GITHUB_APP_*)
@@ -180,7 +170,6 @@ sequenceDiagram
     Note over User,DB: ── O18 · Activity/Agents/Runs Live (LV-P0-01..04) ──
     participant Activity as ActivityBoard
     participant Runs as RunsPage
-
     User->>Activity: abre Activity (Created by=you + 4 active por defecto)
     Activity->>RA: await list({ factoryName, includeTerminals:false, createdBy:"you" })
     RA->>FT: handle GET /api/v1/work-items?...
@@ -196,3 +185,81 @@ sequenceDiagram
     User->>Hono: POST /agent/runs/:id/cancel
     Hono->>DB: UPDATE runs status=cancelled + work_items stage=Cancelled
     Hono-->>User: 200 persistido → tras reload sigue cancelled
+
+    %% ────────────── ADR-003 · Onboarding Cero Fullscreen + Dashboard Limpio (P0-1..P0-9) ──────────────
+    Note over User,DB: ── ADR-003 P0-1 Fullscreen — cero absoluto sin shell ──
+    participant QFS as QuickstartFullscreen 100vw/vh
+    participant GAuth as GitHubAuthPort
+    participant GRepos as GitHubReposPort
+    participant Dash as DashboardPage
+    User->>Nav: abre "/" con localStorage limpio (0 factories, seed [])
+    Nav->>Flag: isQuickstartFullscreenEnabled() → true
+    Nav->>WS: list() sync → []
+    alt count===0 && flag ON
+        Nav->>QFS: render fullscreen (no Sidebar)
+        QFS->>WizardUI: monta step 0 "Conectar GitHub" progress 1/7
+        WizardUI-->>User: tarjeta 640px + footer "Local only"
+    else count>0
+        Nav->>Sidebar: shell
+    end
+
+    Note over User,GH: ── ADR-003 P0-3 + P0-4 GitHub OAuth popup + tick persistido ──
+    User->>WizardUI: click "Conectar con GitHub"
+    WizardUI->>GAuth: connectWithPopup()
+    GAuth->>FT: GET /api/auth/github/start
+    FT->>Hono: GET /api/auth/github/start
+    Hono-->>FT: 302 github.com/login/oauth/authorize?client_id&scope=repo+read:user&state
+    FT-->>GAuth: { authUrl }
+    GAuth->>GAuth: window.open(authUrl, "_blank")
+    GH-->>User: GitHub authorize (pestaña aparte)
+    User->>GH: Allow
+    GH->>Hono: GET /api/auth/callback?code=abc&state=xyz
+    Hono->>GH: POST https://github.com/login/oauth/access_token {client_id, client_secret, code}
+    GH-->>Hono: 200 { access_token=gho_*** }
+    Hono->>GH: GET https://api.github.com/user (token)
+    GH-->>Hono: 200 { login:"wilson", avatar_url }
+    Hono->>DB: INSERT sessions (sessionId opaque, token, username)
+    Hono-->>GAuth: HTML <script>opener.postMessage({type:'github:connected'}, origin); close()</script> + Set-Cookie HttpOnly
+    GAuth->>GAuth: on message (origin check) + poll GET /api/auth/status 1.5s fallback
+    GAuth->>FT: GET /api/auth/status (Cookie sessionId)
+    FT->>Hono: GET /api/auth/status
+    Hono->>DB: SELECT sessions
+    DB-->>Hono: { connected:true, username:"wilson" }
+    Hono-->>GAuth: 200 { connected:true }
+    GAuth-->>WizardUI: tick verde "GitHub conectado @wilson" + Continuar habilitado
+    User->>WizardUI: Continuar → step 2
+
+    Note over User,GH: ── ADR-003 P0-5 Repo listing real + P0-6 Nombre ──
+    WizardUI->>GRepos: listRepos({ per_page:30 })
+    GRepos->>FT: GET /api/github/repos?per_page=30&page=1
+    FT->>Hono: GET /api/github/repos (Cookie)
+    Hono->>DB: token by sessionId
+    Hono->>GH: GET https://api.github.com/user/repos?affiliation=owner,collaborator&sort=updated&per_page=30&page=1 (token)
+    GH-->>Hono: 200 [{ full_name:"wilson/mi-repo-real", private:false }] + Link
+    Hono-->>GRepos: 200 { repos }
+    GRepos-->>WizardUI: ParseResult.ok(repos)
+    WizardUI-->>User: lista real con skeleton/empty; selecciona "wilson/mi-repo-real"
+    User->>WizardUI: escribe "mi-factory" → validateFactoryName 3-40
+    WizardUI-->>User: preview slug + Continuar habilitado
+
+    Note over User,Dash: ── ADR-003 P0-7 Skip + P0-8 Crear → Dashboard limpio P0-9 ──
+    WizardUI-->>User: Paso 4 Slack skip + Paso 5 agents informativo + Paso 6 Tracker/MSP "No disponible en local"
+    User->>WizardUI: Omitir y crear → review 3 filas (GitHub ✓, repo, nombre)
+    User->>WizardUI: click "Crear factory y ir al Dashboard"
+    WizardUI->>WS: create({ name:"mi-factory", repositories:[wilson/mi-repo-real] })
+    alt Local
+        WS->>Port: write WORKSPACE_STORAGE_KEY_V2
+    else Remote
+        WS->>FT: POST /api/v1/factory
+        FT->>Hono: POST /api/v1/factory
+        Hono->>DB: INSERT factories
+        Hono-->>WS: 201
+    end
+    WS-->>WizardUI: ok factory uid_mi-factory_1
+    WizardUI->>Nav: pushState /factory/uid_mi-factory_1/dashboard
+    Nav->>Dash: monta DashboardPage
+    Dash->>WS: list() → [mi-factory]
+    Dash->>Store: deriveDashboardMetricsFromItems([], null)
+    alt empty
+        Dash-->>User: 8 cards Empty "Sin datos todavía" + CTA, 0 mocks, skeleton si loading
+    end

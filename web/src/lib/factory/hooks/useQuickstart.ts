@@ -1,5 +1,6 @@
 // useQuickstart — DIP: bridges pure wizard state to injected workspace and work-item stores.
 // Source: WarpFactories.md §14 · US-142, US-143, US-144
+// ADR-003: finish() async workspace.create() → navigate
 
 import { useCallback, useReducer } from "react";
 import { createForemanDecision } from "../domain/workItem.rules";
@@ -23,27 +24,58 @@ export interface QuickstartApi {
   readonly state: QuickstartState;
   dispatch(action: QuickstartAction): void;
   readonly stepResult: ParseResult<QuickstartState>;
-  finish(): ParseResult<{ factory: FactoryRecord; workItem: WorkItem }>;
+  finish(): Promise<ParseResult<{ factory: FactoryRecord; workItem: WorkItem }>>;
+  finishSync(): ParseResult<{ factory: FactoryRecord; workItem: WorkItem }>;
 }
 
 export function useQuickstart(): QuickstartApi {
   const [state, dispatch] = useReducer(quickstartReducer, undefined, initialQuickstartState);
   const workspace = useFactoryWorkspaceStore();
   const workItemStore = useWorkItemStore();
-  const stepResult = validateStep(state, workspace.list());
+  const stepResult = validateStep(state, workspace.list() as unknown as readonly FactoryRecord[]);
 
-  const finish = useCallback((): ParseResult<{ factory: FactoryRecord; workItem: WorkItem }> => {
+  const finishSync = useCallback((): ParseResult<{ factory: FactoryRecord; workItem: WorkItem }> => {
     if (state.useMcpOnboarding) {
       return ParseResult.singleFail("useMcpOnboarding", "La ruta MCP se inicia desde el dashboard, sin credenciales en esta app", "mcp_external_onboarding");
     }
     for (let index = 0; index < QUICKSTART_STEPS.length; index += 1) {
-      const result = validateStep({ ...state, stepIndex: index }, workspace.list());
+      const result = validateStep({ ...state, stepIndex: index }, workspace.list() as unknown as readonly FactoryRecord[]);
       if (!result.ok) return ParseResult.fail(result.issues);
     }
-    const factoryResult = workspace.create(toCreateFactoryInput(state));
+    const maybe = workspace.create(toCreateFactoryInput(state)) as unknown as ParseResult<FactoryRecord> | Promise<ParseResult<FactoryRecord>>;
+    if (maybe instanceof Promise) {
+      return ParseResult.singleFail("factory", "Usá finish() async para remote", "async_required");
+    }
+    const factoryResult = maybe;
     if (!factoryResult.ok || factoryResult.value === undefined) return ParseResult.fail(factoryResult.issues);
     const factory = factoryResult.value;
-    workspace.select(factory.uid);
+    // select is sync in store
+    (workspace as unknown as { select: (uid: string) => void }).select(factory.uid);
+    workItemStore.addKnownFactories([factory.name]);
+    const firstWorkItem = toFirstWorkItemInput(state);
+    const workItemResult = workItemStore.create({
+      ...firstWorkItem,
+      foremanDecision: createForemanDecision({ title: firstWorkItem.title }),
+    });
+    if (!workItemResult.ok || workItemResult.value === undefined) return ParseResult.fail(workItemResult.issues);
+    return ParseResult.ok({ factory, workItem: workItemResult.value });
+  }, [state, workspace, workItemStore]);
+
+  const finish = useCallback(async (): Promise<ParseResult<{ factory: FactoryRecord; workItem: WorkItem }>> => {
+    if (state.useMcpOnboarding) {
+      return ParseResult.singleFail("useMcpOnboarding", "La ruta MCP se inicia desde el dashboard, sin credenciales en esta app", "mcp_external_onboarding");
+    }
+    for (let index = 0; index < QUICKSTART_STEPS.length; index += 1) {
+      const result = validateStep({ ...state, stepIndex: index }, workspace.list() as unknown as readonly FactoryRecord[]);
+      if (!result.ok) return ParseResult.fail(result.issues);
+    }
+    const factoryResult = (await Promise.resolve(
+      workspace.create(toCreateFactoryInput(state)) as unknown as Promise<ParseResult<FactoryRecord>> | ParseResult<FactoryRecord>,
+    )) as ParseResult<FactoryRecord>;
+    if (!factoryResult.ok || factoryResult.value === undefined) return ParseResult.fail(factoryResult.issues);
+    const factory = factoryResult.value;
+    // select may be MaybePromise; await if needed
+    await Promise.resolve((workspace as unknown as { select: (uid: string) => unknown }).select(factory.uid));
     workItemStore.addKnownFactories([factory.name]);
     const firstWorkItem = toFirstWorkItemInput(state);
     const workItemResult = workItemStore.create({
@@ -59,5 +91,5 @@ export function useQuickstart(): QuickstartApi {
     dispatch(action);
   }, [state]);
 
-  return { state, dispatch: dispatchAction, stepResult, finish };
+  return { state, dispatch: dispatchAction, stepResult, finish, finishSync };
 }

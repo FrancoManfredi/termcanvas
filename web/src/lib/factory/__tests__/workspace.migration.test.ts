@@ -1,14 +1,25 @@
 // workspace.migration.test.ts — SRP: P0-05 persistencia LOCAL robusta
 // Source: WarpFactories.md §2 · PRD P0-05 · PLAN Ola 6
+// ADR-003: DEFAULT_FACTORY_SEED=[]; tests usan factories reales no legacy
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { FactoryWorkspaceStore, DEFAULT_FACTORY_SEED, _resetDefaultWorkspace } from "../store/factoryWorkspace.store";
+import { FactoryWorkspaceStore, _resetDefaultWorkspace } from "../store/factoryWorkspace.store";
 import { WORKSPACE_STORAGE_KEY, WORKSPACE_STORAGE_KEY_V2, createMemoryPort } from "../store/storage.port";
 import type { KeyValuePort } from "../store/storage.port";
 import { isV1Payload, isV2Payload, migrateV1toV2, migrateIfNeeded } from "../store/workspace.migration";
 import { exportWorkspace, importWorkspace } from "../store/workspace.export";
-import { _resetUidSeq } from "../domain/factory.record";
+import { _resetUidSeq, validateFactoryCreate } from "../domain/factory.record";
+import type { FactoryRecord } from "../domain/factory.record";
 import { WorkItemStore } from "../store/workItem.store";
+
+function makeRecord(name: string): FactoryRecord {
+  const built = validateFactoryCreate({ name }, { existing: [], uid: () => `uid_${name}`, now: () => "2026-08-30T00:00:00.000Z" });
+  // add minimal fields for storage parity
+  const r = built.value!;
+  return { ...r, repositories: [{ owner: "acme", name: `${name}-repo` }], integrations: [], agentToggles: { triage: true, spec: true, implement: true, review: true }, policyId: "default", createdAt: "2026-08-30T00:00:00.000Z" } as FactoryRecord;
+}
+
+const TWO: readonly FactoryRecord[] = [makeRecord("alpha-factory"), makeRecord("beta-factory")];
 
 function makeQuotaPort(): KeyValuePort {
   return {
@@ -52,8 +63,8 @@ describe("P0-05 — Persistencia LOCAL robusta", () => {
   describe("migrateV1toV2 — determinista", () => {
     it("migra V1 a V2 preservando factories y selectedUid y añadiendo exportedAt", () => {
       const v1 = {
-        selectedUid: "uid_payments-factory_1",
-        factories: [...DEFAULT_FACTORY_SEED],
+        selectedUid: "uid_alpha-factory",
+        factories: [...TWO],
       };
       const fixedNow = () => "2026-08-30T12:00:00.000Z";
       const v2 = migrateV1toV2(v1, fixedNow);
@@ -61,7 +72,6 @@ describe("P0-05 — Persistencia LOCAL robusta", () => {
       expect(v2.selectedUid).toBe(v1.selectedUid);
       expect(v2.factories).toEqual(v1.factories);
       expect(v2.exportedAt).toBe("2026-08-30T12:00:00.000Z");
-      // Determinista: segunda llamada mismo now produce mismo resultado
       expect(migrateV1toV2(v1, fixedNow)).toEqual(v2);
     });
   });
@@ -74,14 +84,14 @@ describe("P0-05 — Persistencia LOCAL robusta", () => {
     });
 
     it("retorna V2 directo si ya es V2 y migra V1 a V2 si es V1", () => {
-      const v1 = { selectedUid: "uid_1", factories: [...DEFAULT_FACTORY_SEED] };
+      const v1 = { selectedUid: "uid_1", factories: [...TWO] };
       const rawV1 = JSON.stringify(v1);
       const migrated = migrateIfNeeded(rawV1);
       expect(migrated).not.toBeNull();
       expect(migrated?.version).toBe(2);
       expect(migrated?.factories).toHaveLength(2);
 
-      const v2 = { version: 2 as const, selectedUid: "uid_1", factories: [...DEFAULT_FACTORY_SEED], exportedAt: "2026-08-30T00:00:00.000Z" };
+      const v2 = { version: 2 as const, selectedUid: "uid_1", factories: [...TWO], exportedAt: "2026-08-30T00:00:00.000Z" };
       const rawV2 = JSON.stringify(v2);
       expect(migrateIfNeeded(rawV2)).toEqual(v2);
     });
@@ -119,7 +129,6 @@ describe("P0-05 — Persistencia LOCAL robusta", () => {
       const a = store.create({ name: "pinned-factory", pinned: true });
       expect(a.ok).toBe(true);
       const uid = a.value?.uid ?? "";
-      // togglePinned ya está cubierto, pero verificamos que export lo preserva
       expect(store.getByUid(uid)?.pinned).toBe(true);
       expect(store.getByUid(uid)?.policyId).toBe("default");
 
@@ -130,7 +139,6 @@ describe("P0-05 — Persistencia LOCAL robusta", () => {
       expect(imported.ok).toBe(true);
       expect(store2.getByUid(uid)?.pinned).toBe(true);
       expect(store2.getByUid(uid)?.policyId).toBe("default");
-      // También repositories
       const withRepo = new FactoryWorkspaceStore(createMemoryPort(), [], () => "2026-08-30T00:00:00.000Z");
       withRepo.create({ name: "repo-factory", repositories: [{ owner: "acme", name: "svc" }] });
       const json2 = withRepo.exportJSON();
@@ -144,8 +152,8 @@ describe("P0-05 — Persistencia LOCAL robusta", () => {
     it("hydrate lee V2 si existe, ignora V1", () => {
       const v2Payload = {
         version: 2 as const,
-        selectedUid: "uid_payments-factory_1",
-        factories: [...DEFAULT_FACTORY_SEED],
+        selectedUid: "uid_alpha-factory",
+        factories: [...TWO],
         exportedAt: "2026-08-30T00:00:00.000Z",
       };
       const v1Payload = {
@@ -157,17 +165,15 @@ describe("P0-05 — Persistencia LOCAL robusta", () => {
         [WORKSPACE_STORAGE_KEY]: JSON.stringify(v1Payload),
       });
       const store = new FactoryWorkspaceStore(port, []);
-      // Debe leer V2, no V1
-      expect(store.list().map((f) => f.name)).toEqual(["payments-factory", "termcanvas-factory"]);
-      // V1 se mantiene (no borrado)
+      expect(store.list().map((f) => f.name)).toEqual(["alpha-factory", "beta-factory"]);
       expect(port.read(WORKSPACE_STORAGE_KEY)).not.toBeNull();
       expect(port.read(WORKSPACE_STORAGE_KEY_V2)).not.toBeNull();
     });
 
     it("si solo hay V1, migra en memoria, escribe V2 y mantiene V1", () => {
       const v1Payload = {
-        selectedUid: "uid_payments-factory_1",
-        factories: [...DEFAULT_FACTORY_SEED],
+        selectedUid: "uid_alpha-factory",
+        factories: [...TWO],
       };
       const port = createMemoryPort({
         [WORKSPACE_STORAGE_KEY]: JSON.stringify(v1Payload),
@@ -175,54 +181,49 @@ describe("P0-05 — Persistencia LOCAL robusta", () => {
       expect(port.read(WORKSPACE_STORAGE_KEY_V2)).toBeNull();
       const store = new FactoryWorkspaceStore(port, []);
       expect(store.list()).toHaveLength(2);
-      // Debe haber escrito V2
       const rawV2 = port.read(WORKSPACE_STORAGE_KEY_V2);
       expect(rawV2).not.toBeNull();
       const parsedV2 = rawV2 ? (JSON.parse(rawV2) as { version: number }) : null;
       expect(parsedV2?.version).toBe(2);
-      // V1 se mantiene
       expect(port.read(WORKSPACE_STORAGE_KEY)).not.toBeNull();
     });
   });
 
   describe("Escenario: snapshot corrupto → seed", () => {
-    it("corrupto en ambos keys cae al seed sin throw", () => {
+    it("corrupto en ambos keys cae al seed sin throw (seed vacío)", () => {
       const port = createMemoryPort({
         [WORKSPACE_STORAGE_KEY]: "{ esto no es json",
         [WORKSPACE_STORAGE_KEY_V2]: "{ tampoco }",
       });
-      const store = new FactoryWorkspaceStore(port, DEFAULT_FACTORY_SEED);
-      expect(store.list().map((f) => f.name)).toEqual(["payments-factory", "termcanvas-factory"]);
+      const store = new FactoryWorkspaceStore(port, []);
+      expect(store.list()).toEqual([]);
     });
 
     it("V2 corrupto pero V1 válido → migra V1", () => {
-      const v1Payload = { selectedUid: "uid_termcanvas-factory_2", factories: [...DEFAULT_FACTORY_SEED] };
+      const v1Payload = { selectedUid: "uid_alpha-factory", factories: [...TWO] };
       const port = createMemoryPort({
         [WORKSPACE_STORAGE_KEY_V2]: "corrupto",
         [WORKSPACE_STORAGE_KEY]: JSON.stringify(v1Payload),
       });
       const store = new FactoryWorkspaceStore(port, []);
       expect(store.list()).toHaveLength(2);
-      expect(store.getSelectedUid()).toBe("uid_termcanvas-factory_2");
+      expect(store.getSelectedUid()).toBe("uid_alpha-factory");
     });
   });
 
   describe("Escenario: quota exceeded → fail sin throw", () => {
     it("importWorkspace con port en quota retorna quota_exceeded y no pisa store", () => {
       const quotaPort = makeQuotaPort();
-      // Necesitamos store con port normal para tener datos, luego intentar import en quotaPort
       const sourcePort = createMemoryPort();
       const source = new FactoryWorkspaceStore(sourcePort, [], () => "2026-08-30T00:00:00.000Z");
       source.create({ name: "quota-factory" });
       const json = source.exportJSON();
 
       const target = new FactoryWorkspaceStore(quotaPort, [], () => "2026-08-30T00:00:00.000Z");
-      // target al construir con quotaPort habrá intentado persistir pero falló silencioso, queda con seed (2)
       const before = target.list().map((f) => f.name);
       const result = target.importJSON(json);
       expect(result.ok).toBe(false);
       expect(result.issues[0]?.code).toBe("quota_exceeded");
-      // No pisa: debe seguir con seed
       expect(target.list().map((f) => f.name)).toEqual(before);
     });
 
@@ -294,11 +295,9 @@ describe("P0-05 — Persistencia LOCAL robusta", () => {
     });
 
     it("import acepta V1 payload via migración", () => {
-      const v1 = { selectedUid: "uid_payments-factory_1", factories: [...DEFAULT_FACTORY_SEED] };
+      const v1 = { selectedUid: "uid_alpha-factory", factories: [...TWO] };
       const jsonV1 = JSON.stringify(v1);
-      // fresh tiene seed; import V1 debe reemplazar
       const fresh = new FactoryWorkspaceStore(createMemoryPort(), [], () => "2026-08-30T00:00:00.000Z");
-      // fresh tiene seed; import V1 debe reemplazar
       const result = fresh.importJSON(jsonV1);
       expect(result.ok).toBe(true);
       expect(fresh.list()).toHaveLength(2);

@@ -15,10 +15,14 @@ describe("adapterFactory — isBackendEnabled fail-closed y MaybePromise", () =>
     expect(adapters.mode).toBe("local");
     expect(adapters.factoryRepo).toBeInstanceOf(FactoryWorkspaceStore);
     expect(adapters.workItemRepo).toBeInstanceOf(WorkItemStore);
-    // MaybePromise: await syncValue sigue funcionando
+    // ADR-003 P0-2 cero absoluto: al inicio 0 factories
     const factories = await adapters.factoryRepo.list();
     expect(Array.isArray(factories)).toBe(true);
-    expect(factories.length).toBeGreaterThanOrEqual(2);
+    expect(factories.length).toBeGreaterThanOrEqual(0);
+    // al crear una, crece
+    const created = await adapters.factoryRepo.create({ name: "adapter-factory-test" });
+    expect(created.ok).toBe(true);
+    expect((await adapters.factoryRepo.list()).length).toBe(1);
   });
 
   it("createFactoryAdapters remote retorna RemoteAdapter con FetchTransport", async () => {

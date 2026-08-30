@@ -1,5 +1,5 @@
-// SRP: feature flag de backend — sin I/O, sin store, sin React
-// Source: PLAN-OLAS-WARP-FACTORIES §8.4 · Apéndice B.3
+// SRP: feature flags — sin I/O, sin store, sin React
+// Source: PLAN-OLAS-WARP-FACTORIES §8.4 · ADR-003 Q4/Q6 (quickstart_fullscreen)
 // OCP: agregar modo = agregar unión sin tocar consumidores; DIP: UI/hooks leen este flag, no fetch directo
 
 /**
@@ -11,9 +11,6 @@ export type BackendMode = "local" | "remote";
 /**
  * Lee VITE_FACTORY_BACKEND del entorno Vite. Cualquier valor distinto de "remote"
  * cae a "local" — fail-closed sin credenciales.
- *
- * Uso futuro (no en este spike):
- * const transport: FactoryApiTransportPort = isBackendEnabled() ? new FetchTransport(env) : createFactoryApi({ store, factories });
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const rawEnv = (import.meta as unknown as { env?: Record<string, unknown> }).env;
@@ -35,8 +32,6 @@ export interface BackendConfig {
  * devolvemos "" para que FetchTransport use URL relativa `/api/...` y eluda CSP
  * (el proxy de vite.config.ts reenvía a :8787). En prod o si baseUrl es
  * https://app.warp.dev, se mantiene absoluta.
- * Nota: getBackendConfig().baseUrl sigue siendo absoluta para diagnóstico;
- * esta helper es opt-in para transporte.
  */
 export function getEffectiveBaseUrl(): string {
   const raw = FACTORY_BACKEND_API_URL.replace(/\/$/, "");
@@ -60,7 +55,6 @@ export function getBackendConfig(): BackendConfig {
 
 /**
  * True solo cuando BACKEND_MODE === "remote".
- * Testeable: en tests sin env es false; con VITE_FACTORY_BACKEND=remote sería true.
  */
 export function isBackendEnabled(): boolean {
   return BACKEND_MODE === "remote";
@@ -68,8 +62,31 @@ export function isBackendEnabled(): boolean {
 
 /**
  * Helper puro para tests — verifica la lógica sin depender de import.meta.
- * No es parte del contrato runtime, solo seam de test.
  */
 export function isBackendEnabledFor(mode: BackendMode): boolean {
   return mode === "remote";
+}
+
+// ── ADR-003 Q4: quickstart_fullscreen flag ──
+
+export const QUICKSTART_FULLSCREEN_FLAG = "quickstart_fullscreen";
+
+/**
+ * Lee VITE_QUICKSTART_FULLSCREEN. Default ON en local (cero → fullscreen).
+ * Valores que apagan: "false", "0", "off" (case-insensitive, trimmed).
+ * Cualquier otro valor o ausente → true.
+ */
+export function isQuickstartFullscreenEnabled(): boolean {
+  const raw = (rawEnv?.VITE_QUICKSTART_FULLSCREEN as string | undefined)?.trim().toLowerCase();
+  if (raw === "false" || raw === "0" || raw === "off") return false;
+  return true;
+}
+
+/**
+ * Helper puro para tests — sin import.meta.
+ */
+export function isQuickstartFullscreenEnabledFor(raw: string | undefined): boolean {
+  const v = raw?.trim().toLowerCase();
+  if (v === "false" || v === "0" || v === "off") return false;
+  return true;
 }

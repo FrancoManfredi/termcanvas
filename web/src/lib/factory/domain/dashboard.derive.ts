@@ -183,8 +183,6 @@ export function cycleTimeMsForMerged(item: WorkItem): number | null {
 }
 
 export function timeInStageMs(item: WorkItem, stage: string): number | null {
-  // suma tiempo de eventos donde from === stage o to === stage ?
-  // Aproximación: duración entre entry a stage y exit de stage usando history
   let entryTime: number | null = null;
   let total = 0;
   let found = false;
@@ -200,12 +198,10 @@ export function timeInStageMs(item: WorkItem, stage: string): number | null {
         total += exitTime - entryTime;
         found = true;
         entryTime = null;
-        // si nextEv.to es mismo stage, re-entry
         if (nextEv.to === stage) {
           entryTime = exitTime;
         }
       } else {
-        // hasta ahora si no hay salida, usar last
         break;
       }
     }
@@ -287,7 +283,6 @@ export function deriveDashboardMetricsFromItems(workItems: WorkItem[], bundle: F
   const prsMerged = derivePrMerged(workItems);
   const autonomyPct = deriveAutonomy(workItems);
 
-  // PR cycle time mediana
   const mergedItems = workItems.filter((wi) => wi.stage === "Complete" && wi.linkedPRs.length > 0);
   const cycleTimes = mergedItems.map((wi) => cycleTimeMsForMerged(wi)).filter((v): v is number => v !== null);
   const prCycleTimeMedianMs = median(cycleTimes);
@@ -299,16 +294,13 @@ export function deriveDashboardMetricsFromItems(workItems: WorkItem[], bundle: F
     prCycleTimeByStageMedianMs[st] = median(times);
   }
 
-  // Cost per PR spliteado
   const perPrEntries = costPerPrEntries(workItems);
   const costPerPrList = perPrEntries.map((e) => e.cost);
   const costPerPrMedian = median(costPerPrList);
 
-  // Most expensive PRs
   const sortedByCost = [...perPrEntries].sort((a, b) => b.cost - a.cost);
   const mostExpensivePrs: MostExpensivePR[] = sortedByCost.slice(0, 5).map((e) => ({ prUrl: e.prUrl, cost: e.cost, workItemId: e.workItemId, title: e.title }));
 
-  // Scorer cards
   const scorerCards: ScorerCard[] = (bundle?.scorers ?? []).map((s) => ({
     name: s.name,
     description: s.description,
@@ -318,8 +310,6 @@ export function deriveDashboardMetricsFromItems(workItems: WorkItem[], bundle: F
     model: s.model,
   }));
 
-  // Self-improvement PRs — 3 newest con linkedPRs, sin importar date range
-  // Si hay scorers con selfImprovement, igual tomamos 3 newest; lo enriquecemos
   const withPR = workItems.filter((wi) => wi.linkedPRs.length > 0);
   const sortedNewest = [...withPR].sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   const selfImprovementPrs: SelfImprovementPR[] = sortedNewest.slice(0, 3).flatMap((wi) => wi.linkedPRs.map((pr) => ({ prUrl: pr, workItemId: wi.id, title: wi.title, createdAt: wi.createdAt }))).slice(0, 3);
@@ -338,4 +328,22 @@ export function deriveDashboardMetricsFromItems(workItems: WorkItem[], bundle: F
     costPerPrList,
   };
   return metrics;
+}
+
+/**
+ * ADR-003 Q8: helper puro — true si no hay datos reales.
+ * Un dashboard vacío debe mostrar EmptyState en todos los widgets, no números falsos.
+ */
+export function isEmpty(metrics: DashboardMetrics): boolean {
+  return (
+    metrics.totalRuns.total === 0 &&
+    metrics.prsOpened === 0 &&
+    metrics.prsMerged === 0 &&
+    metrics.costPerPrList.length === 0 &&
+    metrics.mostExpensivePrs.length === 0 &&
+    metrics.scorerCards.length === 0 &&
+    metrics.selfImprovementPrs.length === 0 &&
+    metrics.prCycleTimeMedianMs === null &&
+    metrics.costPerPrMedian === null
+  );
 }

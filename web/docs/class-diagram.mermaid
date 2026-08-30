@@ -378,3 +378,69 @@ classDiagram
     HonoApp --> WebhookHandler
     WebhookHandler ..> WorkItemRepoSQLite
     WebhookHandler ..> GitHubRoutingService : reusa 5 checks
+
+    %% --------------- ADR-003 · Onboarding Cero Fullscreen + Dashboard Limpio (no rompe G1-G5 ni ADR-002) ---------------
+    class GitHubAuthState {
+        <<type>> +boolean connected; +string username; +string avatarUrl; +GitHubAuthStatus status
+    }
+    class GitHubRepo {
+        +string owner; +string name; +string fullName; +boolean private; +string updatedAt
+    }
+    class GitHubAuthPort {
+        <<interface>> +getStatus() Promise~GitHubAuthState~
+        +startAuth() Promise~string~; +connectWithPopup() Promise~GitHubAuthState~
+        +logout() Promise~void~; +subscribe(cb) Function; +getVersion() number
+    }
+    class GitHubReposPort {
+        <<interface>> +listRepos(opts) Promise~ParseResult~GitHubRepo[]~~
+    }
+    class RemoteGitHubAuthAdapter {
+        -FetchTransport transport; -GitHubAuthState cache; -Set listeners; -number version
+        +getStatus() Promise~GitHubAuthState~; +startAuth() Promise~string~
+        +connectWithPopup() Promise~GitHubAuthState~ // window.open + postMessage + poll
+    }
+    class RemoteGitHubReposAdapter {
+        -FetchTransport transport
+        +listRepos(opts) Promise~ParseResult~GitHubRepo[]~~
+    }
+    class QuickstartFullscreen {
+        <<component>> +100vw/vh + progress 7 dots + card 640px
+        -uses GitHubAuthPort; -uses GitHubReposPort
+    }
+    class DashboardEmptyState {
+        <<component>> +illustration + message + CTA
+    }
+    class DashboardDerive {
+        <<module puro>> +deriveDashboardMetricsFromItems(items,bundle) DashboardMetrics
+        +isEmpty(metrics) boolean
+    }
+    class GitHubAuthService {
+        <<service>> -Env env; +mode: "real"|"dry_run"
+        +getAuthorizeUrl(state) string; +exchangeCode(code) Promise~Object~
+        +getUser(token) Promise~Object~; +maskToken(token) string
+    }
+    class SessionsRepo {
+        -Database db
+        +create(sessionId,token,username) void; +get(sessionId) Session
+    }
+    class GitHubReposService {
+        <<service>> +listUserRepos(token,opts) Promise~Object~
+    }
+    class FeatureFlags {
+        <<module>> +isQuickstartFullscreenEnabled() boolean
+    }
+
+    RemoteGitHubAuthAdapter ..|> GitHubAuthPort
+    RemoteGitHubReposAdapter ..|> GitHubReposPort
+    RemoteGitHubAuthAdapter --> FetchTransport
+    RemoteGitHubReposAdapter --> FetchTransport
+    QuickstartFullscreen --> GitHubAuthPort : tick
+    QuickstartFullscreen --> GitHubReposPort : lista real
+    QuickstartFullscreen --> FactoryRepositoryPort : crea factory
+    DashboardEmptyState ..> DashboardDerive : isEmpty()
+    AdapterFactory ..> GitHubAuthPort
+    AdapterFactory ..> GitHubReposPort
+    FeatureFlags ..> AdapterFactory
+    HonoApp --> GitHubAuthService
+    HonoApp --> SessionsRepo
+    HonoApp --> GitHubReposService
