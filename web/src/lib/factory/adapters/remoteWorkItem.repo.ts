@@ -1,9 +1,18 @@
 // RemoteWorkItemRepo — cache + fetch vs WorkItemRepositoryPort (MaybePromise widen O18)
 // O18: filtros search/createdBy/includeTerminals contra backend server-side (GET /api/v1/work-items?search=&createdBy=&includeTerminals=)
+// BugFix: list() siempre retorna WorkItem[] nunca undefined, maneja ParseResult y fetch error con []
 import { ParseResult } from "../domain/result";
 import type { CreateWorkItemInput, WorkItem, WorkItemStage, TransitionContext, Actor } from "../domain/workItem.types";
 import type { WorkItemRepositoryPort, WorkItemFilter } from "../ports/factory.ports";
 import type { FactoryApiTransportPort } from "../ports/transport.types";
+
+function safeWorkItemsFromBody(body: unknown): WorkItem[] {
+  if (!body || typeof body !== "object") return [];
+  const b = body as Record<string, unknown>;
+  const raw = (b.workItems ?? b.work_items) as unknown;
+  if (Array.isArray(raw)) return raw as WorkItem[];
+  return [];
+}
 
 export class RemoteWorkItemRepo implements WorkItemRepositoryPort {
   private cache = new Map<string, WorkItem>();
@@ -41,17 +50,16 @@ export class RemoteWorkItemRepo implements WorkItemRepositoryPort {
     try {
       const res = await this.transport.handle({ method: "GET", path: "/api/v1/work-items", query });
       if (res.status === 200) {
-        const body = res.body as { workItems?: WorkItem[]; work_items?: WorkItem[] };
-        const items = body.workItems ?? body.work_items ?? [];
+        const items = safeWorkItemsFromBody(res.body);
         this.cache.clear();
         for (const item of items) {
-          this.cache.set(item.id, item);
+          if (item && typeof item.id === "string") this.cache.set(item.id, item);
         }
         this._hydrated = true;
         this.notify();
       }
     } catch {
-      // ignore hydrate errors — UI shows empty/loading
+      // ignore hydrate errors — UI shows empty/loading; list() will fallback to [] or cache
     }
   }
 
@@ -68,12 +76,12 @@ export class RemoteWorkItemRepo implements WorkItemRepositoryPort {
       try {
         const res = await this.transport.handle({ method: "GET", path: "/api/v1/work-items", query });
         if (res.status === 200) {
-          const body = res.body as { workItems?: WorkItem[]; work_items?: WorkItem[] };
-          const items = body.workItems ?? body.work_items ?? [];
-          for (const it of items) this.cache.set(it.id, it);
+          const items = safeWorkItemsFromBody(res.body);
+          for (const it of items) {
+            if (it && typeof it.id === "string") this.cache.set(it.id, it);
+          }
           // Si el backend filtró correctamente, items ya está filtrado; pero si el mock devuelve todo o vacío, aplicamos filtro cliente como fallback
           let out = [...items];
-          // Detectar si el backend no filtró (e.g., mock devuelve todos): si out length >0 y filter debería reducir, filtramos cliente
           // Siempre aplicamos filtro cliente para asegurar case-insensitive y consistencia con workItem.routes server-side
           if (filter.factoryName) out = out.filter((w) => w.factoryName === filter.factoryName);
           if (filter.stage) out = out.filter((w) => w.stage === filter.stage);
@@ -100,24 +108,34 @@ export class RemoteWorkItemRepo implements WorkItemRepositoryPort {
           return out;
         }
       } catch {
-        // fallback
+        // fallback to cache below
       }
     } else {
       if (this.cache.size === 0 && !this._hydrated) {
-        await this.hydrate();
+        try {
+          await this.hydrate();
+        } catch {
+          // ignore, fallback to cache (empty)
+        }
       }
     }
-    let out = [...this.cache.values()];
-    if (filter.factoryName) out = out.filter((w) => w.factoryName === filter.factoryName);
-    if (filter.stage) out = out.filter((w) => w.stage === filter.stage);
-    else if (!filter.includeTerminals) out = out.filter((w) => w.stage !== "Complete" && w.stage !== "Cancelled");
-    if (filter.createdBy) out = out.filter((w) => w.createdBy === filter.createdBy);
-    if (filter.search) {
-      const q = filter.search.toLowerCase();
-      out = out.filter((w) => w.title.toLowerCase().includes(q) || (w.description ?? "").toLowerCase().includes(q));
+    // Fallback: filtrar cache local (siempre retorna array, nunca undefined)
+    try {
+      let out = [...this.cache.values()];
+      if (filter.factoryName) out = out.filter((w) => w.factoryName === filter.factoryName);
+      if (filter.stage) out = out.filter((w) => w.stage === filter.stage);
+      else if (!filter.includeTerminals) out = out.filter((w) => w.stage !== "Complete" && w.stage !== "Cancelled");
+      if (filter.createdBy) out = out.filter((w) => w.createdBy === filter.createdBy);
+      if (filter.search) {
+        const q = filter.search.toLowerCase();
+        out = out.filter((w) => w.title.toLowerCase().includes(q) || (w.description ?? "").toLowerCase().includes(q));
+      }
+      out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      return out;
+    } catch {
+      // Ante cualquier error inesperado, retornar [] nunca undefined — evita "is not iterable"
+      return [];
     }
-    out.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-    return out;
   }
 
   getById(id: string): WorkItem | undefined {
@@ -125,38 +143,55 @@ export class RemoteWorkItemRepo implements WorkItemRepositoryPort {
   }
 
   async create(input: CreateWorkItemInput): Promise<ParseResult<WorkItem>> {
-    const res = await this.transport.handle({ method: "POST", path: "/api/v1/work-items", body: input as unknown as Record<string, unknown> });
-    if (res.status === 201) {
-      const body = res.body as { workItem: WorkItem };
-      const item = body.workItem;
-      this.cache.set(item.id, item);
-      this.notify();
-      return ParseResult.ok(item);
+    try {
+      const res = await this.transport.handle({ method: "POST", path: "/api/v1/work-items", body: input as unknown as Record<string, unknown> });
+      if (res.status === 201) {
+        const body = res.body as { workItem?: WorkItem; work_item?: WorkItem } & Record<string, unknown>;
+        const item = (body.workItem ?? body.work_item) as WorkItem | undefined;
+        if (item && typeof item.id === "string") {
+          this.cache.set(item.id, item);
+          this.notify();
+          return ParseResult.ok(item);
+        }
+        // Si el body no trae workItem pero status 201, error controlado
+        return ParseResult.singleFail("factoryName", "create succeeded but missing workItem in response", "invalid_response");
+      }
+      const body = res.body as { error?: string; code?: string; issues?: { path: string; message: string; code: string }[] };
+      const code = (body as unknown as Record<string, unknown>)?.code as string | undefined ?? "validation_error";
+      const message = (body as unknown as Record<string, unknown>)?.error as string | undefined ?? "create failed";
+      const issues = (body as unknown as Record<string, unknown>)?.issues as { path: string; message: string; code: string }[] | undefined ?? [{ path: "factoryName", message, code }];
+      return ParseResult.fail(issues);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return ParseResult.singleFail("factoryName", msg.includes("fetch") ? `network error: ${msg}` : msg, "network_error");
     }
-    const body = res.body as { error?: string; code?: string; issues?: { path: string; message: string; code: string }[] };
-    const code = body.code ?? "validation_error";
-    const message = body.error ?? "create failed";
-    const issues = body.issues ?? [{ path: "factoryName", message, code }];
-    return ParseResult.fail(issues);
   }
 
   async transition(id: string, to: WorkItemStage, actor: Actor, ctx: TransitionContext = {}): Promise<ParseResult<WorkItem>> {
-    const res = await this.transport.handle({
-      method: "POST",
-      path: `/api/v1/work-items/${id}/transition`,
-      body: { to, actor, ...ctx } as unknown as Record<string, unknown>,
-    });
-    if (res.status === 200) {
-      const body = res.body as { workItem: WorkItem };
-      const item = body.workItem;
-      this.cache.set(item.id, item);
-      this.notify();
-      return ParseResult.ok(item);
+    try {
+      const res = await this.transport.handle({
+        method: "POST",
+        path: `/api/v1/work-items/${id}/transition`,
+        body: { to, actor, ...ctx } as unknown as Record<string, unknown>,
+      });
+      if (res.status === 200) {
+        const body = res.body as { workItem?: WorkItem; work_item?: WorkItem } & Record<string, unknown>;
+        const item = (body.workItem ?? body.work_item) as WorkItem | undefined;
+        if (item && typeof item.id === "string") {
+          this.cache.set(item.id, item);
+          this.notify();
+          return ParseResult.ok(item);
+        }
+        return ParseResult.singleFail(id, "transition succeeded but missing workItem", "invalid_response");
+      }
+      const body = res.body as { error?: string; code?: string };
+      const code = (body as unknown as Record<string, unknown>)?.code as string | undefined ?? "transition_failed";
+      const message = (body as unknown as Record<string, unknown>)?.error as string | undefined ?? "transition failed";
+      return ParseResult.singleFail(id, message, code);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      return ParseResult.singleFail(id, msg, "network_error");
     }
-    const body = res.body as { error?: string; code?: string };
-    const code = body.code ?? "transition_failed";
-    const message = body.error ?? "transition failed";
-    return ParseResult.singleFail(id, message, code);
   }
 
   // O18: cancel persistido — usa transition a Cancelled y notifica, durable via backend

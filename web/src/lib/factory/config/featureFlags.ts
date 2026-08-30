@@ -29,6 +29,26 @@ export interface BackendConfig {
   readonly apiKey?: string;
 }
 
+/**
+ * Base URL efectiva para fetch — CSP-friendly.
+ * Si estamos en localhost (dev via Vite proxy) y el backend es localhost,
+ * devolvemos "" para que FetchTransport use URL relativa `/api/...` y eluda CSP
+ * (el proxy de vite.config.ts reenvía a :8787). En prod o si baseUrl es
+ * https://app.warp.dev, se mantiene absoluta.
+ * Nota: getBackendConfig().baseUrl sigue siendo absoluta para diagnóstico;
+ * esta helper es opt-in para transporte.
+ */
+export function getEffectiveBaseUrl(): string {
+  const raw = FACTORY_BACKEND_API_URL.replace(/\/$/, "");
+  if (typeof window !== "undefined") {
+    const host = window.location.hostname;
+    const isLocalPage = host === "localhost" || host === "127.0.0.1";
+    const isLocalBackend = raw.includes("localhost") || raw.includes("127.0.0.1");
+    if (isLocalPage && isLocalBackend) return "";
+  }
+  return raw;
+}
+
 export function getBackendConfig(): BackendConfig {
   const apiKey = (rawEnv?.VITE_WARP_API_KEY as string | undefined)?.trim() || undefined;
   return {

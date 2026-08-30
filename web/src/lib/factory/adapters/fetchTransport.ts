@@ -64,10 +64,16 @@ export class FetchTransport implements FactoryApiTransportPort {
 
   private buildUrl(req: ApiRequest): string {
     const query = req.query && Object.keys(req.query).length > 0 ? `?${new URLSearchParams(req.query).toString()}` : "";
+    // CSP-friendly: when page is on localhost and baseUrl points to localhost, use relative URL so Vite proxy handles it (avoids CSP connect-src block)
+    const isBrowserLocalhost =
+      typeof window !== "undefined" &&
+      (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1");
+    const isBaseLocalhost = this.baseUrl.includes("localhost") || this.baseUrl.includes("127.0.0.1");
+    const effectiveBase = isBrowserLocalhost && isBaseLocalhost ? "" : this.baseUrl;
     // req.path may already contain query (e.g. from router.dispatch path with ?search=) - in that case prefer req.path as is
     if (req.path.includes("?")) {
-      return `${this.baseUrl}${req.path}`;
+      return `${effectiveBase}${req.path}`;
     }
-    return `${this.baseUrl}${req.path}${query}`;
+    return `${effectiveBase}${req.path}${query}`;
   }
 }

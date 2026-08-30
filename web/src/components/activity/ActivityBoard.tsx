@@ -83,14 +83,17 @@ export function ActivityBoard() {
     loading?: boolean;
     error?: string;
   };
-  const { items, transition, cancel, store, loading, error } = workItemsState;
+  const { items: rawItems, transition, cancel, store, loading, error } = workItemsState;
+  // BugFix P0: workItems is not iterable — garantizar array incluso si hook/repo retornó undefined o ParseResult
+  const items: WorkItem[] = Array.isArray(rawItems) ? (rawItems as WorkItem[]) : [];
 
   const grouped = useMemo(() => {
     const map = new Map<WorkItemStage, WorkItem[]>();
     const stagesToShow: WorkItemStage[] = stages.length > 0 ? stages : includeTerminals ? [...ALL_STAGES] : [...ACTIVE_STAGES];
+    const safe = Array.isArray(items) ? items : [];
     for (const stage of stagesToShow) {
       // O18: items ya viene filtrado server-side (search/createdBy/includeTerminals) — no re-filtrar via getWorkItemStore
-      map.set(stage, (items as WorkItem[]).filter((it) => it.stage === stage));
+      map.set(stage, safe.filter((it) => it.stage === stage));
     }
     return map;
   }, [items, stages, includeTerminals]);
@@ -100,7 +103,9 @@ export function ActivityBoard() {
       ? (grouped.get("Triage")?.[0] ?? null)
       : selection === null
         ? null
-        : ((store.getById(selection) as unknown) ?? (items as unknown[]).find((it: unknown) => (it as { id: string }).id === selection) ?? null);
+        : ((store.getById(selection) as unknown) ??
+          (Array.isArray(items) ? (items as unknown[]).find((it: unknown) => (it as { id: string }).id === selection) : undefined) ??
+          null);
 
   function handleSelect(id: string) {
     setSelection(id);
@@ -120,7 +125,7 @@ export function ActivityBoard() {
     setCollapsed((prev) => ({ ...prev, [stage]: !prev[stage] }));
   }
 
-  const total = (items as WorkItem[]).length;
+  const total = Array.isArray(items) ? (items as WorkItem[]).length : 0;
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-panel">

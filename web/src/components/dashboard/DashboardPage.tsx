@@ -1,7 +1,7 @@
 import { useMemo } from "react";
 import { useWorkItems } from "../../lib/factory/hooks/useWorkItems";
 import { useFactoryBundle } from "../../lib/factory/hooks/useFactoryBundle";
-import { COST_BUCKETS, bucketCost, DASHBOARD_TOOLTIPS, deriveDashboardMetrics } from "../../lib/factory/domain/dashboard.derive";
+import { COST_BUCKETS, bucketCost, DASHBOARD_TOOLTIPS, deriveDashboardMetricsFromItems } from "../../lib/factory/domain/dashboard.derive";
 import { MetricCard } from "./MetricCard";
 
 function formatCost(value: number | null): string {
@@ -57,20 +57,17 @@ function BreakdownList({ data }: { data: Record<string, number> }) {
 }
 
 export function DashboardPage() {
-  // `items` is the reactive signal: it changes identity whenever the store mutates,
-  // so the memo below recomputes without calling store.getVersion() inside the dep array.
-  const { store, items } = useWorkItems({ includeTerminals: true });
+  const { items: rawItems } = useWorkItems({ includeTerminals: true });
+  const items = Array.isArray(rawItems) ? rawItems : [];
   const bundleResult = useFactoryBundle();
 
   const metrics = useMemo(() => {
-    // `items` is the reactivity signal: it gets a new identity on every store mutation,
-    // which is what makes these metrics recompute.
-    void items;
     const bundle = bundleResult.ok ? bundleResult.value! : null;
-    // DIP: inyecta store y bundle
-    const m = deriveDashboardMetrics(store, bundle);
-    return m;
-  }, [store, bundleResult, items]);
+    // BugFix: usar items directo (deriveDashboardMetricsFromItems) para soportar RemoteWorkItemRepo async
+    // deriveDashboardMetrics(store, bundle) haría store.list() sync y fallaría con Remote (Promise no iterable)
+    const safeItems = Array.isArray(items) ? (items as never) : ([] as never);
+    return deriveDashboardMetricsFromItems(safeItems as never, bundle);
+  }, [bundleResult, items]);
 
   // OCP: métricas nuevas aparecen sin tocar UI si se itera; aquí explicítamos las 9 de la tabla para nombres exactos
 

@@ -65,10 +65,11 @@ export function RunsPage({ scope, factoryName }: Props) {
   const [followupsMap, setFollowupsMap] = useState<Record<string, string[]>>(() => loadFollowups());
 
   // O18: live contra backend — useWorkItems con includeTerminals true (timeline durable)
-  const { items, transition } = useWorkItems({ includeTerminals: true }) as unknown as {
+  const { items: rawItems, transition } = useWorkItems({ includeTerminals: true }) as unknown as {
     items: ReturnType<typeof getWorkItemStore> extends { list: () => infer R } ? R : never;
     transition: (id: string, to: unknown, actor: unknown, ctx?: unknown) => Promise<unknown>;
   };
+  const items = Array.isArray(rawItems) ? rawItems : [];
 
   // Sync cancelled/followups across tabs (cross-client via storage event)
   useEffect(() => {

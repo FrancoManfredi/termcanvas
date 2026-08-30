@@ -3,8 +3,23 @@ import type { WorkItemFilter } from "../ports/factory.ports";
 import { useWorkItemStore, getDefaultStore } from "../store/workItemStore.context";
 import type { Actor, WorkItem, WorkItemStage, TransitionContext } from "../domain/workItem.types";
 import type { WorkItemRepositoryPort } from "../ports/factory.ports";
+import type { ParseResult } from "../domain/result";
 
 // O18: await MaybePromise + useSyncExternalStore — filtros contra backend + includeTerminals/server search
+// BugFix: garantizar que `items` siempre sea array (nunca undefined) incluso si el repo remoto falla o retorna ParseResult
+function toWorkItemArray(raw: unknown): readonly WorkItem[] {
+  if (Array.isArray(raw)) return raw as readonly WorkItem[];
+  if (raw == null) return [];
+  // Defensive: si por error el repo retornó ParseResult<WorkItem[]> (create vs list confusión)
+  if (typeof raw === "object" && raw !== null && "ok" in (raw as Record<string, unknown>)) {
+    const pr = raw as unknown as ParseResult<readonly WorkItem[]>;
+    if (pr.ok && Array.isArray(pr.value)) return pr.value as readonly WorkItem[];
+    return [];
+  }
+  // Any other truthy non-array → []
+  return [];
+}
+
 export function useWorkItems(filter: WorkItemFilter = {}) {
   const rawStore = useWorkItemStore();
   const store = rawStore as unknown as WorkItemRepositoryPort & {
@@ -28,9 +43,14 @@ export function useWorkItems(filter: WorkItemFilter = {}) {
 
   // Estado reactivo hidratado via await MaybePromise (Local sync | Remote async)
   const [items, setItems] = useState<readonly WorkItem[]>(() => {
-    const maybe = store.list({ stage, createdBy, search, factoryName, includeTerminals } as WorkItemFilter);
-    if (maybe instanceof Promise) return [];
-    return maybe as readonly WorkItem[];
+    try {
+      const maybe = store.list({ stage, createdBy, search, factoryName, includeTerminals } as WorkItemFilter);
+      if (maybe instanceof Promise) return [];
+      const arr = toWorkItemArray(maybe as unknown);
+      return Array.isArray(arr) ? arr : [];
+    } catch {
+      return [];
+    }
   });
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | undefined>(undefined);
@@ -41,15 +61,23 @@ export function useWorkItems(filter: WorkItemFilter = {}) {
     (async () => {
       try {
         // await MaybePromise — server-side search & includeTerminals via RemoteWorkItemRepo
-        const res = await Promise.resolve(
-          store.list({ stage, createdBy, search, factoryName, includeTerminals } as WorkItemFilter) as Promise<readonly WorkItem[]> | readonly WorkItem[]
+        const raw = await Promise.resolve(
+          store.list({ stage, createdBy, search, factoryName, includeTerminals } as WorkItemFilter) as
+            | Promise<readonly WorkItem[]>
+            | readonly WorkItem[]
+            | unknown
         );
+        const resolved = toWorkItemArray(raw as unknown);
         if (!cancelled) {
-          setItems(res as readonly WorkItem[]);
+          setItems(Array.isArray(resolved) ? resolved : []);
           setError(undefined);
         }
       } catch (e) {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+        if (!cancelled) {
+          // Garantizar nunca undefined: ante error, [] + mensaje
+          setItems([]);
+          setError(e instanceof Error ? e.message : String(e));
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -78,8 +106,8 @@ export function useWorkItems(filter: WorkItemFilter = {}) {
     [store]
   );
 
-  // memo para evitar re-renders innecesarios cuando filter no cambia
-  const stableItems = useMemo(() => items, [items]);
+  // memo para evitar re-renders innecesarios cuando filter no cambia + guard Array.isArray
+  const stableItems = useMemo(() => (Array.isArray(items) ? items : []), [items]);
 
   return { items: stableItems as WorkItem[], create, transition, cancel, store: rawStore, loading, error };
 }
@@ -99,15 +127,23 @@ export function useWorkItem(id: string) {
     () => store.getVersion()
   );
   const [item, setItem] = useState<WorkItem | undefined>(() => {
-    const maybe = store.getById(id);
-    if (maybe instanceof Promise) return undefined;
-    return maybe as WorkItem | undefined;
+    try {
+      const maybe = store.getById(id);
+      if (maybe instanceof Promise) return undefined;
+      return maybe as WorkItem | undefined;
+    } catch {
+      return undefined;
+    }
   });
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const res = await Promise.resolve(store.getById(id) as Promise<WorkItem | undefined> | WorkItem | undefined);
-      if (!cancelled) setItem(res as WorkItem | undefined);
+      try {
+        const res = await Promise.resolve(store.getById(id) as Promise<WorkItem | undefined> | WorkItem | undefined);
+        if (!cancelled) setItem(res as WorkItem | undefined);
+      } catch {
+        if (!cancelled) setItem(undefined);
+      }
     })();
     return () => {
       cancelled = true;
