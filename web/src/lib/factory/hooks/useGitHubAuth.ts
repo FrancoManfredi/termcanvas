@@ -1,10 +1,11 @@
 // useGitHubAuth — SRP: puente reactivo sobre GitHubAuthPort
 // DIP: no conoce fetch/window; solo el port
 // Fix H2: solo notify si cambió JSON distinto (adapter) + hook no depender version -> evita 542 req/2s
+// Fase 1: defaultPort ahora es LocalGitHubAuthAdapter (cliente-first via VITE_GITHUB_TOKEN)
 
 import { useCallback, useEffect, useSyncExternalStore, useState } from "react";
 import type { GitHubAuthPort, GitHubAuthState } from "../ports/github.ports";
-import { RemoteGitHubAuthAdapter } from "../adapters/githubAuth.adapter";
+import { LocalGitHubAuthAdapter } from "../adapters/githubAuth.adapter";
 
 export interface UseGitHubAuthApi {
   readonly status: GitHubAuthState;
@@ -41,7 +42,7 @@ export function useGitHubAuth(port?: GitHubAuthPort): UseGitHubAuthApi {
     };
   }, [authPort]);
 
-  // Sincronización optimista cuando adapter notifica (sin fetch extra): si es Remote y tiene cache, reflejar
+  // Sincronización optimista cuando adapter notifica (sin fetch extra): si tiene cache, reflejar
   useEffect(() => {
     // cuando version cambia, intentar sincronizar desde cache sin red si es posible
     const maybeCached = (authPort as unknown as { getCached?: () => GitHubAuthState }).getCached;
@@ -129,8 +130,8 @@ export function useGitHubAuth(port?: GitHubAuthPort): UseGitHubAuthApi {
   return { status, loading, connect, connectWithPat, refresh, disconnect };
 }
 
-// singleton default for simpler usage in steps
-let defaultPort: GitHubAuthPort = new RemoteGitHubAuthAdapter();
+// singleton default for simpler usage in steps — cliente-first via PAT local
+let defaultPort: GitHubAuthPort = new LocalGitHubAuthAdapter();
 
 export function setDefaultGitHubAuthPort(port: GitHubAuthPort): void {
   defaultPort = port;

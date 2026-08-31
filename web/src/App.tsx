@@ -11,7 +11,6 @@ import { StepStartup } from "./components/wizard/steps/StepStartup";
 import { DEFAULT_NAV_ITEM, assertNever } from "./nav";
 import type { NavItemId } from "./nav";
 import type { FactoryConfig } from "./components/wizard/wizard.types";
-import { useFigmaRepos } from "./lib/factory/hooks/useFigmaFixtures";
 
 const AgentsPage = lazy(() => import("./components/pages/agents/AgentsPage.container").then((m) => ({ default: m.AgentsPage })));
 const ActivityPage = lazy(() => import("./components/pages/activity/ActivityPage.container").then((m) => ({ default: m.ActivityPage })));
@@ -28,7 +27,6 @@ export default function App() {
   const [step, setStep] = useState<WizardStep>(1);
   const [activeItem, setActiveItem] = useState<NavItemId>(DEFAULT_NAV_ITEM);
   const [config, setConfigState] = useState<FactoryConfig>({ selectedRepo: null, factoryName: "", foremanName: "", description: "", agents: { triage: true, spec: true, code: true, review: true }, trackers: { linear: false, jira: false } });
-  const repos = useFigmaRepos();
   const factoryName = config.factoryName || "My factory";
   const setConfig = useCallback((p: Partial<FactoryConfig>) => setConfigState((prev) => ({ ...prev, ...p })), []);
   const goNext = useCallback(() => setStep((s) => Math.min(s + 1, 6) as WizardStep), []);
@@ -66,7 +64,7 @@ export default function App() {
     return (
       <WizardShell onExit={() => setStep(1)} step={step} total={5}>
         {step === 1 && <StepConnectHost onNext={goNext} />}
-        {step === 2 && <StepSelectRepo repos={repos} selectedId={config.selectedRepo?.id ?? null} onSelect={(r) => setConfig({ selectedRepo: r })} onNext={goNext} onBack={goBack} />}
+        {step === 2 && <StepSelectRepo selectedId={config.selectedRepo?.id ?? null} onSelect={(r) => setConfig({ selectedRepo: r })} onNext={goNext} onBack={goBack} />}
         {step === 3 && <StepPersonality config={config} onChange={setConfig} onNext={goNext} onBack={goBack} />}
         {step === 4 && <StepConfigureAgents config={config} onChange={setConfig} onNext={goNext} onBack={goBack} />}
         {step === 5 && <StepTrackers config={config} onChange={setConfig} onNext={() => setStep(6)} onBack={goBack} />}

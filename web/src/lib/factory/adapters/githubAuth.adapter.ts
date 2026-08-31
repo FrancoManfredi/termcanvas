@@ -2,9 +2,11 @@
 // DIP: implementa GitHubAuthPort sin exponer fetch/window al dominio
 // Source: ADR-003 Q1+Q2+Q6 (BFF, hybrid, postMessage + polling fallback)
 // Fix H2: solo notify si JSON distinto • H3: guard _pending + single interval + once + cleanup • H1: startAuth 503 throw
+// Fase 1: LocalGitHubAuthAdapter ahora valida VITE_GITHUB_TOKEN contra api.github.com
 
 import type { GitHubAuthPort, GitHubAuthState } from "../ports/github.ports";
 import { GITHUB_AUTH_POLL_INTERVAL_MS, GITHUB_AUTH_POLL_MAX_MS } from "../ports/github.ports";
+import { getEffectivePat, hasEnvPat } from "../config/githubToken";
 
 function getBasePath(): string {
   return "";
@@ -378,13 +380,53 @@ function clearLocalPatSession(): void {
   }
 }
 
+async function validatePatWithGitHub(pat: string): Promise<{ login: string; avatar_url: string }> {
+  const res = await fetch("https://api.github.com/user", {
+    headers: { authorization: `token ${pat}`, accept: "application/vnd.github+json", "user-agent": "termcanvas" },
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    const err = new Error(text || `GitHub /user failed ${res.status}`) as Error & { status?: number };
+    err.status = res.status;
+    throw err;
+  }
+  return (await res.json()) as { login: string; avatar_url: string };
+}
+
 export class LocalGitHubAuthAdapter implements GitHubAuthPort {
   private state: GitHubAuthState = (() => {
+    try {
+      if (typeof window !== "undefined" && hasEnvPat()) {
+        return { connected: false, status: "connecting" as const };
+      }
+    } catch {
+      // ignore
+    }
     const cached = typeof window !== "undefined" ? readLocalPatSession() : null;
     return cached ?? { connected: false, status: "idle" };
   })();
   private listeners = new Set<() => void>();
   private version = 0;
+  private _lastNotifiedJson: string = serializeState(this.state);
+  // simple cache: evitar revalidar si mismo pat y <30s
+  private _lastValidatedPat: string | null = null;
+  private _lastValidatedAt = 0;
+
+  private notifyIfChanged(next: GitHubAuthState): void {
+    const nextJson = serializeState(next);
+    this.state = next;
+    if (nextJson !== this._lastNotifiedJson) {
+      this._lastNotifiedJson = nextJson;
+      this.version += 1;
+      for (const cb of [...this.listeners]) cb();
+    }
+  }
+
+  private notify(): void {
+    this._lastNotifiedJson = serializeState(this.state);
+    this.version += 1;
+    for (const cb of [...this.listeners]) cb();
+  }
 
   subscribe(cb: () => void): () => void {
     this.listeners.add(cb);
@@ -393,64 +435,108 @@ export class LocalGitHubAuthAdapter implements GitHubAuthPort {
   getVersion(): number {
     return this.version;
   }
+
   async getStatus(): Promise<GitHubAuthState> {
-    // si hay PAT guardado, revalidar silenciosamente cada vez? por ahora devolver cache
-    return this.state;
+    const pat = getEffectivePat();
+    if (pat) {
+      // cache 30s: si mismo pat y reciente, devolver cache sin fetch
+      const now = Date.now();
+      if (this._lastValidatedPat === pat && now - this._lastValidatedAt < 30_000 && this.state.connected) {
+        return this.state;
+      }
+      try {
+        const data = await validatePatWithGitHub(pat);
+        const next: GitHubAuthState = {
+          connected: true,
+          status: "connected",
+          username: data.login,
+          avatarUrl: data.avatar_url,
+          scope: "repo",
+        };
+        this._lastValidatedPat = pat;
+        this._lastValidatedAt = now;
+        this.notifyIfChanged(next);
+        return next;
+      } catch (e) {
+        const status = (e as unknown as { status?: number })?.status;
+        let msg: string;
+        if (status === 401) {
+          msg = "Token inválido o expirado (401) — revisá VITE_GITHUB_TOKEN en web/.env y reiniciá vite";
+        } else if (status === 403 || status === 429) {
+          msg = "Rate limited — esperá un minuto";
+        } else {
+          const raw = e instanceof Error ? e.message : String(e);
+          const isNetwork = raw.includes("Failed to fetch") || raw.includes("NetworkError") || raw.includes("fetch failed");
+          msg = isNetwork ? `Network error — verificá conexión: ${raw.slice(0, 120)}` : raw.slice(0, 200) || `GitHub /user falló ${status ?? "error"}`;
+          if (status && !msg.includes(String(status))) msg = `GitHub /user falló ${status} — ${msg}`;
+        }
+        const next: GitHubAuthState = { connected: false, status: "error", error: msg };
+        this.notifyIfChanged(next);
+        return next;
+      }
+    }
+    // Sin PAT -> modo demo idle (siempre desconectado)
+    // Si había un estado conectado previo de localStorage pero ahora no hay pat, limpiar
+    const idle: GitHubAuthState = { connected: false, status: "idle" };
+    // Solo notificar si cambió
+    if (this.state.connected || this.state.status !== "idle") {
+      this.notifyIfChanged(idle);
+    }
+    return idle;
   }
+
   async startAuth(): Promise<string> {
     return "";
   }
-  // Para modo local sin PAT — simula OAuth demo (se usa solo si no hay PAT)
+
   async connectWithPopup(): Promise<GitHubAuthState> {
+    const pat = getEffectivePat();
+    if (pat) {
+      return this.getStatus();
+    }
     this.state = { connected: false, status: "connecting" };
-    this.version += 1;
-    for (const cb of [...this.listeners]) cb();
+    this.notify();
     await new Promise((r) => setTimeout(r, 500));
-    this.state = { connected: true, status: "connected", username: "demo", avatarUrl: "", scope: "demo" };
-    this.version += 1;
-    for (const cb of [...this.listeners]) cb();
-    return this.state;
+    const next: GitHubAuthState = { connected: true, status: "connected", username: "demo", avatarUrl: "", scope: "demo" };
+    this.notifyIfChanged(next);
+    return next;
   }
 
   async connectWithPat(token: string): Promise<GitHubAuthState> {
     const t = token.trim();
     if (!t) {
       const next: GitHubAuthState = { connected: false, status: "error", error: "Token vacío" };
-      this.state = next;
-      this.version += 1;
-      for (const cb of [...this.listeners]) cb();
+      this.notifyIfChanged(next);
       return next;
     }
     this.state = { connected: false, status: "connecting" };
-    this.version += 1;
-    for (const cb of [...this.listeners]) cb();
+    this.notify();
     try {
-      // validar directo contra GitHub API (sin pasar por server) — ideal para uso personal local
-      const res = await fetch("https://api.github.com/user", {
-        headers: { authorization: `token ${t}`, accept: "application/vnd.github+json", "user-agent": "termcanvas" },
-      });
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        const msg = res.status === 401 ? "Token inválido o expirado (401) — revisá que lo copiaste completo" : `GitHub /user falló ${res.status} ${text.slice(0, 100)}`;
-        const next: GitHubAuthState = { connected: false, status: "error", error: msg };
-        this.state = next;
-        this.version += 1;
-        for (const cb of [...this.listeners]) cb();
-        return next;
-      }
-      const data = (await res.json()) as { login: string; avatar_url: string };
-      const next: GitHubAuthState = { connected: true, status: "connected", username: data.login, avatarUrl: data.avatar_url, scope: "repo" };
-      this.state = next;
+      const data = await validatePatWithGitHub(t);
+      const next: GitHubAuthState = {
+        connected: true,
+        status: "connected",
+        username: data.login,
+        avatarUrl: data.avatar_url,
+        scope: "repo",
+      };
       writeLocalPatSession(data.login, data.avatar_url, t);
-      this.version += 1;
-      for (const cb of [...this.listeners]) cb();
+      this._lastValidatedPat = getEffectivePat();
+      this._lastValidatedAt = Date.now();
+      this.notifyIfChanged(next);
       return next;
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
+      const status = (e as unknown as { status?: number })?.status;
+      let msg: string;
+      if (status === 401) {
+        msg = "Token inválido o expirado (401) — revisá que lo copiaste completo";
+      } else if (status === 403 || status === 429) {
+        msg = "Rate limited — esperá un minuto";
+      } else {
+        msg = e instanceof Error ? e.message : String(e);
+      }
       const next: GitHubAuthState = { connected: false, status: "error", error: msg };
-      this.state = next;
-      this.version += 1;
-      for (const cb of [...this.listeners]) cb();
+      this.notifyIfChanged(next);
       return next;
     }
   }
@@ -458,10 +544,21 @@ export class LocalGitHubAuthAdapter implements GitHubAuthPort {
   getCached(): GitHubAuthState {
     return this.state;
   }
+
   async logout(): Promise<void> {
-    this.state = { connected: false, status: "idle" };
     clearLocalPatSession();
-    this.version += 1;
-    for (const cb of [...this.listeners]) cb();
+    this._lastValidatedPat = null;
+    this._lastValidatedAt = 0;
+    // Si hay token en env, logout no desconecta env (queda connecting/connected en próximo getStatus)
+    // pero por ahora pasamos a idle; el próximo getStatus revalidará env y volverá a connected si es válido.
+    // Esto evita que UI quede "pegada" en connected tras logout intencional en demo.
+    if (hasEnvPat()) {
+      // Limpiar cache local pero mantener estado idle hasta próxima validación
+      const idle: GitHubAuthState = { connected: false, status: "idle" };
+      this.notifyIfChanged(idle);
+      return;
+    }
+    const next: GitHubAuthState = { connected: false, status: "idle" };
+    this.notifyIfChanged(next);
   }
 }

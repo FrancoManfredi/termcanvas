@@ -1,41 +1,35 @@
-import {
-  MOCK_REPOS,
-  DEFAULT_AGENTS,
-  MOCK_WORK_ITEMS,
-  MOCK_RUNS,
-  MOCK_AUTOMATIONS,
-  MOCK_SCORERS,
-  JUDGE_MODELS,
-  STAGE_META,
-  AGENTS_SETUP,
-  PIPELINE,
-  TYPE_MAP,
-} from "../fixtures/figma.fixtures";
+// useFigmaFixtures — DIP facade.
+// Los componentes consumen SOLO estos hooks; NUNCA importan MOCK_* directamente.
+// El dato ahora fluye por CollectionPort (adaptador respaldado por fixtures), de modo que
+// la fuente puede intercambiarse por un backend real sin tocar ningún componente.
+// Los repos usan además el port REAL GitHubReposPort (LocalGitHubReposAdapter) con fallback de fixtures.
+
+import { DEFAULT_AGENTS, JUDGE_MODELS, STAGE_META, AGENTS_SETUP, PIPELINE, TYPE_MAP } from "../fixtures/figma.fixtures";
 import type { Repo, Agent, WorkItem, Run, Automation, Scorer } from "../fixtures/figma.fixtures";
+import { useCollection } from "./useCollection";
+import { agentsPort, runsPort, automationsPort, scorersPort, workItemsPort } from "../fixtures/figma.ports";
+import { useRepoList } from "./useGitHubRepos";
 
+// ─── Datos vía port (intercambiable por backend real) ───────────────────────
 export function useFigmaRepos(): readonly Repo[] {
-  return MOCK_REPOS;
+  return useRepoList();
 }
-
 export function useFigmaAgents(): readonly Agent[] {
-  return DEFAULT_AGENTS;
+  return useCollection(agentsPort);
 }
-
 export function useFigmaWorkItems(): readonly WorkItem[] {
-  return MOCK_WORK_ITEMS;
+  return useCollection(workItemsPort);
 }
-
 export function useFigmaRuns(): readonly Run[] {
-  return MOCK_RUNS;
+  return useCollection(runsPort);
 }
-
 export function useFigmaAutomations(): readonly Automation[] {
-  return MOCK_AUTOMATIONS;
+  return useCollection(automationsPort);
 }
-
 export function useFigmaScorers(): readonly Scorer[] {
-  return MOCK_SCORERS;
+  return useCollection(scorersPort);
 }
 
-export { JUDGE_MODELS, STAGE_META, AGENTS_SETUP, PIPELINE, TYPE_MAP };
+// ─── Config / constantes de producto (no son datos mock) ────────────────────
+export { DEFAULT_AGENTS, JUDGE_MODELS, STAGE_META, AGENTS_SETUP, PIPELINE, TYPE_MAP };
 export type { Repo, Agent, WorkItem, Run, Automation, Scorer };

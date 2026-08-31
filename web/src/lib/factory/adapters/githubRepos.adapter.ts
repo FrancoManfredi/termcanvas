@@ -1,8 +1,11 @@
-// githubRepos.adapter — SRP: repo listing real vía BFF
-// DIP: implementa GitHubReposPort; no toca window/localStorage
+// githubRepos.adapter — SRP: repo listing real vía BFF o directo a api.github.com
+// DIP: implementa GitHubReposPort; no toca window/localStorage salvo via config helper
+// Fase 1: prioridad VITE_GITHUB_TOKEN > localStorage > demo
 
 import { ParseResult } from "../domain/result";
 import type { GitHubRepo, GitHubReposPort } from "../ports/github.ports";
+import { getEffectivePat } from "../config/githubToken";
+import { DEMO_REPOS } from "../domain/quickstart.data";
 
 export class RemoteGitHubReposAdapter implements GitHubReposPort {
   async listRepos(opts?: { page?: number; perPage?: number; search?: string }): Promise<ParseResult<readonly GitHubRepo[]>> {
@@ -62,23 +65,10 @@ export class RemoteGitHubReposAdapter implements GitHubReposPort {
   }
 }
 
-const LOCAL_PAT_STORAGE_KEY_REPOS = "github_pat_session";
-
-function getLocalPat(): string | null {
-  try {
-    const raw = localStorage.getItem(LOCAL_PAT_STORAGE_KEY_REPOS);
-    if (!raw) return null;
-    const data = JSON.parse(raw) as { token?: string };
-    return data.token ?? null;
-  } catch {
-    return null;
-  }
-}
-
 export class LocalGitHubReposAdapter implements GitHubReposPort {
   async listRepos(opts?: { perPage?: number; page?: number; search?: string }): Promise<ParseResult<readonly GitHubRepo[]>> {
-    const pat = typeof window !== "undefined" ? getLocalPat() : null;
-    // Si hay PAT personal, listar repos reales directo contra GitHub API (sin server)
+    const pat = typeof window !== "undefined" ? getEffectivePat() : null;
+    // Si hay PAT (env o storage), listar repos reales directo contra GitHub API (sin server)
     if (pat) {
       const perPage = Math.min(Math.max(opts?.perPage ?? 30, 1), 100);
       const page = Math.max(opts?.page ?? 1, 1);
@@ -126,7 +116,6 @@ export class LocalGitHubReposAdapter implements GitHubReposPort {
       }
     }
     // Sin PAT → demo repos (modo irrompible)
-    const { DEMO_REPOS } = await import("../domain/quickstart.data");
     let repos: readonly import("../domain/types").RepositoryRef[] = DEMO_REPOS;
     if (opts?.search?.trim()) {
       const q = opts.search.trim().toLowerCase();

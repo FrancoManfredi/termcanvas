@@ -291,10 +291,11 @@ export class FactoryWorkspaceStore {
         this.order.push(record.uid);
       }
       this.selectedUid = previous.selectedUid;
-      if (result.quotaExceeded) {
+      const failure = result as { ok: false; quotaExceeded?: boolean; message?: string };
+      if (failure.quotaExceeded) {
         return ParseResult.singleFail<void>("storage", "storage quota exceeded", "quota_exceeded");
       }
-      return ParseResult.singleFail<void>("storage", result.message, "write_error");
+      return ParseResult.singleFail<void>("storage", failure.message ?? "write_error", "write_error");
     }
     try {
       const v1Payload = { selectedUid: toPersist.selectedUid, factories: toPersist.factories };
