@@ -69,8 +69,8 @@ export const siteCopy = {
         },
         {
           label: "03",
-          title: "Hydra 编排系统",
-          body: "Lead-driven decider 模式：你在结构化决策点做判断，Hydra 处理 dispatch / watch / merge 的运维，专为 LLM 决策者特化。",
+          title: "编排系统",
+          body: "Lead-driven decider 模式：你在结构化决策点做判断，系统处理任务分发与合并的运维，专为 LLM 决策者特化。",
         },
         {
           label: "04",
@@ -80,7 +80,7 @@ export const siteCopy = {
       ],
       hubEyebrow: "Pin 工作流",
       hubBody:
-        "把本地 insight 整理成可交接的上下文包，再交给 agent、人或 Hydra headless 流水线继续执行。长期项目的线索不再丢在聊天记录和终端历史里。",
+        "把本地 insight 整理成可交接的上下文包，再交给 agent、人或 headless 流水线继续执行。长期项目的线索不再丢在聊天记录和终端历史里。",
       hubAlt: "TermCanvas Pin 工作流与项目上下文交接",
     },
     articles: {
@@ -142,8 +142,8 @@ export const siteCopy = {
         },
         {
           label: "03",
-          title: "Hydra orchestration",
-          body: "A lead-driven decider workflow for dispatch, watch, and merge loops. Hydra keeps long-running agent work structured without hiding decisions.",
+          title: "Orchestration",
+          body: "A lead-driven decider workflow for dispatch, watch, and merge loops. The system keeps long-running agent work structured without hiding decisions.",
         },
         {
           label: "04",
@@ -153,7 +153,7 @@ export const siteCopy = {
       ],
       hubEyebrow: "Pin workflow",
       hubBody:
-        "Turn local insight into a handoff packet that an agent, a human, or a Hydra headless pipeline can continue from. Long-running project context no longer disappears into chat logs and terminal scrollback.",
+        "Turn local insight into a handoff packet that an agent, a human, or a headless pipeline can continue from. Long-running project context no longer disappears into chat logs and terminal scrollback.",
       hubAlt: "TermCanvas pin workflow with project context and agent handoff",
     },
     articles: {

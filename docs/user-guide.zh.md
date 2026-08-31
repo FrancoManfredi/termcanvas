@@ -378,7 +378,6 @@ App 内的 Pin 抽屉读取同一份存储,带一键状态切换。看到什么�
 
 这些是给重度用户的,基础玩熟再看。
 
-- **Hydra orchestration** — Lead agent 在多个平行 worktree 里把子任务分发给 worker agent。在 worktree 头部 "Enable Hydra" 按钮启用,会把编排指令写进项目的 `CLAUDE.md` / `AGENTS.md`,让 agent 知道怎么用 `hydra dispatch / watch / merge`。`hydra` CLI 和 app 分离 —— 在 agent terminal 里调,不在 UI 里。完整设计见 [`docs/hydra-orchestration.md`](./hydra-orchestration.md)。
 - **活动热力图(`⌘⇧A`)** — 每个 tile 上画一条 5 分钟输出量 sparkline,扫一眼 canvas 就知道哪些 agent 现在在干活。开关式。
 - **飞向最近活动(`⌥` + `` ` ``)** — 把镜头飞到最近有 PTY 输出的终端。重复按等于在最近活跃集合里 LRU 循环,Alt-Tab 风格。
 - **Telemetry** — 每个 terminal 都发生命周期事件(awaiting-input / tool-running / stall / completion)。这些驱动 pet、状态点、注意力队列、Hub、`⌘K` 会话搜索。设置 → 通用 里可以整体关掉。

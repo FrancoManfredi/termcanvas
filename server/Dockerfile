@@ -15,7 +15,6 @@ RUN pnpm install --frozen-lockfile --ignore-scripts
 # Copy source
 COPY tsconfig.headless.build.json ./
 COPY headless-runtime/ headless-runtime/
-COPY hydra/ hydra/
 COPY electron/pty-manager.ts electron/pty-launch.ts electron/telemetry-service.ts \
      electron/process-detector.ts electron/session-watcher.ts electron/project-scanner.ts \
      electron/git-diff.ts electron/memory-service.ts electron/memory-index-generator.ts \

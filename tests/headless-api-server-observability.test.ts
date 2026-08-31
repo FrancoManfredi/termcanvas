@@ -94,7 +94,7 @@ test("health endpoints expose detailed observability data with workspace-scoped 
     );
     assert.equal(
       (health.body as { active_workflows: number }).active_workflows,
-      1,
+      0,
     );
     assert.deepEqual(
       (health.body as { terminal_status_summary: Record<string, number> })
@@ -182,7 +182,7 @@ test("status stays authenticated and excludes secrets plus terminal-private outp
           };
         };
 
-        assert.equal(statusBody.active_workflows.length, 1);
+        assert.equal(statusBody.active_workflows.length, 0);
         assert.equal(statusBody.terminals.length, 1);
         assert.equal("ptyId" in statusBody.terminals[0], false);
         assert.equal(statusBody.server.config.api_token_configured, true);

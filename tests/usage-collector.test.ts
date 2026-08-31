@@ -387,9 +387,9 @@ const sampleClaudeMessage = [
   },
 ];
 
-test("parseClaudeSession maps Hydra .worktrees path to parent project", () => {
+test("parseClaudeSession maps .worktrees path to parent project", () => {
   const { filePath, dir } = writeClaudeJsonl(
-    "-tmp-test-proj-.worktrees-hydra-abc123",
+    "-tmp-test-proj-.worktrees-abc123",
     sampleClaudeMessage,
   );
 

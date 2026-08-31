@@ -872,10 +872,6 @@ export interface TermCanvasAPI {
     deleteFolder: (
       projectPath: string,
     ) => Promise<{ ok: true } | { ok: false; error: string }>;
-    enableHydra: (dirPath: string) => Promise<ProjectEnableHydraResult>;
-    checkHydra: (
-      dirPath: string,
-    ) => Promise<"missing" | "outdated" | "current">;
     diff: (worktreePath: string) => Promise<{
       diff: string;
       files: {

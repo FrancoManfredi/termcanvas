@@ -17,15 +17,11 @@ import path from "node:path";
  */
 export function resolveMainRepoRoot(repoPath: string): string {
   try {
-    const commonDir = execFileSync(
-      "git",
-      ["rev-parse", "--git-common-dir"],
-      {
-        cwd: repoPath,
-        encoding: "utf-8",
-        stdio: ["ignore", "pipe", "ignore"],
-      },
-    ).trim();
+    const commonDir = execFileSync("git", ["rev-parse", "--git-common-dir"], {
+      cwd: repoPath,
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+    }).trim();
     if (commonDir) {
       // git prints the common dir relative to cwd; resolve against the
       // input path so both relative (".git") and absolute ("C:/repo/.git")
@@ -36,4 +32,33 @@ export function resolveMainRepoRoot(repoPath: string): string {
     // Not a git repo — nothing to anchor to.
   }
   return path.resolve(repoPath);
+}
+
+export function buildGitWorktreeRemoveArgs(worktreePath: string): string[] {
+  return ["worktree", "remove", worktreePath, "--force"];
+}
+
+export function buildGitWorktreeAddArgs(
+  branch: string,
+  worktreePath: string,
+  baseBranch: string,
+): string[] {
+  return ["worktree", "add", "-b", branch, worktreePath, baseBranch];
+}
+
+export function validateWorktreePath(
+  repoPath: string,
+  worktreePath: string,
+): string {
+  const resolvedRepo = path.resolve(repoPath);
+  const resolvedWorktree = path.resolve(worktreePath);
+  const relative = path.relative(resolvedRepo, resolvedWorktree);
+
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(
+      `Worktree must be inside the repo: ${resolvedWorktree} is not under ${resolvedRepo}`,
+    );
+  }
+
+  return resolvedWorktree;
 }

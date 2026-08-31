@@ -6,12 +6,12 @@ import type { PtyManager } from "./pty-manager";
 import type { ProjectScanner } from "./project-scanner";
 import { getApiDiff } from "./git-diff";
 import type { TelemetryService } from "./telemetry-service";
-import { buildGitWorktreeRemoveArgs } from "../hydra/src/cleanup";
 import {
   buildGitWorktreeAddArgs,
+  buildGitWorktreeRemoveArgs,
+  resolveMainRepoRoot,
   validateWorktreePath,
-} from "../hydra/src/spawn";
-import { resolveMainRepoRoot } from "../hydra/src/worktree-path";
+} from "./worktree-helpers.ts";
 import { PinStore, PinStoreError } from "./pin-store";
 import { resolveCanvasProjectRoot } from "./pin-project-resolver";
 import { renderPinToPng } from "./pin-render";

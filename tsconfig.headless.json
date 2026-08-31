@@ -24,7 +24,6 @@
     "electron/git-diff.ts",
     "electron/memory-service.ts",
     "electron/memory-index-generator.ts",
-    "shared",
-    "hydra/src"
+    "shared"
   ]
 }

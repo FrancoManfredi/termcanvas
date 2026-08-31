@@ -14,7 +14,6 @@ import {
   createPersistenceController,
 } from "./lifecycle.ts";
 import { sanitizeProjectsForPersistence } from "./persisted-projects.ts";
-import { listActiveWorkflowSummaries } from "./workflow-status.ts";
 import {
   resolveTermCanvasPortFile,
   resolveTermCanvasInstance,
@@ -154,17 +153,12 @@ async function main(): Promise<void> {
       getPayload: () => {
         const mem = process.memoryUsage();
         const terminals = projectStore.listTerminals();
-        const activeWorkflows = listActiveWorkflowSummaries({
-          workspaceDir: config.workspaceDir,
-          projectPaths: projectStore.getProjects().map((project) => project.path),
-        });
-        const primaryWorkflow = activeWorkflows[0];
         return {
-          workflow_status: primaryWorkflow?.status ?? "idle",
-          current_assignment: primaryWorkflow?.active_node_ids?.[0] ?? null,
+          workflow_status: "idle",
+          current_assignment: null,
           telemetry_snapshot: {
             active_terminals: terminals.length,
-            active_workflows: activeWorkflows.length,
+            active_workflows: 0,
           },
           resource_usage: {
             memory_mb: Math.round(mem.rss / (1024 * 1024)),

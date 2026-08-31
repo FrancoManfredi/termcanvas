@@ -92,8 +92,6 @@ export const zh = {
   repo_context_cancel: "取消",
   repo_context_path_label: "保存到",
   left_panel_repo: "仓库",
-  left_panel_enable_hydra: "Hydra",
-  left_panel_enable_hydra_busy: "启用中…",
   no_worktree_selected: "未选择工作树",
   memory_loading: "加载记忆中…",
   memory_empty: "未找到记忆文件",
@@ -239,11 +237,6 @@ export const zh = {
   search_action_tab_git: "显示 Git",
   search_action_tab_diff: "显示差异",
   search_action_tab_memory: "显示记忆",
-  hydra_enable_missing_target: "请先聚焦一个项目或工作树，再启用 Hydra。",
-  hydra_enable_success: (name: string) => `已为“${name}”启用 Hydra。`,
-  hydra_enable_already_current: (name: string) =>
-    `“${name}”的 Hydra 指令已经是最新版本。`,
-  hydra_enable_failed: (message: string) => `启用 Hydra 失败：${message}`,
 
   terminal_api_unavailable: "终端 API 不可用，未在 Electron 中运行。",
   failed_create_pty: (title: string, err: unknown) =>
@@ -458,8 +451,7 @@ export const zh = {
   cli_registering: "注册中…",
   cli_unregistering: "取消注册中…",
   cli_register_failed: "启用命令行集成失败",
-  cli_register_skill_failed:
-    "命令行已注册，但 skill 注入失败。由 Hydra 管理的 agent 可能缺失 hydra 专属指引。",
+  cli_register_skill_failed: "命令行已注册，但 skill 注入失败。",
   cli_unregister_failed: "关闭命令行集成失败",
 
   settings_agents: "Agent",
@@ -817,10 +809,6 @@ export const zh = {
   "discovery.search.action": "试试搜索",
   "discovery.pinning.message": "把任务钉起来,触手可及。",
   "discovery.pinning.action": "打开钉板",
-  "discovery.hydra.missing.message": "未启用 Hydra —— 多智能体工作流不可用。",
-  "discovery.hydra.missing.action": "启用",
-  "discovery.hydra.outdated.message": "Hydra 工作流说明已过期。",
-  "discovery.hydra.outdated.action": "更新",
   "discovery.palette.message": "用名字找任何东西。",
   "discovery.palette.action": "打开命令面板",
   "discovery.panRecent.message": "别处刚有新输出 —— 一键飞过去。",

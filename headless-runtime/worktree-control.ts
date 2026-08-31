@@ -1,12 +1,12 @@
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import type { ProjectScanner } from "../electron/project-scanner.ts";
-import { buildGitWorktreeRemoveArgs } from "../hydra/src/cleanup.ts";
 import {
   buildGitWorktreeAddArgs,
+  buildGitWorktreeRemoveArgs,
+  resolveMainRepoRoot,
   validateWorktreePath,
-} from "../hydra/src/spawn.ts";
-import { resolveMainRepoRoot } from "../hydra/src/worktree-path.ts";
+} from "./worktree-helpers.ts";
 import type { ProjectStore } from "./project-store.ts";
 import { ensureProjectTracked } from "./project-sync.ts";
 

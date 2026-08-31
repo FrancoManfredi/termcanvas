@@ -1,4 +1,4 @@
-> **注记（2026-04-17）**  本文是一篇设计随笔，写于 Hydra 早期概念探索阶段。文中对 Hydra 当前实现的具体描述——包括 Sprint Contract、Planner / Implementer / Evaluator 角色预设、Plan Approval Gate 等——属于**设计期设想**，**并非当前代码中已经存在的机制**。当前 Hydra 的实际接口以 [Hydra Orchestration Guide](docs/hydra-orchestration.md) 和二进制自身的 `--help` 输出为准。本文保留的是当时的设计思考脉络，可以作为回顾背景阅读，但不要据此推断 Hydra 的具体能力边界。
+> **注记（2026-04-17）**  本文是一篇设计随笔，写于早期概念探索阶段。文中对相关实现的具体描述——包括 Sprint Contract、Planner / Implementer / Evaluator 角色预设、Plan Approval Gate 等——属于**设计期设想**，**并非当前代码中已经存在的机制**。当前实际接口以二进制自身的 `--help` 输出为准。本文保留的是当时的设计思考脉络，可以作为回顾背景阅读，但不要据此推断具体能力边界。
 
 ---
 

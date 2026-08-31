@@ -222,12 +222,12 @@ test("diagnostic payload includes activity source and ms-since-last-activity", (
   });
   coord.start();
 
-  coord.markActivity("hydra");
+  coord.markActivity("test");
   clock.tick(20_000);
 
   assert.equal(events.length, 2);
-  assert.equal(events[0].data?.last_activity_source, "hydra");
-  assert.equal(events[1].data?.last_activity_source, "hydra");
+  assert.equal(events[0].data?.last_activity_source, "test");
+  assert.equal(events[1].data?.last_activity_source, "test");
   assert.equal(typeof events[1].data?.ms_since_last_activity, "number");
   assert.ok(
     (events[1].data?.ms_since_last_activity as number) >= 10_000,

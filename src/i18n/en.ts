@@ -92,8 +92,6 @@ export const en = {
   repo_context_cancel: "Cancel",
   repo_context_path_label: "Saved to",
   left_panel_repo: "Repo",
-  left_panel_enable_hydra: "Hydra",
-  left_panel_enable_hydra_busy: "Enabling\u2026",
   no_worktree_selected: "No worktree selected",
   memory_loading: "Loading memories...",
   memory_empty: "No memory files found.",
@@ -241,13 +239,6 @@ export const en = {
   search_action_tab_git: "Show Git",
   search_action_tab_diff: "Show Diff",
   search_action_tab_memory: "Show Memory",
-  hydra_enable_missing_target:
-    "Focus a project or worktree before enabling Hydra.",
-  hydra_enable_success: (name: string) => `Hydra enabled for "${name}".`,
-  hydra_enable_already_current: (name: string) =>
-    `Hydra instructions are already current for "${name}".`,
-  hydra_enable_failed: (message: string) =>
-    `Failed to enable Hydra: ${message}`,
 
   terminal_api_unavailable:
     "Terminal API not available. Not running in Electron.",
@@ -468,8 +459,7 @@ export const en = {
   cli_registering: "Registering\u2026",
   cli_unregistering: "Unregistering\u2026",
   cli_register_failed: "Failed to enable CLI integration",
-  cli_register_skill_failed:
-    "CLI registered, but skill injection failed. Hydra-managed agents may miss hydra-specific guidance.",
+  cli_register_skill_failed: "CLI registered, but skill injection failed.",
   cli_unregister_failed: "Failed to disable CLI integration",
 
   settings_agents: "Agents",
@@ -838,10 +828,6 @@ export const en = {
   "discovery.search.action": "Try search",
   "discovery.pinning.message": "Pin tasks to keep them in reach.",
   "discovery.pinning.action": "Open pins",
-  "discovery.hydra.missing.message": "Hydra not set up — multi-agent workflows are off.",
-  "discovery.hydra.missing.action": "Enable",
-  "discovery.hydra.outdated.message": "Hydra instructions are out of date.",
-  "discovery.hydra.outdated.action": "Update",
   "discovery.palette.message": "Find anything by name.",
   "discovery.palette.action": "Open palette",
   "discovery.panRecent.message": "Output landed elsewhere — fly to it.",

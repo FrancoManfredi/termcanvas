@@ -61,7 +61,6 @@ Last updated: 2026-08-08
 | `frontend-design` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\frontend-design\SKILL.md` |
 | `go-concurrency-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\go-concurrency-patterns\SKILL.md` |
 | `go-testing` | Trigger: Go tests, go test coverage, Bubbletea teatest, golden files. Apply focused Go testing patterns. | user | `C:\Users\Estudiante UCU\.config\opencode\skills\go-testing\SKILL.md` |
-| `hydra` | Use when a task should run through Hydra's Lead-driven workflow for multi-agent orchestration, or when an existing workflow must be inspected or cleaned up. | user | `C:\Users\Estudiante UCU\.claude\skills\hydra\SKILL.md` |
 | `investigate` | Systematic debugging skill. Use when encountering a bug, test failure, unexpected behavior, or when asked to "investigate", "debug", "diagnose", or "figure out why". Enforces root-cause-first discipline with structured hypothesis tracking. | user | `C:\Users\Estudiante UCU\.claude\skills\investigate\SKILL.md` |
 | `issue-creation` | Create Gentle AI issues with issue-first checks. Trigger: creating GitHub issues, bug reports, or feature requests. | user | `C:\Users\Estudiante UCU\.config\opencode\skills\issue-creation\SKILL.md` |
 | `javascript-testing-patterns` | — | user | `C:\Users\Estudiante UCU\.config\opencode\skills\javascript-testing-patterns\SKILL.md` |

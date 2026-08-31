@@ -190,7 +190,7 @@ export const DEFAULT_KIMI_STALL_MS = 60_000;
 export const DEFAULT_CODEBUDDY_STALL_MS = 60_000;
 
 /**
- * Advisory stall thresholds used by the hydra watch loop when deciding
+ * Advisory stall thresholds when deciding
  * whether to surface a stall_advisory DecisionPoint. The *_STALL_MS
  * constants drive UI status ("stall_candidate"), which is deliberately
  * aggressive so the canvas can flag slow agents early. Promoting that

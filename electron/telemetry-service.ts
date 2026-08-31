@@ -1,12 +1,5 @@
 import fs from "node:fs";
 import path from "node:path";
-import { AssignmentManager } from "../hydra/src/assignment/manager.ts";
-import type { AssignmentRecord } from "../hydra/src/assignment/types.ts";
-import { validateRunResult } from "../hydra/src/protocol.ts";
-import {
-  loadWorkbench,
-  type WorkbenchRecord,
-} from "../hydra/src/workflow-store.ts";
 import { getProcessSnapshot } from "./process-detector.ts";
 import {
   extractOpenCodeFirstUserPrompt,
@@ -1203,77 +1196,10 @@ export class TelemetryService {
   }
 
   getWorkflowSnapshot(
-    repoPath: string,
-    workflowId: string,
+    _repoPath: string,
+    _workflowId: string,
   ): WorkflowTelemetrySnapshot | null {
-    const workflow = loadWorkbench(repoPath, workflowId);
-    if (!workflow) return null;
-
-    // Dispatch ids and assignment ids are the same in the current Hydra
-    // schema, so derive the active assignment from the current dispatch map.
-    const activeDispatchId = Object.entries(workflow.dispatches ?? {}).find(
-      ([, dispatch]) => dispatch.status === "dispatched",
-    )?.[0];
-    const assignmentId = activeDispatchId
-      ?? Object.keys(workflow.dispatches ?? {}).at(-1);
-    if (!assignmentId) return null;
-
-    const assignment = new AssignmentManager(repoPath, workflowId).load(
-      assignmentId,
-    );
-    if (!assignment) return null;
-
-    const run = assignment.active_run_id
-      ? assignment.runs.find((r) => r.id === assignment.active_run_id)
-      : assignment.runs[assignment.runs.length - 1];
-    const terminalId = run?.terminal_id ?? null;
-    const terminal = terminalId ? this.getTerminalSnapshot(terminalId) : null;
-    const contract = this.probeContractState(assignment, workflowId);
-    const lastMeaningfulProgressAt = latestIso(
-      terminal?.last_meaningful_progress_at,
-      contract.contractActivityAt,
-    );
-
-    const startedAt = run?.started_at ?? workflow.updated_at;
-    const startedMs = new Date(startedAt).getTime();
-    const timeoutMinutes =
-      assignment.timeout_minutes ?? workflow.default_timeout_minutes;
-    const deadlineMs =
-      Number.isFinite(startedMs) && typeof timeoutMinutes === "number"
-        ? startedMs + timeoutMinutes * 60_000
-        : undefined;
-
-    return {
-      workflow_id: workflow.id,
-      repo_path: workflow.repo_path,
-      workflow_status: workflow.status,
-      current_assignment_id: assignment.id,
-      terminal_id: terminalId,
-      terminal,
-      contract: {
-        result_exists: contract.resultExists,
-        result_valid: contract.resultValid,
-        contract_activity_at: contract.contractActivityAt,
-      },
-      last_meaningful_progress_at: lastMeaningfulProgressAt,
-      retry_budget: {
-        used: assignment.retry_count,
-        max: assignment.max_retries,
-        remaining: Math.max(0, assignment.max_retries - assignment.retry_count),
-      },
-      timeout_budget: {
-        minutes: timeoutMinutes,
-        started_at: startedAt,
-        deadline_at: deadlineMs
-          ? new Date(deadlineMs).toISOString()
-          : undefined,
-        remaining_ms:
-          deadlineMs !== undefined
-            ? Math.max(0, deadlineMs - this.now())
-            : undefined,
-      },
-      advisory_status: terminal?.derived_status ?? "unavailable",
-    };
+    return null;
   }
 
   recordHookEvent(
@@ -1625,109 +1551,14 @@ export class TelemetryService {
   }
 
   private probeContractState(
-    assignment: AssignmentRecord,
-    workflowId: string,
+    _assignment: unknown,
+    _workflowId: string,
   ): ContractState {
-    const run = assignment.active_run_id
-      ? assignment.runs.find((r) => r.id === assignment.active_run_id)
-      : assignment.runs[assignment.runs.length - 1];
-    if (!run) {
-      return { resultExists: false };
-    }
-
-    const resultExists = fs.existsSync(run.result_file);
-    let resultValid: boolean | undefined;
-
-    if (resultExists) {
-      try {
-        const raw = JSON.parse(fs.readFileSync(run.result_file, "utf-8"));
-        validateRunResult(raw, {
-          workbench_id: workflowId,
-          assignment_id: assignment.id,
-          run_id: run.id,
-        });
-        resultValid = true;
-      } catch {
-        resultValid = false;
-      }
-    }
-
-    return {
-      resultExists,
-      resultValid,
-      contractActivityAt: safeMtime(run.result_file),
-    };
+    return { resultExists: false };
   }
 
-  private syncContractState(state: TerminalState): void {
-    if (
-      !state.snapshot.repo_path ||
-      !state.snapshot.assignment_id ||
-      !state.snapshot.workflow_id
-    ) {
-      return;
-    }
-
-    const assignment = new AssignmentManager(
-      state.snapshot.repo_path,
-      state.snapshot.workflow_id,
-    ).load(state.snapshot.assignment_id);
-    if (!assignment) return;
-
-    const contract = this.probeContractState(
-      assignment,
-      state.snapshot.workflow_id,
-    );
-    const contractKey = JSON.stringify(contract);
-    const previousActivityAt = state.snapshot.contract_activity_at;
-
-    state.snapshot.result_exists = contract.resultExists;
-    state.snapshot.result_valid = contract.resultValid;
-    state.snapshot.contract_activity_at = contract.contractActivityAt;
-
-    if (contractKey !== state.lastContractKey) {
-      state.lastContractKey = contractKey;
-      if (contract.contractActivityAt) {
-        state.snapshot.last_meaningful_progress_at =
-          contract.contractActivityAt;
-      }
-
-      if (contract.resultExists) {
-        this.appendEvent(
-          state,
-          contract.contractActivityAt,
-          "contract",
-          "result_written",
-          {},
-        );
-      }
-      if (contract.resultValid === false) {
-        this.appendEvent(
-          state,
-          contract.contractActivityAt,
-          "contract",
-          "contract_invalid",
-          {
-            result_valid: false,
-          },
-        );
-      } else if (contract.resultValid) {
-        this.appendEvent(
-          state,
-          contract.contractActivityAt,
-          "contract",
-          "contract_validated",
-          {
-            result_valid: true,
-          },
-        );
-      }
-    } else if (
-      contract.contractActivityAt &&
-      contract.contractActivityAt !== previousActivityAt
-    ) {
-      state.snapshot.last_meaningful_progress_at = contract.contractActivityAt;
-    }
+  private syncContractState(_state: TerminalState): void {
+    return;
   }
 
   private updateDerivedStatus(

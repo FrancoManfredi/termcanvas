@@ -315,12 +315,6 @@ contextBridge.exposeInMainWorld("termcanvas", {
       ipcRenderer.invoke("project:delete-folder", projectPath) as Promise<
         { ok: true } | { ok: false; error: string }
       >,
-    enableHydra: (dirPath: string) =>
-      ipcRenderer.invoke("project:enable-hydra", dirPath),
-    checkHydra: (dirPath: string) =>
-      ipcRenderer.invoke("project:check-hydra", dirPath) as Promise<
-        "missing" | "outdated" | "current"
-      >,
     diff: (worktreePath: string) =>
       ipcRenderer.invoke("project:diff", worktreePath) as Promise<{
         diff: string;

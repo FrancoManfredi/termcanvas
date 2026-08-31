@@ -121,25 +121,6 @@ function IconArrowDown({ size = 14 }: { size?: number }) {
   );
 }
 
-function IconHydra({ size = 14 }: { size?: number }) {
-  return (
-    <svg
-      width={size}
-      height={size}
-      viewBox="0 0 16 16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.4"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <path d="M4 7C4 3.5 7.5 2 10.5 5L12 7.5 10.5 10.5C7.5 14 4 12.5 4 9Z" />
-      <circle cx="7.5" cy="5.8" r="1" fill="currentColor" stroke="none" />
-      <path d="M12 7.5L14 7.5M14 7.5L15.5 6M14 7.5L15.5 9" />
-    </svg>
-  );
-}
-
 function IconCheck({ size = 14 }: { size?: number }) {
   return (
     <svg
@@ -1119,12 +1100,8 @@ function getCommitRefColors(ref: string): {
 
 export function GitContent({
   worktreePath,
-  onEnableHydra,
-  hydraEnabling,
 }: {
   worktreePath: string | null;
-  onEnableHydra?: () => void;
-  hydraEnabling?: boolean;
 }) {
   const t = useT();
   const { notify } = useNotificationStore();
@@ -1680,17 +1657,6 @@ export function GitContent({
                 <IconRefresh size={14} />
               </span>
             </button>
-            {onEnableHydra && (
-              <button
-                title="Hydra"
-                disabled={hydraEnabling}
-                onClick={onEnableHydra}
-                className="flex h-6 w-6 items-center justify-center rounded-md transition-colors hover:bg-[var(--surface-hover)] disabled:opacity-40"
-                style={{ color: "var(--text-secondary)" }}
-              >
-                <IconHydra size={14} />
-              </button>
-            )}
           </div>
         </div>
 

@@ -71,32 +71,32 @@ test("scanMemoryDir returns graph with nodes and edges from MEMORY.md", async ()
 
   fs.writeFileSync(
     path.join(tmpDir, "MEMORY.md"),
-    `- [Hydra watch](feedback_hydra_watch.md) — always poll after dispatch
-- [Hydra approve](feedback_hydra_approve.md) — need --auto-approve
+    `- [Code review](feedback_code_review.md) — always review after changes
+- [QA check](feedback_qa_check.md) — need QA approval
 `,
   );
 
   fs.writeFileSync(
-    path.join(tmpDir, "feedback_hydra_watch.md"),
+    path.join(tmpDir, "feedback_code_review.md"),
     `---
-name: hydra-auto-watch
-description: After launching Hydra workflows, immediately enter watch polling loop
+name: code-review-reminder
+description: After making changes, ensure code review is done
 type: feedback
 ---
 
-Watch after dispatch.
+Review after changes.
 `,
   );
 
   fs.writeFileSync(
-    path.join(tmpDir, "feedback_hydra_approve.md"),
+    path.join(tmpDir, "feedback_qa_check.md"),
     `---
-name: Hydra must use --auto-approve
-description: Spawned CLIs need --auto-approve
+name: QA approval required
+description: Changes need QA approval
 type: feedback
 ---
 
-Always pass --auto-approve.
+Always pass QA check.
 `,
   );
 
@@ -110,7 +110,7 @@ Always pass --auto-approve.
   assert.equal(graph.edges.length, 2);
   assert.ok(graph.edges.every((e) => e.source === "MEMORY.md"));
   const targets = graph.edges.map((e) => e.target).sort();
-  assert.deepEqual(targets, ["feedback_hydra_approve.md", "feedback_hydra_watch.md"]);
+  assert.deepEqual(targets, ["feedback_code_review.md", "feedback_qa_check.md"]);
 
   fs.rmSync(tmpDir, { recursive: true });
 });
