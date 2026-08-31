@@ -1,9 +1,13 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { RemoteGitHubAuthAdapter, LocalGitHubAuthAdapter } from "../adapters/githubAuth.adapter";
+import * as githubToken from "../config/githubToken";
 
 describe("GitHubAuthPort — OAuth BFF + hybrid", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
+    try {
+      localStorage.clear();
+    } catch {}
   });
 
   it("getStatus retorna not connected cuando no hay cookie", async () => {
@@ -21,7 +25,12 @@ describe("GitHubAuthPort — OAuth BFF + hybrid", () => {
     expect(status.username).toBe("wilson");
   });
 
-  it("Local adapter nunca está conectado", async () => {
+  it("Local adapter idle sin PAT", async () => {
+    vi.spyOn(githubToken, "getEffectivePat").mockReturnValue(null);
+    vi.spyOn(githubToken, "hasEnvPat").mockReturnValue(false);
+    try {
+      localStorage.clear();
+    } catch {}
     const adapter = new LocalGitHubAuthAdapter();
     const s = await adapter.getStatus();
     expect(s.connected).toBe(false);

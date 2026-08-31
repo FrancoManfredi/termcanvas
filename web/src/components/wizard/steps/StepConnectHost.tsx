@@ -10,7 +10,6 @@ export function StepConnectHost({ onNext }: { onNext: () => void }) {
   const isConnecting = loading || status.status === "connecting";
   const isConnected = status.connected && !!status.username;
   const isError = status.status === "error";
-  const isIdleDemo = !isConnecting && !isConnected && !isError;
 
   const viaBadge = hasEnvPat() ? "via .env" : "via localStorage";
 
@@ -32,27 +31,6 @@ export function StepConnectHost({ onNext }: { onNext: () => void }) {
           >
             Reintentar
           </button>
-        </div>
-      )}
-
-      {/* Demo banner */}
-      {isIdleDemo && (
-        <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
-          <p className="text-sm text-amber-800 font-medium">Modo demo — sin token. Continuar con repos de ejemplo</p>
-          <p className="text-xs text-amber-700 mt-1 leading-relaxed">
-            Añadí <code className="bg-amber-100 px-1 py-0.5 rounded text-amber-900">VITE_GITHUB_TOKEN</code> en{" "}
-            <code className="bg-amber-100 px-1 py-0.5 rounded text-amber-900">web/.env</code> y reiniciá vite para ver tus repos
-            reales.{" "}
-            <a
-              href="https://github.com/settings/tokens"
-              target="_blank"
-              rel="noreferrer"
-              className="underline font-semibold hover:text-amber-900"
-            >
-              Crear token (scope repo)
-            </a>
-            .
-          </p>
         </div>
       )}
 
@@ -112,9 +90,7 @@ export function StepConnectHost({ onNext }: { onNext: () => void }) {
           <GithubIcon size={32} className="text-gray-900" />
           <div>
             <p className="text-sm font-semibold text-gray-900">I want to use repos from GitHub</p>
-            <p className="text-xs text-gray-400 mt-0.5">
-              {isError ? "Continuar en modo demo o reintentá arriba" : "Connected as demo — se usarán repos de ejemplo"}
-            </p>
+            <p className="text-xs text-gray-400 mt-0.5">Connect to GitHub to continue</p>
           </div>
         </button>
       )}
@@ -130,14 +106,6 @@ export function StepConnectHost({ onNext }: { onNext: () => void }) {
           Continue
         </button>
       </div>
-
-      {/* Help text for token setup when idle */}
-      {isIdleDemo && (
-        <p className="mt-3 text-xs text-gray-400 leading-relaxed">
-          Tip: el token nunca se muestra en la UI ni se loguea. Solo se usa para validar{" "}
-          <code className="bg-gray-100 px-1 py-0.5 rounded">GET https://api.github.com/user</code> y listar repos.
-        </p>
-      )}
     </div>
   );
 }

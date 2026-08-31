@@ -18,7 +18,7 @@ export interface StepSelectRepoProps {
 
 export function StepSelectRepo({ repos: reposOverride, selectedId, onSelect, onNext, onBack }: StepSelectRepoProps) {
   const hook = useGitHubRepos({ perPage: 100 });
-  const { loading, error, code, isDemo, refresh, search, setSearch } = hook;
+  const { loading, error, code, refresh, search, setSearch } = hook;
 
   // Si se pasó reposOverride (tests), usarlo; si no, usar hook.filtered
   const displayRepos: readonly Repo[] = useMemo(() => {
@@ -30,8 +30,7 @@ export function StepSelectRepo({ repos: reposOverride, selectedId, onSelect, onN
     return hook.filtered;
   }, [reposOverride, hook.filtered, search]);
 
-  const totalRepos = reposOverride ? reposOverride.length : hook.repos.length;
-  const headerText = isDemo && !reposOverride ? `Demo repositories — ${displayRepos.length} of ${totalRepos}` : `Showing ${displayRepos.length} repositories`;
+  const headerText = `Showing ${displayRepos.length} repositories`;
 
   return (
     <div className="anim-fade-in-up">
@@ -49,13 +48,6 @@ export function StepSelectRepo({ repos: reposOverride, selectedId, onSelect, onN
           aria-label="Search repositories"
         />
       </div>
-
-      {/* Demo banner */}
-      {isDemo && !reposOverride && !loading && (
-        <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
-          <p className="text-sm text-amber-800">Modo demo — mostrando repos de ejemplo. Añadí VITE_GITHUB_TOKEN en web/.env para ver tus repos reales.</p>
-        </div>
-      )}
 
       {/* Error */}
       {error && !loading && (
