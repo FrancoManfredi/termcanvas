@@ -2,6 +2,7 @@
 // primaria y cae a los fixtures de demo (MOCK_REPOS) si el port no resuelve nada.
 // Fase 1: integra VITE_GITHUB_TOKEN via getEffectivePat(), lista repos reales con fallback demo,
 // expone search/filter client-side, loading/error/isDemo, y mantiene compatibilidad con useRepoList.
+// Fix critico: no mostrar MOCK flash cuando hay PAT — initial repos [] si hay token, error con token => [] no MOCK.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { LocalGitHubReposAdapter } from "../adapters/githubRepos.adapter";
@@ -37,17 +38,20 @@ export interface UseGitHubReposApi {
 
 export function useGitHubRepos(opts?: { perPage?: number }): UseGitHubReposApi {
   const perPage = opts?.perPage ?? 100;
-  const [repos, setRepos] = useState<readonly Repo[]>(MOCK_REPOS as readonly Repo[]);
+  // Fix: initial repos no debe ser MOCK si hay PAT (evita flash hardcodeado antes de fetch)
+  const hasPatAtInit = (() => {
+    try {
+      return !!getEffectivePat();
+    } catch {
+      return false;
+    }
+  })();
+  const initialRepos: readonly Repo[] = hasPatAtInit ? [] : (MOCK_REPOS as readonly Repo[]);
+  const [repos, setRepos] = useState<readonly Repo[]>(initialRepos);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [code, setCode] = useState<string | null>(null);
-  const [isDemo, setIsDemo] = useState<boolean>(() => {
-    try {
-      return !getEffectivePat();
-    } catch {
-      return true;
-    }
-  });
+  const [isDemo, setIsDemo] = useState<boolean>(() => !hasPatAtInit);
   const [search, setSearch] = useState("");
 
   const fetchRepos = useCallback(async () => {
@@ -64,14 +68,12 @@ export function useGitHubRepos(opts?: { perPage?: number }): UseGitHubReposApi {
       const res = await reposPort.listRepos({ perPage, search: undefined });
       if (res.ok) {
         const mapped = (res.value ?? []).map(toFigmaRepo);
-        // si el adapter devolvió DEMO_REPOS (sin token), ya viene mapeado; si devolvió 0, mantener fallback
-        if (mapped.length > 0) {
-          setRepos(mapped);
-        } else if (demo) {
-          // sin token y sin resultados (raro) -> mantener MOCK_REPOS
+        // Si hay token, mostrar mapped incluso si vacío (no fallback a MOCK)
+        // Solo si es demo y mapeo vacío -> fallback a MOCK_REPOS
+        if (demo && mapped.length === 0) {
           setRepos(MOCK_REPOS as readonly Repo[]);
         } else {
-          setRepos([]);
+          setRepos(mapped);
         }
         setError(null);
         setCode(null);
@@ -79,17 +81,30 @@ export function useGitHubRepos(opts?: { perPage?: number }): UseGitHubReposApi {
         const issue = res.issues[0];
         setError(issue?.message ?? "Error al listar repos");
         setCode(issue?.code ?? null);
-        // En caso de error de autenticación, no ocultar repos previos; si no hay previos, fallback a demo si es bad_credentials? No, mostrar error pero mantener lista vacía o demo?
-        // Para demo sin token, el adapter nunca falla (retorna ok con DEMO_REPOS), así que este branch es solo para errores reales.
-        // Mantenemos repos actuales; isDemo ya refleja ausencia de token.
+        // Fix: con token, error (401 bad_credentials, rate_limited, etc.) debe dejar repos vacío + mostrar error,
+        // no mantener MOCK previo que parece hardcodeado. Sin token (demo) fallback silencioso a MOCK sin banner.
         if (demo) {
           setRepos(MOCK_REPOS as readonly Repo[]);
+        } else {
+          setRepos([]);
         }
       }
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       setError(msg);
       setCode("network_error");
+      // En catch (network_error) también respetar demo vs token
+      let demoCatch: boolean;
+      try {
+        demoCatch = !getEffectivePat();
+      } catch {
+        demoCatch = true;
+      }
+      if (demoCatch) {
+        setRepos(MOCK_REPOS as readonly Repo[]);
+      } else {
+        setRepos([]);
+      }
     } finally {
       setLoading(false);
     }
