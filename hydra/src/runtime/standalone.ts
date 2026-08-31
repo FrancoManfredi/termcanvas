@@ -198,7 +198,13 @@ function buildSubprocessArgv(
     return { shell: "codex", args };
   }
 
-  throw new Error(`Standalone runtime supports only claude|codex, got: ${opts.type}`);
+  if (opts.type === "opencode") {
+    const args: string[] = ["run", opts.prompt];
+    if (opts.resumeSessionId) args.push("--session", opts.resumeSessionId);
+    return { shell: "opencode", args };
+  }
+
+  throw new Error(`Standalone runtime supports only claude|codex|opencode, got: ${opts.type}`);
 }
 
 /**
@@ -303,9 +309,9 @@ export class StandaloneRuntime implements HydraRuntime {
   }
 
   terminalCreate(options: TerminalCreateOptions): RuntimeTerminalRef {
-    if (options.type !== "claude" && options.type !== "codex") {
+    if (options.type !== "claude" && options.type !== "codex" && options.type !== "opencode") {
       throw new Error(
-        `Standalone runtime supports only claude|codex, got: ${options.type}. ` +
+        `Standalone runtime supports only claude|codex|opencode, got: ${options.type}. ` +
           `Set HYDRA_STANDALONE=0 or run inside TermCanvas for other terminal types.`,
       );
     }

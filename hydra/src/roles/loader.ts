@@ -24,7 +24,7 @@ import { fileURLToPath } from "node:url";
  *   3. builtin   → shipped with hydra (src/roles/builtin or dist/roles/builtin)
  */
 
-export type RoleCli = "claude" | "codex";
+export type RoleCli = "claude" | "codex" | "opencode";
 export type RoleSource = "project" | "user" | "builtin";
 
 /**
@@ -59,7 +59,7 @@ export interface RoleDefinition {
 }
 
 const REQUIRED_SCALAR_FIELDS = ["name", "description"] as const;
-const VALID_CLIS = new Set<RoleCli>(["claude", "codex"]);
+const VALID_CLIS = new Set<RoleCli>(["claude", "codex", "opencode"]);
 const KNOWN_STRING_ARRAY_FIELDS = new Set<string>();
 const KNOWN_OBJECT_ARRAY_FIELDS = new Set(["terminals"]);
 

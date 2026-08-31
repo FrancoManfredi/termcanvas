@@ -5,12 +5,13 @@ export const SUPPORTED_AGENT_TYPES = [
   "codex",
   "kimi",
   "gemini",
+  "opencode",
 ] as const satisfies readonly AgentType[];
 
 export const DEFAULT_AGENT_TYPE: AgentType = "claude";
 
 /** Agent types that support auto-approve (bypass permission prompts). */
-export const AUTO_APPROVE_AGENT_TYPES = new Set<AgentType>(["claude", "codex"]);
+export const AUTO_APPROVE_AGENT_TYPES = new Set<AgentType>(["claude", "codex", "opencode"]);
 
 const AGENT_TYPES = new Set<AgentType>(SUPPORTED_AGENT_TYPES);
 

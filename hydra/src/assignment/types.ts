@@ -3,7 +3,7 @@ import type { RetryPolicy } from "../workflow-store.ts";
 
 export const ASSIGNMENT_STATE_SCHEMA_VERSION = "hydra/assignment-state/v0.1";
 
-export type AgentType = "claude" | "codex" | "kimi" | "gemini";
+export type AgentType = "claude" | "codex" | "kimi" | "gemini" | "opencode";
 
 export type AssignmentRole = string;
 
