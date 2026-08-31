@@ -1,0 +1,97 @@
+---
+import { getCollection } from "astro:content";
+import ArticleCard from "./ArticleCard.astro";
+import {
+  articlePath,
+  articlesPath,
+  defaultLocale,
+  siteCopy,
+  type Locale,
+} from "../lib/site";
+
+export interface Props {
+  locale?: Locale;
+}
+
+const { locale = defaultLocale } = Astro.props;
+const copy = siteCopy[locale].articles;
+const all = await getCollection(
+  "articles",
+  ({ data }) => data.draft !== true && data.locale === locale
+);
+const sorted = all.sort(
+  (a, b) => b.data.date.valueOf() - a.data.date.valueOf()
+);
+const latest = sorted.slice(0, 3);
+---
+
+<section class="articles-preview">
+  <div class="container-page">
+    <div class="head">
+      <div>
+        <span class="label-mono">{copy.eyebrow}</span>
+        <h2 class="title">{copy.title}</h2>
+      </div>
+      <a class="view-all" href={articlesPath(locale)}>{copy.viewAll} →</a>
+    </div>
+    {
+      latest.length === 0 ? (
+        <p class="empty">{copy.empty}</p>
+      ) : (
+        <div class="grid">
+          {latest.map((entry) => (
+            <ArticleCard
+              href={articlePath(locale, entry.id)}
+              title={entry.data.title}
+              date={entry.data.date}
+              summary={entry.data.summary}
+              tag={entry.data.tag}
+              cover={entry.data.cover}
+              locale={locale}
+            />
+          ))}
+        </div>
+      )
+    }
+  </div>
+</section>
+
+<style>
+  .articles-preview {
+    padding: 5rem 0 2rem;
+    border-top: 1px solid var(--color-border);
+  }
+  .head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    gap: 1rem;
+    margin-bottom: 2.5rem;
+  }
+  .title {
+    margin-top: 0.5rem;
+    font-size: clamp(1.6rem, 2.6vw, 2.25rem);
+    line-height: 1.2;
+    letter-spacing: -0.015em;
+    font-weight: 600;
+    max-width: 40rem;
+  }
+  .view-all {
+    color: var(--color-accent);
+    font-size: 0.95rem;
+    font-weight: 500;
+  }
+  .grid {
+    display: grid;
+    gap: 1.25rem;
+  }
+  @media (min-width: 768px) {
+    .grid {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+  }
+  .empty {
+    color: var(--color-ink-muted);
+  }
+</style>

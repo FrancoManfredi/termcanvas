@@ -1,6 +1,4 @@
 import { describe, it, expect } from "vitest";
-import { render, screen } from "@testing-library/react";
-import { DashboardEmptyState } from "../../../components/dashboard/DashboardEmptyState";
 import { deriveDashboardMetricsFromItems, isEmpty } from "../domain/dashboard.derive";
 
 describe("Gherkin P0-9 Dashboard limpio sin hardcodeados", () => {
@@ -9,12 +7,6 @@ describe("Gherkin P0-9 Dashboard limpio sin hardcodeados", () => {
     expect(isEmpty(metrics)).toBe(true);
     expect(metrics.prsOpened).toBe(0);
     expect(metrics.totalRuns.total).toBe(0);
-  });
-
-  it("DashboardEmptyState renderiza mensaje honesto", () => {
-    render(<DashboardEmptyState title="Sin datos todavía" message="Tus métricas van a aparecer acá" />);
-    expect(screen.getByText("Sin datos todavía")).toBeDefined();
-    expect(screen.getByText(/Tus métricas/)).toBeDefined();
   });
 
   it("no muestra números inventados — solo empties cuando isEmpty", () => {

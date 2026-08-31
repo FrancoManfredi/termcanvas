@@ -1,0 +1,21 @@
+node_modules/
+dist/
+
+# Downloaded datasets (regenerable via scripts/download-dataset.py)
+tasks/
+!tasks/.gitkeep
+
+# Evaluation results (regenerable by running evaluations)
+results/
+!results/.gitkeep
+
+# SWE-bench Docker logs (regenerable)
+logs/
+
+# SWE-bench report files
+*.json
+!package.json
+!tsconfig.json
+
+# Parquet cache
+_cache_*

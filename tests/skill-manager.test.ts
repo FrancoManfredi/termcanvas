@@ -1,0 +1,900 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import {
+  ensureSkillLinks,
+  installSkillLinks,
+  parseCodexHooksFeatureFlag,
+  uninstallSkillLinks,
+} from "../electron/skill-manager.ts";
+
+const MANIFEST_FILE = ".termcanvas-skills.json";
+
+function makeTempEnv(skillNames = ["hydra", "code-review", "qa"]) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "skill-mgr-"));
+  const home = path.join(dir, "home");
+  const sourceDir = path.join(dir, "source");
+
+  for (const name of skillNames) {
+    const skillDir = path.join(sourceDir, "skills", name);
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, "SKILL.md"), `# ${name}`);
+  }
+
+  const scriptsDir = path.join(sourceDir, "scripts");
+  fs.mkdirSync(scriptsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(scriptsDir, "memory-session-start.sh"),
+    "#!/bin/bash\n",
+  );
+  fs.writeFileSync(path.join(scriptsDir, "termcanvas-hook.mjs"), "// hook\n");
+
+  return { dir, home, sourceDir };
+}
+
+function link(home: string, provider: string, name: string): string {
+  return path.join(home, `.${provider}`, "skills", name);
+}
+
+function readManifest(home: string, provider: string) {
+  const p = path.join(home, `.${provider}`, "skills", MANIFEST_FILE);
+  try {
+    return JSON.parse(fs.readFileSync(p, "utf-8"));
+  } catch {
+    return null;
+  }
+}
+
+function readClaudeSettings(home: string) {
+  const p = path.join(home, ".claude", "settings.json");
+  return JSON.parse(fs.readFileSync(p, "utf-8"));
+}
+
+function readClaudeGlobalConfig(home: string) {
+  const p = path.join(home, ".claude.json");
+  return JSON.parse(fs.readFileSync(p, "utf-8"));
+}
+
+function withFakeCodexFeatures(
+  featuresListOutput: string,
+  callback: () => void,
+): void {
+  const windowsScript = `@echo off\r\necho ${featuresListOutput}\r\n`;
+  const posixScript = `#!/bin/sh\ncat <<'EOF'\n${featuresListOutput}\nEOF\n`;
+  withFakeCodexExecutable(posixScript, windowsScript, callback);
+}
+
+function withFakeCodexVersionFallback(
+  versionOutput: string,
+  callback: () => void,
+): void {
+  const windowsScript = [
+    "@echo off",
+    'if "%1"=="features" exit /b 1',
+    `if "%1"=="--version" echo ${versionOutput} & exit /b 0`,
+    "exit /b 1",
+    "",
+  ].join("\r\n");
+  const posixScript = [
+    "#!/bin/sh",
+    'if [ "$1" = "features" ]; then exit 1; fi',
+    `if [ "$1" = "--version" ]; then echo '${versionOutput}'; exit 0; fi`,
+    "exit 1",
+    "",
+  ].join("\n");
+  withFakeCodexExecutable(posixScript, windowsScript, callback);
+}
+
+function withFakeCodexExecutable(
+  posixScript: string,
+  windowsScript: string,
+  callback: () => void,
+): void {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fake-codex-"));
+  const script = path.join(
+    dir,
+    process.platform === "win32" ? "codex.cmd" : "codex",
+  );
+  if (process.platform === "win32") {
+    fs.writeFileSync(script, windowsScript);
+  } else {
+    fs.writeFileSync(script, posixScript, { mode: 0o755 });
+  }
+
+  const previousPath = process.env.PATH;
+  process.env.PATH = `${dir}${path.delimiter}${previousPath ?? ""}`;
+  try {
+    callback();
+  } finally {
+    if (previousPath === undefined) {
+      delete process.env.PATH;
+    } else {
+      process.env.PATH = previousPath;
+    }
+  }
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+test("installSkillLinks creates symlinks for all skills including hydra", () => {
+  const { home, sourceDir } = makeTempEnv();
+  assert.equal(
+    installSkillLinks({ home, sourceDir, appVersion: "0.18.0" }),
+    true,
+  );
+
+  for (const name of ["hydra", "code-review", "qa"]) {
+    const claude = link(home, "claude", name);
+    const codex = link(home, "codex", name);
+    assert.equal(
+      fs.existsSync(claude),
+      true,
+      `${name} missing in .claude/skills`,
+    );
+    assert.equal(
+      fs.existsSync(codex),
+      true,
+      `${name} missing in .codex/skills`,
+    );
+    assert.equal(fs.readlinkSync(claude), path.join(sourceDir, "skills", name));
+  }
+});
+
+test("uninstallSkillLinks removes all symlinks and manifest", () => {
+  const { home, sourceDir } = makeTempEnv();
+  installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+  uninstallSkillLinks({ home, sourceDir });
+
+  for (const name of ["hydra", "code-review", "qa"]) {
+    assert.equal(fs.existsSync(link(home, "claude", name)), false);
+    assert.equal(fs.existsSync(link(home, "codex", name)), false);
+  }
+  assert.equal(readManifest(home, "claude"), null);
+  assert.equal(readManifest(home, "codex"), null);
+});
+
+test("installSkillLinks writes manifest with version and skill list", () => {
+  const { home, sourceDir } = makeTempEnv();
+  installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  const m = readManifest(home, "claude");
+  assert.equal(m.version, "0.18.0");
+  assert.deepEqual(m.skills.sort(), ["code-review", "hydra", "qa"]);
+});
+
+test("ensureSkillLinks preserves hydra symlink across repeated calls", () => {
+  const { home, sourceDir } = makeTempEnv();
+  installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  ensureSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+  ensureSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  const hydra = link(home, "claude", "hydra");
+  assert.equal(
+    fs.existsSync(hydra),
+    true,
+    "hydra symlink deleted by ensureSkillLinks",
+  );
+  assert.equal(fs.readlinkSync(hydra), path.join(sourceDir, "skills", "hydra"));
+});
+
+test("ensureSkillLinks fast path: skips work when version matches", () => {
+  const { home, sourceDir } = makeTempEnv();
+  installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  const before = fs.lstatSync(link(home, "claude", "hydra")).mtimeMs;
+  ensureSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+  const after = fs.lstatSync(link(home, "claude", "hydra")).mtimeMs;
+
+  assert.equal(after, before, "symlink was recreated despite version match");
+});
+
+test("ensureSkillLinks repairs deleted symlink even when version matches", () => {
+  const { home, sourceDir } = makeTempEnv();
+  installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  fs.unlinkSync(link(home, "claude", "hydra"));
+  ensureSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  assert.equal(fs.existsSync(link(home, "claude", "hydra")), true);
+});
+
+test("ensureSkillLinks updates stale symlinks", () => {
+  const { home, sourceDir } = makeTempEnv();
+  installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  const hydra = link(home, "claude", "hydra");
+  fs.unlinkSync(hydra);
+  fs.symlinkSync("/tmp/stale-target", hydra, "dir");
+
+  ensureSkillLinks({ home, sourceDir, appVersion: "0.19.0" });
+  assert.equal(fs.readlinkSync(hydra), path.join(sourceDir, "skills", "hydra"));
+});
+
+test("version upgrade removes skills dropped from bundle", () => {
+  const { home, sourceDir, dir } = makeTempEnv([
+    "hydra",
+    "code-review",
+    "qa",
+    "old-skill",
+  ]);
+  installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  assert.equal(fs.existsSync(link(home, "claude", "old-skill")), true);
+
+  const newSourceDir = path.join(dir, "source-v2");
+  for (const name of ["hydra", "code-review", "qa"]) {
+    const skillDir = path.join(newSourceDir, "skills", name);
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, "SKILL.md"), `# ${name}`);
+  }
+  const scriptsDir = path.join(newSourceDir, "scripts");
+  fs.mkdirSync(scriptsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(scriptsDir, "memory-session-start.sh"),
+    "#!/bin/bash\n",
+  );
+
+  ensureSkillLinks({ home, sourceDir: newSourceDir, appVersion: "0.19.0" });
+
+  assert.equal(
+    fs.existsSync(link(home, "claude", "old-skill")),
+    false,
+    "stale skill not removed",
+  );
+  assert.equal(
+    fs.existsSync(link(home, "codex", "old-skill")),
+    false,
+    "stale skill not removed from codex",
+  );
+  assert.equal(fs.existsSync(link(home, "claude", "hydra")), true);
+
+  const m = readManifest(home, "claude");
+  assert.equal(m.version, "0.19.0");
+  assert.ok(!m.skills.includes("old-skill"));
+});
+
+test("version upgrade adds new skills from bundle", () => {
+  const { home, sourceDir, dir } = makeTempEnv(["hydra", "code-review"]);
+  installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  const newSourceDir = path.join(dir, "source-v2");
+  for (const name of ["hydra", "code-review", "new-skill"]) {
+    const skillDir = path.join(newSourceDir, "skills", name);
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(path.join(skillDir, "SKILL.md"), `# ${name}`);
+  }
+  const scriptsDir = path.join(newSourceDir, "scripts");
+  fs.mkdirSync(scriptsDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(scriptsDir, "memory-session-start.sh"),
+    "#!/bin/bash\n",
+  );
+
+  ensureSkillLinks({ home, sourceDir: newSourceDir, appVersion: "0.19.0" });
+
+  assert.equal(fs.existsSync(link(home, "claude", "new-skill")), true);
+  assert.equal(fs.existsSync(link(home, "codex", "new-skill")), true);
+});
+
+test("installSkillLinks creates Claude lifecycle hooks including Notification", () => {
+  const { home, sourceDir } = makeTempEnv();
+  installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  const settings = readClaudeSettings(home);
+  assert.equal(settings.enabledPlugins?.["termcanvas@termcanvas"], true);
+
+  for (const event of [
+    "SessionStart",
+    "Stop",
+    "StopFailure",
+    "SessionEnd",
+    "PreToolUse",
+    "Notification",
+    "PostToolUse",
+    "PostToolUseFailure",
+    "UserPromptSubmit",
+    "SubagentStart",
+    "SubagentStop",
+    "PreCompact",
+    "PostCompact",
+  ]) {
+    const entries = settings.hooks?.[event] ?? [];
+    const lifecycleHooks = entries
+      .flatMap((entry: { hooks?: Array<{ command?: string; async?: boolean }> }) =>
+        entry.hooks ?? [],
+      )
+      .filter((hook) => hook.command?.includes("termcanvas-hook.mjs"));
+
+    assert.equal(
+      lifecycleHooks.length,
+      1,
+      `missing lifecycle hook entry for ${event}`,
+    );
+
+    if (event === "SessionStart") {
+      assert.equal(lifecycleHooks[0]?.async, undefined);
+    } else {
+      assert.equal(lifecycleHooks[0]?.async, true);
+    }
+  }
+});
+
+test("skips non-symlink entries (user-managed directories)", () => {
+  const { home, sourceDir } = makeTempEnv();
+
+  const userDir = link(home, "claude", "hydra");
+  fs.mkdirSync(userDir, { recursive: true });
+  fs.writeFileSync(path.join(userDir, "custom.md"), "user content");
+
+  installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  assert.equal(
+    fs.lstatSync(userDir).isDirectory(),
+    true,
+    "user dir was replaced",
+  );
+  assert.equal(fs.existsSync(path.join(userDir, "custom.md")), true);
+});
+
+test("uninstall removes skills tracked in manifest even if missing from current bundle", () => {
+  const { home, sourceDir, dir } = makeTempEnv([
+    "hydra",
+    "code-review",
+    "qa",
+    "old-skill",
+  ]);
+  installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  const newSourceDir = path.join(dir, "source-v2");
+  for (const name of ["hydra", "code-review", "qa"]) {
+    const skillDir = path.join(newSourceDir, "skills", name);
+    fs.mkdirSync(skillDir, { recursive: true });
+  }
+
+  // Uninstall with new sourceDir that doesn't know about old-skill
+  uninstallSkillLinks({ home, sourceDir: newSourceDir });
+
+  assert.equal(fs.existsSync(link(home, "claude", "old-skill")), false);
+  assert.equal(readManifest(home, "claude"), null);
+});
+
+test("uninstallSkillLinks removes termcanvas entries from codex hooks.json", () => {
+  const { home, sourceDir } = makeTempEnv();
+  installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  const hooksFile = path.join(home, ".codex", "hooks.json");
+  assert.equal(fs.existsSync(hooksFile), true);
+
+  uninstallSkillLinks({ home, sourceDir });
+
+  // hooks.json should still exist but with no termcanvas entries
+  const hooks = JSON.parse(fs.readFileSync(hooksFile, "utf-8"));
+  for (const event of [
+    "PreToolUse",
+    "PostToolUse",
+    "SessionStart",
+    "Stop",
+    "UserPromptSubmit",
+  ]) {
+    const entries = hooks.hooks?.[event] ?? [];
+    for (const entry of entries) {
+      for (const h of entry.hooks ?? []) {
+        assert.ok(
+          !h.command.includes("termcanvas-hook.mjs"),
+          `${event} still has termcanvas hook after uninstall`,
+        );
+      }
+    }
+  }
+});
+
+test("parseCodexHooksFeatureFlag prefers current hooks flag", () => {
+  assert.equal(
+    parseCodexHooksFeatureFlag(
+      "codex_hooks stable true\nhooks stable true\n",
+    ),
+    "hooks",
+  );
+});
+
+test("parseCodexHooksFeatureFlag supports legacy codex_hooks flag", () => {
+  assert.equal(
+    parseCodexHooksFeatureFlag("codex_hooks experimental true\n"),
+    "codex_hooks",
+  );
+});
+
+test("installSkillLinks enables hooks feature flag in config.toml", () => {
+  const { home, sourceDir } = makeTempEnv();
+  withFakeCodexFeatures("hooks stable true", () => {
+    installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+  });
+
+  const configFile = path.join(home, ".codex", "config.toml");
+  assert.equal(fs.existsSync(configFile), true, "config.toml not created");
+
+  const content = fs.readFileSync(configFile, "utf-8");
+  assert.ok(content.includes("hooks = true"), "hooks flag not set");
+  assert.ok(
+    !content.includes("codex_hooks"),
+    "deprecated codex_hooks flag should not be written",
+  );
+});
+
+test("installSkillLinks trusts generated codex hooks", () => {
+  const { home, sourceDir } = makeTempEnv();
+  installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  const configFile = path.join(home, ".codex", "config.toml");
+  const hooksFile = path.join(home, ".codex", "hooks.json");
+  const content = fs.readFileSync(configFile, "utf-8");
+
+  for (const event of [
+    "pre_tool_use",
+    "post_tool_use",
+    "session_start",
+    "stop",
+    "user_prompt_submit",
+  ]) {
+    const key = `${hooksFile}:${event}:0:0`;
+    assert.match(
+      content,
+      new RegExp(`\\[hooks\\.state\\."${escapeRegExp(key)}"\\]`),
+      `missing trust state for ${event}`,
+    );
+  }
+
+  assert.equal(
+    (content.match(/trusted_hash = "sha256:/g) ?? []).length,
+    5,
+    "expected one trusted hash per generated hook",
+  );
+});
+
+test("ensureSkillLinks preserves codex hook enabled state while updating trust", () => {
+  const { home, sourceDir } = makeTempEnv();
+  const configFile = path.join(home, ".codex", "config.toml");
+  const hooksFile = path.join(home, ".codex", "hooks.json");
+  const stopKey = `${hooksFile}:stop:0:0`;
+  fs.mkdirSync(path.dirname(configFile), { recursive: true });
+  fs.writeFileSync(
+    configFile,
+    `[hooks.state."${stopKey}"]\nenabled = false\ntrusted_hash = "sha256:stale"\n`,
+  );
+
+  ensureSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  const content = fs.readFileSync(configFile, "utf-8");
+  const stopBlocks = content.match(
+    new RegExp(`\\[hooks\\.state\\."${escapeRegExp(stopKey)}"\\]`, "g"),
+  );
+  assert.equal(stopBlocks?.length, 1, "stop hook state table duplicated");
+  const stopBlock = content.slice(content.indexOf(`[hooks.state."${stopKey}"]`));
+  assert.match(stopBlock, /enabled = false/);
+  assert.doesNotMatch(stopBlock, /trusted_hash = "sha256:stale"/);
+});
+
+test("ensureCodexFeatureFlag preserves existing config.toml content", () => {
+  const { home, sourceDir } = makeTempEnv();
+
+  const codexDir = path.join(home, ".codex");
+  fs.mkdirSync(codexDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(codexDir, "config.toml"),
+    'model = "gpt-4"\n\n[features]\napply_patch = true\n',
+  );
+
+  withFakeCodexFeatures("hooks stable true", () => {
+    installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+  });
+
+  const content = fs.readFileSync(path.join(codexDir, "config.toml"), "utf-8");
+  assert.ok(content.includes('model = "gpt-4"'), "existing model setting lost");
+  assert.ok(
+    content.includes("apply_patch = true"),
+    "existing feature flag lost",
+  );
+  assert.ok(content.includes("hooks = true"), "hooks not added");
+});
+
+test("installSkillLinks migrates deprecated codex_hooks flag to hooks", () => {
+  const { home, sourceDir } = makeTempEnv();
+  const codexDir = path.join(home, ".codex");
+  fs.mkdirSync(codexDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(codexDir, "config.toml"),
+    'model = "gpt-5"\n\n[features]\napply_patch = true\ncodex_hooks = true\n',
+  );
+
+  withFakeCodexFeatures("hooks stable true", () => {
+    installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+  });
+
+  const content = fs.readFileSync(path.join(codexDir, "config.toml"), "utf-8");
+  assert.match(content, /^\s*hooks\s*=\s*true\s*$/m);
+  assert.doesNotMatch(content, /^\s*codex_hooks\s*=/m);
+  assert.match(content, /^\s*apply_patch\s*=\s*true\s*$/m);
+});
+
+test("installSkillLinks keeps legacy codex_hooks for older Codex feature list", () => {
+  const { home, sourceDir } = makeTempEnv();
+
+  withFakeCodexFeatures("codex_hooks experimental true", () => {
+    installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+  });
+
+  const content = fs.readFileSync(
+    path.join(home, ".codex", "config.toml"),
+    "utf-8",
+  );
+  assert.match(content, /^\s*codex_hooks\s*=\s*true\s*$/m);
+  assert.doesNotMatch(content, /^\s*hooks\s*=/m);
+});
+
+test("installSkillLinks keeps legacy codex_hooks for pre-0.129 Codex without features list", () => {
+  const { home, sourceDir } = makeTempEnv();
+
+  withFakeCodexVersionFallback("codex-cli 0.128.0", () => {
+    installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+  });
+
+  const content = fs.readFileSync(
+    path.join(home, ".codex", "config.toml"),
+    "utf-8",
+  );
+  assert.match(content, /^\s*codex_hooks\s*=\s*true\s*$/m);
+  assert.doesNotMatch(content, /^\s*hooks\s*=/m);
+});
+
+test("installSkillLinks removes legacy Computer Use MCP registrations", () => {
+  const { home, sourceDir } = makeTempEnv();
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(
+    path.join(home, ".claude.json"),
+    JSON.stringify({
+      mcpServers: {
+        "termcanvas-computer-use": {
+          type: "stdio",
+          command: "node",
+          args: ["/stale/mcp-computer-use-server/index.js"],
+        },
+        mempalace: { type: "stdio", command: "python3", args: ["-m", "mempalace"] },
+      },
+    }),
+    "utf-8",
+  );
+  const codexDir = path.join(home, ".codex");
+  fs.mkdirSync(codexDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(codexDir, "config.toml"),
+    [
+      'model = "gpt-5"',
+      "",
+      "[mcp_servers.computer-use]",
+      'command = "node"',
+      'args = ["/stale/mcp-computer-use-server/index.js"]',
+      'env = { TERMCANVAS_COMPUTER_USE_STATE_FILE = "/old/state.json" }',
+      "",
+      "[mcp_servers.mempalace]",
+      'command = "python3"',
+      'args = ["-m", "mempalace"]',
+      "",
+    ].join("\n"),
+    "utf-8",
+  );
+
+  installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  const claude = readClaudeGlobalConfig(home);
+  assert.equal("termcanvas-computer-use" in claude.mcpServers, false);
+  assert.deepEqual(claude.mcpServers.mempalace, {
+    type: "stdio",
+    command: "python3",
+    args: ["-m", "mempalace"],
+  });
+  const codexConfig = fs.readFileSync(path.join(codexDir, "config.toml"), "utf-8");
+  assert.doesNotMatch(codexConfig, /\[mcp_servers\.computer-use\]/);
+  assert.doesNotMatch(codexConfig, /TERMCANVAS_COMPUTER_USE_/);
+  assert.doesNotMatch(codexConfig, /mcp-computer-use-server/);
+  assert.match(codexConfig, /\[mcp_servers\.mempalace\]/);
+});
+
+test("installSkillLinks preserves unrelated global MCP servers", () => {
+  const { home, sourceDir } = makeTempEnv();
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(
+    path.join(home, ".claude.json"),
+    JSON.stringify({
+      mcpServers: {
+        mempalace: { type: "stdio", command: "python3", args: ["-m", "mempalace"] },
+      },
+    }),
+    "utf-8",
+  );
+  const codexDir = path.join(home, ".codex");
+  fs.mkdirSync(codexDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(codexDir, "config.toml"),
+    [
+      "[mcp_servers.mempalace]",
+      'command = "python3"',
+      'args = ["-m", "mempalace"]',
+      "",
+    ].join("\n"),
+    "utf-8",
+  );
+
+  installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  const claude = readClaudeGlobalConfig(home);
+  assert.deepEqual(claude.mcpServers.mempalace, {
+    type: "stdio",
+    command: "python3",
+    args: ["-m", "mempalace"],
+  });
+  const codexConfig = fs.readFileSync(path.join(codexDir, "config.toml"), "utf-8");
+  assert.match(codexConfig, /\[mcp_servers\.mempalace\]/);
+  assert.doesNotMatch(codexConfig, /\[mcp_servers\.computer-use\]/);
+});
+
+test("installSkillLinks preserves non-TermCanvas Codex computer-use MCP table", () => {
+  const { home, sourceDir } = makeTempEnv();
+  const codexDir = path.join(home, ".codex");
+  fs.mkdirSync(codexDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(codexDir, "config.toml"),
+    [
+      "[mcp_servers.computer-use]",
+      'command = "node"',
+      'args = ["/custom/non-termcanvas-computer-use/index.js"]',
+      'env = { CUSTOM_COMPUTER_USE = "1" }',
+      "",
+      "[mcp_servers.mempalace]",
+      'command = "python3"',
+      'args = ["-m", "mempalace"]',
+      "",
+    ].join("\n"),
+    "utf-8",
+  );
+
+  installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  const codexConfig = fs.readFileSync(path.join(codexDir, "config.toml"), "utf-8");
+  assert.match(codexConfig, /\[mcp_servers\.computer-use\]/);
+  assert.match(codexConfig, /\/custom\/non-termcanvas-computer-use\/index\.js/);
+  assert.match(codexConfig, /CUSTOM_COMPUTER_USE/);
+  assert.match(codexConfig, /\[mcp_servers\.mempalace\]/);
+  assert.doesNotMatch(codexConfig, /mcp-computer-use-server/);
+  assert.doesNotMatch(codexConfig, /TERMCANVAS_COMPUTER_USE_/);
+});
+
+test("installSkillLinks removes legacy Codex computer-use dotted keys", () => {
+  const { home, sourceDir } = makeTempEnv();
+  const codexDir = path.join(home, ".codex");
+  fs.mkdirSync(codexDir, { recursive: true });
+  const stalePath =
+    "/Applications/TermCanvas.app/Contents/Resources/mcp-computer-use-server/index.js";
+  fs.writeFileSync(
+    path.join(codexDir, "config.toml"),
+    [
+      'model = "gpt-5"',
+      `mcp_servers.computer-use.command = "node"`,
+      `mcp_servers.computer-use.args = ["${stalePath}"]`,
+      'mcp_servers.computer-use.env = { TERMCANVAS_COMPUTER_USE_STATE_FILE = "/old/state.json" }',
+      "",
+      "[mcp_servers.mempalace]",
+      'command = "python3"',
+      'args = ["-m", "mempalace"]',
+      "",
+    ].join("\n"),
+    "utf-8",
+  );
+
+  installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  const codexConfig = fs.readFileSync(path.join(codexDir, "config.toml"), "utf-8");
+  assert.doesNotMatch(codexConfig, /mcp_servers\.computer-use\./);
+  assert.doesNotMatch(codexConfig, /mcp-computer-use-server/);
+  assert.doesNotMatch(codexConfig, /TERMCANVAS_COMPUTER_USE_/);
+  assert.match(codexConfig, /\[mcp_servers\.mempalace\]/);
+});
+
+test("installSkillLinks preserves non-TermCanvas Codex computer-use dotted keys", () => {
+  const { home, sourceDir } = makeTempEnv();
+  const codexDir = path.join(home, ".codex");
+  fs.mkdirSync(codexDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(codexDir, "config.toml"),
+    [
+      'model = "gpt-5"',
+      `mcp_servers.computer-use.command = "node"`,
+      'mcp_servers.computer-use.args = ["/custom/non-termcanvas-computer-use/index.js"]',
+      'mcp_servers.computer-use.env = { CUSTOM_COMPUTER_USE = "1" }',
+      "",
+    ].join("\n"),
+    "utf-8",
+  );
+
+  installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  const codexConfig = fs.readFileSync(path.join(codexDir, "config.toml"), "utf-8");
+  assert.match(codexConfig, /mcp_servers\.computer-use\.command = "node"/);
+  assert.match(codexConfig, /\/custom\/non-termcanvas-computer-use\/index\.js/);
+  assert.match(codexConfig, /CUSTOM_COMPUTER_USE/);
+  assert.doesNotMatch(codexConfig, /mcp-computer-use-server/);
+  assert.doesNotMatch(codexConfig, /TERMCANVAS_COMPUTER_USE_/);
+});
+
+test("uninstallSkillLinks removes global Computer Use MCP registration", () => {
+  const { home, sourceDir } = makeTempEnv();
+  fs.mkdirSync(home, { recursive: true });
+  fs.writeFileSync(
+    path.join(home, ".claude.json"),
+    JSON.stringify({
+      mcpServers: {
+        "termcanvas-computer-use": {
+          type: "stdio",
+          command: "node",
+          args: ["/stale/mcp-computer-use-server/index.js"],
+        },
+      },
+    }),
+    "utf-8",
+  );
+  const codexDir = path.join(home, ".codex");
+  fs.mkdirSync(codexDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(codexDir, "config.toml"),
+    [
+      "[mcp_servers.computer-use]",
+      'command = "node"',
+      'args = ["/stale/mcp-computer-use-server/index.js"]',
+      'env = { TERMCANVAS_COMPUTER_USE_STATE_FILE = "/old/state.json" }',
+      "",
+    ].join("\n"),
+    "utf-8",
+  );
+
+  uninstallSkillLinks({ home, sourceDir });
+
+  const claude = readClaudeGlobalConfig(home);
+  assert.equal(claude.mcpServers, undefined);
+  const codexConfig = fs.readFileSync(
+    path.join(home, ".codex", "config.toml"),
+    "utf-8",
+  );
+  assert.doesNotMatch(codexConfig, /\[mcp_servers\.computer-use\]/);
+});
+
+test("installSkillLinks heals legacy orphan computer-use keys in codex config.toml", () => {
+  // Earlier versions of removeTomlTable in skill-manager only stripped the
+  // `[mcp_servers.computer-use]` header plus its first body line, leaving the
+  // `args = …` / `env = { … }` lines orphaned in whichever section they had
+  // been written under. Repeated launches accumulated duplicates and Codex
+  // refused to start with a TOML "duplicate key" error. Verify that a single
+  // install on a polluted file removes all legacy Computer Use data.
+  const { home, sourceDir } = makeTempEnv();
+  const codexDir = path.join(home, ".codex");
+  fs.mkdirSync(codexDir, { recursive: true });
+
+  const stalePath =
+    "/Applications/TermCanvas.app/Contents/Resources/mcp-computer-use-server/index.js";
+  const polluted = [
+    'model = "gpt-4"',
+    "",
+    "[features]",
+    "apply_patch = true",
+    `args = ["${stalePath}"]`,
+    'env = { TERMCANVAS_COMPUTER_USE_STATE_FILE = "/old/state.json", TERMCANVAS_PORT_FILE = "/old/port" }',
+    `args = ["${stalePath}"]`,
+    'env = { TERMCANVAS_COMPUTER_USE_STATE_FILE = "/older/state.json" }',
+    "",
+    "[mcp_servers.computer-use]",
+    'command = "node"',
+    `args = ["${stalePath}"]`,
+    'env = { TERMCANVAS_COMPUTER_USE_STATE_FILE = "/old/state.json" }',
+    "",
+  ].join("\n");
+  fs.writeFileSync(path.join(codexDir, "config.toml"), polluted);
+
+  installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  const content = fs.readFileSync(path.join(codexDir, "config.toml"), "utf-8");
+
+  assert.match(content, /^model = "gpt-4"/m, "user model setting lost");
+  assert.match(content, /apply_patch = true/, "user feature flag lost");
+  assert.equal(
+    content.includes(stalePath),
+    false,
+    "stale MCP server path still present after cleanup",
+  );
+
+  const headerCount = (
+    content.match(/^\s*\[mcp_servers\.computer-use\]\s*$/gm) ?? []
+  ).length;
+  assert.equal(
+    headerCount,
+    0,
+    `expected no [mcp_servers.computer-use] headers, found ${headerCount}`,
+  );
+
+  const argsCount = (content.match(/^\s*args\s*=/gm) ?? []).length;
+  const envCount = (content.match(/^\s*env\s*=/gm) ?? []).length;
+  assert.equal(argsCount, 0, "orphan args lines were not stripped");
+  assert.equal(envCount, 0, "orphan env lines were not stripped");
+});
+
+test("ensureSkillLinks does not rewrite codex config.toml when already correct", () => {
+  const { home, sourceDir } = makeTempEnv();
+  installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  const configFile = path.join(home, ".codex", "config.toml");
+  const before = fs.readFileSync(configFile, "utf-8");
+  const beforeMtime = fs.statSync(configFile).mtimeNs;
+
+  ensureSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  const after = fs.readFileSync(configFile, "utf-8");
+  const afterMtime = fs.statSync(configFile).mtimeNs;
+  assert.equal(after, before, "config.toml content drifted on idempotent ensure");
+  assert.equal(
+    afterMtime,
+    beforeMtime,
+    "config.toml was rewritten despite content being identical",
+  );
+});
+
+test("ensureSkillLinks does not rewrite .claude.json without legacy Computer Use entry", () => {
+  const { home, sourceDir } = makeTempEnv();
+  fs.mkdirSync(home, { recursive: true });
+  const claudeConfigFile = path.join(home, ".claude.json");
+  fs.writeFileSync(
+    claudeConfigFile,
+    JSON.stringify({
+      mcpServers: {
+        mempalace: { type: "stdio", command: "python3", args: ["-m", "mempalace"] },
+      },
+    }),
+    "utf-8",
+  );
+  const beforeMtime = fs.statSync(claudeConfigFile).mtimeNs;
+
+  ensureSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  const afterMtime = fs.statSync(claudeConfigFile).mtimeNs;
+  assert.equal(
+    afterMtime,
+    beforeMtime,
+    ".claude.json was rewritten despite mcp entry being identical",
+  );
+});
+
+test("installSkillLinks creates codex hooks.json with all 5 events", () => {
+  const { home, sourceDir } = makeTempEnv();
+  installSkillLinks({ home, sourceDir, appVersion: "0.18.0" });
+
+  const hooksFile = path.join(home, ".codex", "hooks.json");
+  assert.equal(fs.existsSync(hooksFile), true, "hooks.json not created");
+
+  const hooks = JSON.parse(fs.readFileSync(hooksFile, "utf-8"));
+  for (const event of [
+    "PreToolUse",
+    "PostToolUse",
+    "SessionStart",
+    "Stop",
+    "UserPromptSubmit",
+  ]) {
+    assert.ok(hooks.hooks[event], `missing hook event: ${event}`);
+    assert.equal(hooks.hooks[event].length, 1);
+    assert.ok(
+      hooks.hooks[event][0].hooks[0].command.includes("termcanvas-hook.mjs"),
+      `${event} hook command missing termcanvas-hook.mjs`,
+    );
+  }
+});

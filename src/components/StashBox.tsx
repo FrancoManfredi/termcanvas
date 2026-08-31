@@ -1,0 +1,298 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  destroyAllStashedTerminalsInScene,
+  destroyStashedTerminalInScene,
+  unstashTerminalInScene,
+} from "../actions/terminalSceneActions";
+import { useProjectStore } from "../stores/projectStore";
+import { getTerminalRuntimePreviewAnsi } from "../terminal/terminalRuntimeStore";
+import { TERMINAL_TYPE_CONFIG } from "../terminal/terminalTypeConfig";
+import { useT } from "../i18n/useT";
+import { ConfirmDialog } from "./ui/ConfirmDialog";
+
+function StashCard({
+  terminalId,
+  onDestroy,
+}: {
+  terminalId: string;
+  onDestroy: () => void;
+}) {
+  const t = useT();
+  const terminal = useProjectStore(
+    useCallback(
+      (s) => {
+        for (const p of s.projects) {
+          for (const w of p.worktrees) {
+            const found = w.terminals.find(
+              (t) => t.id === terminalId && t.stashed,
+            );
+            if (found) return found;
+          }
+        }
+        return undefined;
+      },
+      [terminalId],
+    ),
+  );
+
+  if (!terminal) return null;
+
+  const config = TERMINAL_TYPE_CONFIG[terminal.type] ?? {
+    color: "#888",
+    label: terminal.type,
+  };
+  const preview = getTerminalRuntimePreviewAnsi(terminal.id) ?? "";
+  const previewText =
+    preview.trim().length > 0 ? preview.slice(0, 200) : "No buffered output.";
+
+  return (
+    <div className="flex items-start gap-2 rounded-md border border-[var(--border)] bg-[var(--bg)] p-2">
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-1.5 mb-1">
+          <span className="tc-eyebrow tc-mono" style={{ color: config.color }}>
+            {config.label}
+          </span>
+          {terminal.customTitle && (
+            <span className="tc-caption tc-mono truncate text-[var(--text-secondary)]">
+              {terminal.customTitle}
+            </span>
+          )}
+        </div>
+        <pre className="tc-caption tc-mono truncate whitespace-pre-wrap max-h-[40px] overflow-hidden">
+          {previewText}
+        </pre>
+      </div>
+      <div className="flex flex-col gap-1 shrink-0">
+        <button
+          className="tc-meta tc-mono px-2 py-0.5 rounded border border-[var(--border)] hover:text-[var(--text-primary)] hover:bg-[var(--surface-hover)] transition-colors"
+          style={{
+            transitionDuration: "var(--duration-quick)",
+            transitionTimingFunction: "var(--ease-out-soft)",
+          }}
+          onClick={() => unstashTerminalInScene(terminal.id)}
+          title={t.stash_restore}
+        >
+          {t.stash_restore}
+        </button>
+        <button
+          className="tc-meta tc-mono px-2 py-0.5 rounded border border-[var(--border)] text-[var(--text-faint)] hover:text-[var(--red)] hover:bg-[var(--surface-hover)] transition-colors"
+          style={{
+            transitionDuration: "var(--duration-quick)",
+            transitionTimingFunction: "var(--ease-out-soft)",
+          }}
+          onClick={onDestroy}
+        >
+          {t.stash_destroy}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export function StashBox() {
+  const t = useT();
+  // Derive a stable string key so Zustand doesn't re-render on every selector call
+  const stashedKey = useProjectStore((s) => {
+    const ids: string[] = [];
+    for (const p of s.projects) {
+      for (const w of p.worktrees) {
+        for (const t of w.terminals) {
+          if (t.stashed) ids.push(t.id);
+        }
+      }
+    }
+    return ids.join(",");
+  });
+  const items = useMemo(
+    () => (stashedKey ? stashedKey.split(",").map((id) => ({ id })) : []),
+    [stashedKey],
+  );
+  const [expanded, setExpanded] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [hasOverflow, setHasOverflow] = useState(false);
+  const [confirmDestroyId, setConfirmDestroyId] = useState<string | null>(null);
+  const [confirmClearAll, setConfirmClearAll] = useState(false);
+
+  const handleClickAway = useCallback((e: MouseEvent) => {
+    if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
+      setExpanded(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!expanded) return;
+    window.addEventListener("mousedown", handleClickAway);
+    return () => window.removeEventListener("mousedown", handleClickAway);
+  }, [expanded, handleClickAway]);
+
+  useEffect(() => {
+    const onDragStart = () => setDragActive(true);
+    const onDragEnd = () => setDragActive(false);
+    window.addEventListener("termcanvas:terminal-drag-active", onDragStart);
+    window.addEventListener("termcanvas:terminal-drag-end", onDragEnd);
+    return () => {
+      window.removeEventListener(
+        "termcanvas:terminal-drag-active",
+        onDragStart,
+      );
+      window.removeEventListener("termcanvas:terminal-drag-end", onDragEnd);
+    };
+  }, []);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el || !expanded) {
+      setHasOverflow(false);
+      return;
+    }
+    const check = () => setHasOverflow(el.scrollHeight > el.clientHeight);
+    check();
+    const observer = new ResizeObserver(check);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [expanded, items.length]);
+
+  const showButton = true;
+
+  const buttonLabel =
+    dragActive && items.length === 0
+      ? t.stash_drop_hint
+      : t.stash_count(items.length);
+
+  return (
+    <div
+      ref={panelRef}
+      className="fixed bottom-4 right-4 z-[90]"
+      data-stash-drop-target
+    >
+      {expanded ? (
+        <div
+          className="tc-enter-fade-up w-72 max-h-80 flex flex-col rounded-lg border border-[var(--border)] bg-[var(--surface)]"
+          style={{ boxShadow: "var(--shadow-elev-2)" }}
+          aria-label={t.stash_box}
+        >
+          <div className="flex items-center justify-between px-3 py-2 border-b border-[var(--border)]">
+            <span className="tc-eyebrow tc-mono text-[var(--text-primary)]">
+              {items.length > 0
+                ? `${t.stash_box} (${items.length})`
+                : t.stash_box}
+            </span>
+            <div className="flex items-center gap-1">
+              {items.length > 0 && (
+                <button
+                  className="tc-caption tc-mono px-1.5 py-0.5 rounded hover:text-[var(--red)] transition-colors"
+                  style={{
+                    transitionDuration: "var(--duration-quick)",
+                    transitionTimingFunction: "var(--ease-out-soft)",
+                  }}
+                  onClick={() => setConfirmClearAll(true)}
+                >
+                  {t.stash_clear_all}
+                </button>
+              )}
+              <button
+                className="text-[var(--text-faint)] hover:text-[var(--text-primary)] transition-colors p-0.5"
+                style={{
+                  transitionDuration: "var(--duration-quick)",
+                  transitionTimingFunction: "var(--ease-out-soft)",
+                }}
+                onClick={() => setExpanded(false)}
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                  <path
+                    d="M2.5 2.5L7.5 7.5M7.5 2.5L2.5 7.5"
+                    stroke="currentColor"
+                    strokeWidth="1.2"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              </button>
+            </div>
+          </div>
+          <div className="relative flex-1 min-h-0">
+            <div
+              ref={scrollRef}
+              className="overflow-auto max-h-[calc(20rem-2.5rem)] p-2 flex flex-col gap-1.5"
+            >
+              {items.length === 0 ? (
+                <div className="tc-meta text-center py-4">{t.stash_empty}</div>
+              ) : (
+                items.map((item) => (
+                  <StashCard
+                    key={item.id}
+                    terminalId={item.id}
+                    onDestroy={() => setConfirmDestroyId(item.id)}
+                  />
+                ))
+              )}
+            </div>
+            {hasOverflow && (
+              <div className="absolute bottom-0 left-0 right-0 h-6 pointer-events-none bg-gradient-to-t from-[var(--surface)] to-transparent rounded-b-lg" />
+            )}
+          </div>
+        </div>
+      ) : (
+        <button
+          className={`flex items-center gap-1.5 rounded-lg border px-3 py-2 transition-all ${
+            dragActive
+              ? "border-[var(--accent)] bg-[var(--accent)]/20 scale-110"
+              : "border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--surface-hover)]"
+          }`}
+          style={{
+            boxShadow: "var(--shadow-elev-1)",
+            transitionDuration: "var(--duration-quick)",
+            transitionTimingFunction: "var(--ease-out-soft)",
+          }}
+          onClick={() => setExpanded(true)}
+          data-stash-drop-target
+          aria-label={t.stash_count(items.length)}
+        >
+          <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+            <path
+              d="M2 4h12v2H2zM3 6v6a1 1 0 001 1h8a1 1 0 001-1V6"
+              stroke="currentColor"
+              strokeWidth="1.2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+            <path
+              d="M6 9h4"
+              stroke="currentColor"
+              strokeWidth="1.2"
+              strokeLinecap="round"
+            />
+          </svg>
+          <span className="tc-meta tc-mono text-[var(--text-secondary)]">
+            {buttonLabel}
+          </span>
+        </button>
+      )}
+      <ConfirmDialog
+        open={confirmDestroyId !== null}
+        title={t.stash_destroy_dialog_title}
+        body={t.stash_destroy_dialog_body}
+        confirmLabel={t.stash_destroy}
+        confirmTone="danger"
+        onCancel={() => setConfirmDestroyId(null)}
+        onConfirm={() => {
+          if (confirmDestroyId) destroyStashedTerminalInScene(confirmDestroyId);
+          setConfirmDestroyId(null);
+        }}
+      />
+      <ConfirmDialog
+        open={confirmClearAll}
+        title={t.stash_clear_all_dialog_title}
+        body={t.stash_clear_all_dialog_body}
+        confirmLabel={t.stash_clear_all}
+        confirmTone="danger"
+        onCancel={() => setConfirmClearAll(false)}
+        onConfirm={() => {
+          destroyAllStashedTerminalsInScene();
+          setConfirmClearAll(false);
+        }}
+      />
+    </div>
+  );
+}

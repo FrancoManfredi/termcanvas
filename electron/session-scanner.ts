@@ -1,0 +1,959 @@
+import { execFile } from "node:child_process";
+import fs from "node:fs";
+import fsp from "node:fs/promises";
+import path from "node:path";
+import os from "node:os";
+import {
+  parseSessionTelemetryLine,
+  type SessionType,
+} from "./session-watcher.ts";
+import type {
+  SessionInfo,
+  TimelineEvent,
+  ReplayTimeline,
+} from "../shared/sessions.ts";
+import type { NormalizedSessionTelemetryEvent } from "../shared/telemetry.ts";
+import { findClaudeJsonlFiles, findCodexJsonlFiles, findKimiSessionFiles } from "./usage-collector.ts";
+
+const SCAN_INTERVAL = 10_000;
+const LIVE_THRESHOLD_MS = 60_000;
+const HISTORY_WINDOW_MS = 24 * 60 * 60 * 1000;
+const FIND_TIMEOUT_MS = 5_000;
+const TAIL_BYTES = 65536;
+// Per-message cap for replay-timeline content. The old 200-char cap
+// was fine for "a one-line preview in a sidebar list" but turned the
+// full-fidelity replay into a chopped-off log — users couldn't
+// actually read a conversation end-to-end because every message got
+// truncated mid-sentence. 16 KB comfortably covers the 95th-
+// percentile assistant response and keeps a ceiling so a runaway
+// tool output (e.g. `cat` on a big file) can't pull 500 KB of string
+// into every timeline event. Anything past this gets slice-truncated;
+// the UI treats that as acceptable lossy display.
+const REPLAY_TEXT_MAX_CHARS = 16_000;
+
+/**
+ * Remove the noise Claude Code / Codex inject into user messages:
+ *
+ *  - `<system-reminder>...</system-reminder>` wrappers, which is
+ *    where CLAUDE.md / AGENTS.md content lands on the first user
+ *    turn. Users who saw these as the "first prompt" complained —
+ *    it hid the actual question they asked.
+ *  - `<local-command-caveat>`, `<command-name>`, `<command-message>`,
+ *    `<command-args>`, `<command-stdout>`, `<command-type>` blocks
+ *    that the `/resume`, `/compact`, and other slash-command flows
+ *    emit as pseudo-user messages. They're housekeeping, not prose.
+ *
+ * If nothing is left after stripping, the message is treated as
+ * entirely synthetic and skipped (no user_prompt event emitted,
+ * no "first prompt" captured for the browse list).
+ */
+export function stripSyntheticUserBlocks(text: string): string {
+  // Signature-based early-out for messages that are ENTIRELY the
+  // framework's first-turn injection. Codex's real-world format
+  // (seen in rollout-*.jsonl v0.121) is a `response_item` user
+  // message whose first input_text block starts with
+  //   "# AGENTS.md instructions for /path/to/project"
+  // …and contains nothing else the user typed. There's no wrapping
+  // tag to strip, so content-based cleanup can't help — we just
+  // recognise the signature and discard the whole block. Claude's
+  // equivalent uses CLAUDE.md; match both.
+  if (/^\s*#\s*(CLAUDE|AGENTS)\.md\s+instructions\s+for\s+/i.test(text)) {
+    return "";
+  }
+
+  let out = text
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, "")
+    .replace(/<local-command-caveat>[\s\S]*?<\/local-command-caveat>/gi, "")
+    .replace(/<local-command-stdout>[\s\S]*?<\/local-command-stdout>/gi, "")
+    .replace(/<command-name>[\s\S]*?<\/command-name>/gi, "")
+    .replace(/<command-message>[\s\S]*?<\/command-message>/gi, "")
+    .replace(/<command-args>[\s\S]*?<\/command-args>/gi, "")
+    .replace(/<command-stdout>[\s\S]*?<\/command-stdout>/gi, "")
+    .replace(/<command-type>[\s\S]*?<\/command-type>/gi, "")
+    // Codex per-turn envelope tags. These can appear on their own
+    // or alongside the user's real text in the SAME message, so
+    // they're handled by substring removal (not "whole message is
+    // noise"). Non-greedy, multiline.
+    .replace(/<environment_context>[\s\S]*?<\/environment_context>/gi, "")
+    .replace(/<permissions[_ -]instructions>[\s\S]*?<\/permissions[_ -]instructions>/gi, "")
+    .replace(/<collaboration_mode>[\s\S]*?<\/collaboration_mode>/gi, "")
+    .replace(/<skills_instructions>[\s\S]*?<\/skills_instructions>/gi, "")
+    .replace(/<user_instructions>[\s\S]*?<\/user_instructions>/gi, "")
+    .replace(/<user-instructions>[\s\S]*?<\/user-instructions>/gi, "")
+    .replace(/<agents_md>[\s\S]*?<\/agents_md>/gi, "")
+    .replace(/<agent_instructions>[\s\S]*?<\/agent_instructions>/gi, "")
+    .replace(/<developer>[\s\S]*?<\/developer>/gi, "")
+    .replace(/<project_context>[\s\S]*?<\/project_context>/gi, "")
+    .replace(/<project-context>[\s\S]*?<\/project-context>/gi, "")
+    .trim();
+
+  // Fallback: a CLAUDE.md heading block without the "instructions
+  // for" suffix. Conservative — we only skip when the opener
+  // unambiguously names the file and there's a blank-line break
+  // before the rest.
+  const headingRe = /^(#\s*)?(CLAUDE|AGENTS)\.md\b[\s\S]*?\n\s*\n/i;
+  const stripped = out.replace(headingRe, "").trim();
+  if (stripped.length > 0 && stripped !== out) out = stripped;
+
+  return out;
+}
+
+function getObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+/**
+ * Extract the prose a user typed for a single JSONL entry.
+ *
+ * Returns "" when the entry isn't a real user message — i.e. an
+ * assistant turn, a synthetic command/system-reminder banner, an
+ * empty Codex framework injection, or any non-prompt entry. The same
+ * predicate decides whether to emit a `user_prompt` event in the
+ * replay timeline AND whether a line is a "fork point" boundary in
+ * `session-fork.ts`. Sharing the predicate guarantees the fork UI's
+ * turnIndex always agrees with what the replay view shows.
+ */
+export function extractUserPromptText(raw: Record<string, unknown>): string {
+  if (raw.type === "user") {
+    if (raw.isMeta === true) return "";
+    const message = raw.message as Record<string, unknown> | undefined;
+    if (message) {
+      const content = message.content;
+      let rawText = "";
+      if (typeof content === "string") {
+        rawText = content;
+      } else if (Array.isArray(content)) {
+        for (const block of content) {
+          if (!block || typeof block !== "object") continue;
+          const entry = block as Record<string, unknown>;
+          if (entry.type === "text" && typeof entry.text === "string") {
+            rawText = entry.text;
+            break;
+          }
+          if (entry.type === "tool_result") continue;
+        }
+      }
+      if (rawText) {
+        const cleaned = stripSyntheticUserBlocks(rawText);
+        if (cleaned) return cleaned.slice(0, REPLAY_TEXT_MAX_CHARS);
+      }
+    }
+  }
+
+  if (typeof raw.role === "string" && raw.role === "user") {
+    const content = raw.content;
+    let rawText = "";
+    if (typeof content === "string") {
+      rawText = content;
+    } else if (Array.isArray(content)) {
+      for (const block of content) {
+        if (!block || typeof block !== "object") continue;
+        const entry = block as Record<string, unknown>;
+        const text =
+          typeof entry.text === "string"
+            ? entry.text
+            : typeof entry.content === "string"
+              ? entry.content
+              : "";
+        if (text) {
+          rawText = text;
+          break;
+        }
+      }
+    }
+    if (rawText) {
+      const cleaned = stripSyntheticUserBlocks(rawText);
+      if (cleaned) return cleaned.slice(0, REPLAY_TEXT_MAX_CHARS);
+    }
+  }
+
+  const payload = getObject(raw.payload);
+  if (!payload) return "";
+  if (
+    raw.type === "response_item" &&
+    payload.type === "message" &&
+    payload.role === "user"
+  ) {
+    const content = payload.content;
+    if (Array.isArray(content)) {
+      for (const block of content) {
+        if (!block || typeof block !== "object") continue;
+        const entry = block as Record<string, unknown>;
+        const text =
+          typeof entry.text === "string"
+            ? entry.text
+            : typeof entry.content === "string"
+              ? entry.content
+              : "";
+        if (!text) continue;
+        const cleaned = stripSyntheticUserBlocks(text);
+        if (cleaned) return cleaned.slice(0, REPLAY_TEXT_MAX_CHARS);
+      }
+      return "";
+    }
+    if (typeof content === "string") {
+      const cleaned = stripSyntheticUserBlocks(content);
+      return cleaned ? cleaned.slice(0, REPLAY_TEXT_MAX_CHARS) : "";
+    }
+    return "";
+  }
+
+  if (
+    raw.type === "event_msg" &&
+    payload.type === "user_message" &&
+    typeof payload.message === "string"
+  ) {
+    const cleaned = stripSyntheticUserBlocks(payload.message);
+    return cleaned ? cleaned.slice(0, REPLAY_TEXT_MAX_CHARS) : "";
+  }
+  return "";
+}
+
+export class SessionScanner {
+  private timer: ReturnType<typeof setInterval> | null = null;
+  private sessions: SessionInfo[] = [];
+  private onChange: ((sessions: SessionInfo[]) => void) | null = null;
+
+  start(onChange: (sessions: SessionInfo[]) => void): void {
+    this.onChange = onChange;
+    this.scan();
+    this.timer = setInterval(() => this.scan(), SCAN_INTERVAL);
+  }
+
+  stop(): void {
+    if (this.timer) {
+      clearInterval(this.timer);
+      this.timer = null;
+    }
+  }
+
+  getSessions(): SessionInfo[] {
+    return this.sessions;
+  }
+
+  private scan(): void {
+    const claudeDir = path.join(os.homedir(), ".claude", "projects");
+    const finalize = (claudeFiles: string[]) => {
+      const now = Date.now();
+      const results: SessionInfo[] = [];
+      const files = [
+        ...claudeFiles.map((filePath) => ({
+          filePath,
+          type: "claude" as const,
+        })),
+        ...findCodexJsonlFiles().map((filePath) => ({
+          filePath,
+          type: "codex" as const,
+        })),
+        ...findKimiSessionFiles().map((entry) => ({
+          filePath: entry.filePath,
+          type: "kimi" as const,
+        })),
+      ];
+
+      for (const { filePath, type } of files) {
+        try {
+          const stat = fs.statSync(filePath);
+          if (now - stat.mtimeMs > HISTORY_WINDOW_MS) {
+            continue;
+          }
+
+          const isLive = now - stat.mtimeMs < LIVE_THRESHOLD_MS;
+          // Codex's resume-able id is inside the JSONL; its filename
+          // stem (`rollout-<ts>-<uuid>`) isn't what `codex resume`
+          // accepts. Claude uses the filename directly.
+          const sessionId =
+            type === "codex"
+              ? this.readCodexSessionId(filePath) ??
+                path.basename(filePath, ".jsonl")
+              : type === "kimi"
+                ? path.basename(path.dirname(filePath))
+                : path.basename(filePath, ".jsonl");
+          const projectDir = this.resolveProjectDir(filePath, type, sessionId);
+          const tail = this.readTail(filePath, stat.size);
+          const parsed = this.parseTail(tail, type);
+
+          // If the session file hasn't been modified recently, the agent is no
+          // longer active.  Downgrade in-progress statuses so stale sessions
+          // don't appear as "Thinking" / "Running" in the sidebar.
+          let status = parsed.status;
+          if (
+            !isLive &&
+            (status === "generating" || status === "tool_running")
+          ) {
+            status = "idle";
+          }
+
+          results.push({
+            sessionId,
+            projectDir,
+            filePath,
+            isLive,
+            isManaged: false,
+            status,
+            currentTool: isLive ? parsed.currentTool : undefined,
+            startedAt: new Date(stat.birthtimeMs).toISOString(),
+            lastActivityAt: new Date(stat.mtimeMs).toISOString(),
+            messageCount: parsed.messageCount,
+            tokenTotal: parsed.tokenTotal,
+          });
+        } catch {}
+      }
+
+      results.sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt));
+      this.sessions = results;
+      this.onChange?.(results);
+    };
+
+    if (!fs.existsSync(claudeDir)) {
+      finalize([]);
+      return;
+    }
+
+    // Walk the projects tree in pure Node: spawning the Unix `find`
+    // binary is not portable (Windows has no such executable).
+    finalize(findClaudeJsonlFiles());
+  }
+
+  private readTail(filePath: string, fileSize: number): string {
+    const start = Math.max(0, fileSize - TAIL_BYTES);
+    const buf = Buffer.alloc(Math.min(TAIL_BYTES, fileSize));
+    const fd = fs.openSync(filePath, "r");
+    try {
+      fs.readSync(fd, buf, 0, buf.length, start);
+      return buf.toString("utf-8");
+    } finally {
+      fs.closeSync(fd);
+    }
+  }
+
+  private parseTail(
+    tail: string,
+    type: SessionType,
+  ): {
+    status: SessionInfo["status"];
+    currentTool?: string;
+    messageCount: number;
+    tokenTotal: number;
+  } {
+    const lines = tail.split("\n").filter(Boolean);
+    let messageCount = 0;
+    let tokenTotal = 0;
+    let status: SessionInfo["status"] = "idle";
+    let currentTool: string | undefined;
+
+    for (const line of lines) {
+      const events = parseSessionTelemetryLine(line, type);
+      for (const ev of events) {
+        messageCount++;
+        if (ev.token_total) tokenTotal = ev.token_total;
+        if (ev.turn_state === "tool_running") {
+          status = "tool_running";
+          currentTool = ev.tool_name;
+        } else if (
+          ev.turn_state === "thinking" ||
+          ev.turn_state === "in_turn"
+        ) {
+          status = "generating";
+        } else if (ev.turn_state === "turn_complete") {
+          status = "turn_complete";
+          currentTool = undefined;
+        }
+      }
+    }
+    return { status, currentTool, messageCount, tokenTotal };
+  }
+
+  async loadReplay(filePath: string): Promise<ReplayTimeline> {
+    const content = await fsp.readFile(filePath, "utf-8");
+    const lines = content.split("\n").filter(Boolean);
+    const type = this.detectSessionType(filePath, lines);
+    // For Codex, the real resume-able sessionId lives inside
+    // session_meta.payload.id — not the filename stem. Claude uses
+    // the filename as its ID so falling back is correct there.
+    const sessionId =
+      type === "codex"
+        ? this.readCodexSessionId(filePath, lines) ??
+          path.basename(filePath, ".jsonl")
+        : type === "codebuddy"
+          ? this.readCodebuddySessionId(filePath, lines) ??
+            path.basename(filePath, ".jsonl")
+          : path.basename(filePath, ".jsonl");
+    const projectDir = this.resolveProjectDir(filePath, type, sessionId, lines);
+    const events: TimelineEvent[] = [];
+    const editIndices: Array<{ index: number; filePath: string }> = [];
+    let totalTokens = 0;
+
+    for (const line of lines) {
+      let raw: Record<string, unknown>;
+      try {
+        raw = JSON.parse(line);
+      } catch {
+        continue;
+      }
+
+      const timestamp =
+        typeof raw.timestamp === "string"
+          ? raw.timestamp
+          : new Date().toISOString();
+      const parsed = parseSessionTelemetryLine(line, type);
+
+      const userText = this.extractUserPromptText(raw);
+      if (userText) {
+        const idx = events.length;
+        events.push({
+          index: idx,
+          timestamp,
+          type: "user_prompt",
+          textPreview: userText,
+        });
+      }
+
+      for (const ev of parsed) {
+        if (ev.token_total) totalTokens = ev.token_total;
+        const timelineType = this.mapEventType(ev);
+        if (!timelineType) continue;
+
+        const textPreview = this.extractPreview(raw, ev);
+        const toolFilePath = this.extractToolFilePath(raw, ev.tool_name);
+
+        const idx = events.length;
+        events.push({
+          index: idx,
+          timestamp: ev.at ?? timestamp,
+          type: timelineType,
+          toolName: ev.tool_name,
+          filePath: toolFilePath,
+          textPreview,
+          tokenDelta: ev.token_total,
+        });
+
+        if (
+          toolFilePath &&
+          (ev.tool_name === "Edit" ||
+            ev.tool_name === "Write" ||
+            ev.tool_name === "apply_patch")
+        ) {
+          editIndices.push({ index: idx, filePath: toolFilePath });
+        }
+      }
+    }
+
+    return {
+      sessionId,
+      projectDir,
+      filePath,
+      events,
+      editIndices,
+      totalTokens,
+      startedAt: events[0]?.timestamp ?? "",
+      endedAt: events[events.length - 1]?.timestamp ?? "",
+    };
+  }
+
+  private mapEventType(
+    event: NormalizedSessionTelemetryEvent,
+  ): TimelineEvent["type"] | null {
+    switch (event.event_type) {
+      case "thinking":
+        return "thinking";
+      case "reasoning":
+        return "thinking";
+      case "tool_use":
+        return "tool_use";
+      case "function_call":
+        return "tool_use";
+      case "custom_tool_call":
+        return "tool_use";
+      case "exec_command_begin":
+        return "tool_use";
+      case "patch_apply_begin":
+        return "tool_use";
+      case "web_search_begin":
+        return "tool_use";
+      case "mcp_tool_call_begin":
+        return "tool_use";
+      case "tool_result":
+        return "tool_result";
+      case "function_call_output":
+        return "tool_result";
+      case "custom_tool_call_output":
+        return "tool_result";
+      case "exec_command_end":
+        return "tool_result";
+      case "patch_apply_end":
+        return "tool_result";
+      case "web_search_end":
+        return "tool_result";
+      case "mcp_tool_call_end":
+        return "tool_result";
+      case "assistant_message":
+        return "assistant_text";
+      case "agent_message":
+        // Codex writes assistant turns TWICE in the JSONL: once as a
+        // streaming `event_msg/agent_message` (lifecycle signal) and
+        // once as a finalized `response_item/message/role=assistant`
+        // (the canonical record). Both mapped to `assistant_text`
+        // previously, which duplicated every assistant message in
+        // the replay. Prefer the response_item path — it carries
+        // full content in a stable shape. This one becomes a no-op
+        // for the timeline.
+        return null;
+      case "message":
+        return event.role === "assistant" ? "assistant_text" : null;
+      case "turn_complete":
+        return "turn_complete";
+      case "task_complete":
+        return "turn_complete";
+      case "turn_aborted":
+        return "error";
+      case "error":
+        return "error";
+      case "user_message":
+        return null;
+      case "assistant_stop":
+        return null;
+      case "task_started":
+        return null;
+      case "token_count":
+        return null;
+      case "context_compacted":
+        return null;
+      case "compacted":
+        return null;
+      case "queue_operation":
+        return null;
+      case "progress":
+        return null;
+      default:
+        return null;
+    }
+  }
+
+  private extractPreview(
+    raw: Record<string, unknown>,
+    event: NormalizedSessionTelemetryEvent,
+  ): string {
+    const message = raw.message as Record<string, unknown> | undefined;
+    if (message) {
+      const preview = this.extractTextFromContent(message.content);
+      if (preview) return preview;
+      if (Array.isArray(message.content)) {
+        for (const block of message.content) {
+          if (!block || typeof block !== "object") continue;
+          const entry = block as Record<string, unknown>;
+          if (typeof entry.input === "object" && entry.input) {
+            const input = entry.input as Record<string, unknown>;
+            if (typeof input.command === "string")
+              return `$ ${input.command.slice(0, 180)}`;
+            if (typeof input.file_path === "string") return input.file_path;
+          }
+        }
+      }
+    }
+
+    const payload = this.getObject(raw.payload);
+    if (!payload) return "";
+
+    if (
+      raw.type === "event_msg" &&
+      (payload.type === "user_message" || payload.type === "agent_message") &&
+      typeof payload.message === "string"
+    ) {
+      return payload.message.slice(0, REPLAY_TEXT_MAX_CHARS);
+    }
+
+    if (raw.type !== "response_item") {
+      return "";
+    }
+
+    if (payload.type === "message") {
+      return this.extractTextFromContent(payload.content);
+    }
+
+    if (payload.type === "reasoning") {
+      return this.extractTextFromContent(payload.summary);
+    }
+
+    if (
+      payload.type === "function_call" ||
+      payload.type === "custom_tool_call"
+    ) {
+      const input = this.extractCodexToolInput(payload);
+      if (typeof input?.command === "string")
+        return `$ ${input.command.slice(0, 180)}`;
+      if (typeof input?.cmd === "string") return `$ ${input.cmd.slice(0, 180)}`;
+      if (typeof input?.file_path === "string") return input.file_path;
+      if (typeof input?.path === "string") return input.path;
+      if (typeof payload.arguments === "string")
+        return payload.arguments.slice(0, REPLAY_TEXT_MAX_CHARS);
+      if (
+        typeof payload.input === "string" &&
+        event.tool_name !== "apply_patch"
+      ) {
+        return payload.input.slice(0, REPLAY_TEXT_MAX_CHARS);
+      }
+    }
+
+    if (
+      (payload.type === "function_call_output" ||
+        payload.type === "custom_tool_call_output") &&
+      typeof payload.output === "string"
+    ) {
+      return payload.output.slice(0, REPLAY_TEXT_MAX_CHARS);
+    }
+
+    return "";
+  }
+
+  private extractUserPromptText(raw: Record<string, unknown>): string {
+    // Implementation lives in the free `extractUserPromptText` export
+    // (top of file) so `session-fork.ts` can share the exact same
+    // predicate when locating turn boundaries to fork from. Keeping
+    // the method as a thin pass-through preserves the previous
+    // calling convention inside SessionScanner.
+    return extractUserPromptText(raw);
+  }
+
+  private extractToolFilePath(
+    raw: Record<string, unknown>,
+    toolName?: string,
+  ): string | undefined {
+    const message = raw.message as Record<string, unknown> | undefined;
+    const content = Array.isArray(message?.content) ? message!.content : [];
+    for (const block of content) {
+      if (!block || typeof block !== "object") continue;
+      const entry = block as Record<string, unknown>;
+      if (
+        entry.type === "tool_use" &&
+        typeof entry.input === "object" &&
+        entry.input
+      ) {
+        const input = entry.input as Record<string, unknown>;
+        if (typeof input.file_path === "string") return input.file_path;
+        if (typeof input.path === "string") return input.path;
+      }
+    }
+
+    const payload = this.getObject(raw.payload);
+    if (
+      toolName &&
+      payload &&
+      raw.type === "response_item" &&
+      (payload.type === "function_call" || payload.type === "custom_tool_call")
+    ) {
+      const input = this.extractCodexToolInput(payload);
+      const candidate =
+        typeof input?.file_path === "string"
+          ? input.file_path
+          : typeof input?.path === "string"
+            ? input.path
+            : typeof input?.filePath === "string"
+              ? input.filePath
+              : typeof input?.oldPath === "string"
+                ? input.oldPath
+                : typeof input?.newPath === "string"
+                  ? input.newPath
+                  : undefined;
+      if (candidate) return candidate;
+    }
+
+    return undefined;
+  }
+
+  private detectSessionType(filePath: string, lines: string[]): SessionType {
+    const normalizedPath = filePath.replace(/\\/g, "/");
+    if (normalizedPath.includes("/.codex/")) return "codex";
+    if (normalizedPath.includes("/.claude/")) return "claude";
+    if (normalizedPath.includes("/.kimi/")) return "kimi";
+    if (normalizedPath.includes("/.codebuddy/")) return "codebuddy";
+    if (normalizedPath.includes("/.wuu/")) return "wuu";
+
+    for (const line of lines.slice(0, 20)) {
+      try {
+        const raw = JSON.parse(line) as Record<string, unknown>;
+        if (
+          typeof raw.sessionId === "string" &&
+          typeof raw.cwd === "string"
+        ) {
+          return "codebuddy";
+        }
+        if (
+          raw.type === "session_meta" ||
+          raw.type === "event_msg" ||
+          raw.type === "response_item" ||
+          raw.type === "compacted"
+        ) {
+          return "codex";
+        }
+        if (
+          raw.type === "assistant" ||
+          raw.type === "user" ||
+          raw.type === "system" ||
+          raw.type === "queue-operation" ||
+          raw.type === "progress"
+        ) {
+          return "claude";
+        }
+        if (
+          typeof raw.role === "string" &&
+          (raw.role === "assistant" ||
+            raw.role === "user" ||
+            raw.role === "tool" ||
+            raw.role === "system" ||
+            raw.role === "meta")
+        ) {
+          // wuu/kimi/codebuddy all use role-based JSONL; path check already handled above.
+          // Fall back to codebuddy when cwd/sessionId hint present, otherwise wuu.
+          if (
+            typeof (raw as Record<string, unknown>).sessionId === "string" ||
+            normalizedPath.includes("codebuddy")
+          ) {
+            return "codebuddy";
+          }
+          return "wuu";
+        }
+      } catch {}
+    }
+
+    return "claude";
+  }
+
+  private resolveProjectDir(
+    filePath: string,
+    type: SessionType,
+    sessionId: string,
+    lines?: string[],
+  ): string {
+    if (type === "claude") {
+      // Claude records include a top-level `cwd` field on each line
+      // with the real absolute working directory. Read that — it's
+      // what downstream code (e.g. the Resume button's worktree
+      // lookup) needs to match against a canvas worktree.path.
+      // Fall back to the dash-decoded directory name if no record
+      // carries a cwd (corrupt/empty file): `-Users-foo-bar` →
+      // `/Users/foo/bar`. Lossy for projects with literal dashes in
+      // their paths but strictly better than returning the encoded
+      // form which would never match any real worktree.
+      const cwd = this.readClaudeProjectDir(filePath, lines);
+      if (cwd) return cwd;
+      const encoded = path.basename(path.dirname(filePath));
+      return encoded.startsWith("-")
+        ? `/${encoded.slice(1).replace(/-/g, "/")}`
+        : encoded.replace(/-/g, "/");
+    }
+
+    if (type === "kimi") {
+      return this.readKimiProjectDir(filePath) ?? sessionId;
+    }
+
+    if (type === "codebuddy") {
+      return this.readCodebuddyProjectDir(filePath, lines) ?? sessionId;
+    }
+
+    if (type === "wuu") {
+      // wuu sessions live under <cwd>/.wuu/sessions, so cwd is the project dir
+      return path.dirname(path.dirname(path.dirname(filePath))) ?? sessionId;
+    }
+
+    return this.readCodexProjectDir(filePath, lines) ?? sessionId;
+  }
+
+  private readClaudeProjectDir(
+    filePath: string,
+    lines?: string[],
+  ): string | null {
+    const sourceLines = lines ?? this.readHeadLines(filePath, 20);
+    for (const line of sourceLines) {
+      if (!line.trim()) continue;
+      try {
+        const raw = JSON.parse(line) as Record<string, unknown>;
+        if (typeof raw.cwd === "string" && raw.cwd) {
+          return raw.cwd;
+        }
+      } catch {}
+    }
+    return null;
+  }
+
+  /**
+   * Codex stores its session ID in `session_meta.payload.id`. The
+   * file is named `rollout-<ts>-<uuid>.jsonl` — the stem is NOT a
+   * valid argument for `codex resume`. Prefer `payload.id`; callers
+   * can fall back to the filename stem when it's absent.
+   */
+  private readCodexSessionId(
+    filePath: string,
+    lines?: string[],
+  ): string | null {
+    const sourceLines = lines ?? this.readHeadLines(filePath, 20);
+    for (const line of sourceLines) {
+      if (!line.trim()) continue;
+      try {
+        const raw = JSON.parse(line) as Record<string, unknown>;
+        const payload = this.getObject(raw.payload);
+        if (
+          raw.type === "session_meta" &&
+          typeof payload?.id === "string" &&
+          payload.id
+        ) {
+          return payload.id;
+        }
+      } catch {}
+    }
+    return null;
+  }
+
+  private readCodexProjectDir(
+    filePath: string,
+    lines?: string[],
+  ): string | null {
+    const sourceLines = lines ?? this.readHeadLines(filePath, 20);
+    for (const line of sourceLines) {
+      if (!line.trim()) continue;
+      try {
+        const raw = JSON.parse(line) as Record<string, unknown>;
+        const payload = this.getObject(raw.payload);
+        if (
+          raw.type === "session_meta" &&
+          typeof payload?.cwd === "string" &&
+          payload.cwd
+        ) {
+          return payload.cwd;
+        }
+      } catch {}
+    }
+    return null;
+  }
+
+  private readCodebuddySessionId(
+    filePath: string,
+    lines?: string[],
+  ): string | null {
+    const sourceLines = lines ?? this.readHeadLines(filePath, 20);
+    for (const line of sourceLines) {
+      if (!line.trim()) continue;
+      try {
+        const raw = JSON.parse(line) as Record<string, unknown>;
+        if (typeof raw.sessionId === "string" && raw.sessionId) {
+          return raw.sessionId;
+        }
+        const payload = this.getObject(raw.payload);
+        if (typeof payload?.id === "string" && payload.id) {
+          return payload.id;
+        }
+      } catch {}
+    }
+    return null;
+  }
+
+  private readCodebuddyProjectDir(
+    filePath: string,
+    lines?: string[],
+  ): string | null {
+    const sourceLines = lines ?? this.readHeadLines(filePath, 20);
+    for (const line of sourceLines) {
+      if (!line.trim()) continue;
+      try {
+        const raw = JSON.parse(line) as Record<string, unknown>;
+        if (typeof raw.cwd === "string" && raw.cwd) {
+          return raw.cwd;
+        }
+        const payload = this.getObject(raw.payload);
+        if (typeof payload?.cwd === "string" && payload.cwd) {
+          return payload.cwd;
+        }
+      } catch {}
+    }
+    return null;
+  }
+
+  private readKimiProjectDir(filePath: string): string | null {
+    try {
+      const home = os.homedir();
+      const metadataPath = path.join(home, ".kimi", "kimi.json");
+      const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf-8")) as {
+        work_dirs?: Array<{ path: string; sessions_dir?: string }>;
+      };
+      const sessionsDir = path.dirname(path.dirname(filePath));
+      for (const wd of metadata.work_dirs ?? []) {
+        if (wd.sessions_dir === sessionsDir) {
+          return wd.path;
+        }
+      }
+      // Fallback: reverse the md5 hash lookup is impossible, so try
+      // to match the session dir basename against known hashes. Kimi
+      // names session dirs either by bare hash or `local_<hash>`
+      // depending on version; cover both. (The original code tried
+      // to read `wd.kaos` here, but no such field exists on the
+      // metadata schema — it silently fell back to "local" every
+      // time and the type error was invisible because electron/ is
+      // not in the main tsconfig's include.)
+      const dirBasename = path.basename(sessionsDir);
+      for (const wd of metadata.work_dirs ?? []) {
+        if (!wd.path) continue;
+        const crypto = require("node:crypto");
+        const hash = crypto.createHash("md5").update(wd.path).digest("hex");
+        if (hash === dirBasename || `local_${hash}` === dirBasename) {
+          return wd.path;
+        }
+      }
+    } catch {}
+    return null;
+  }
+
+  private readHeadLines(filePath: string, maxLines: number): string[] {
+    try {
+      return fs.readFileSync(filePath, "utf-8").split("\n").slice(0, maxLines);
+    } catch {
+      return [];
+    }
+  }
+
+  private getObject(value: unknown): Record<string, unknown> | null {
+    return value && typeof value === "object"
+      ? (value as Record<string, unknown>)
+      : null;
+  }
+
+  private extractTextFromContent(content: unknown): string {
+    if (typeof content === "string") return content.slice(0, REPLAY_TEXT_MAX_CHARS);
+    if (!Array.isArray(content)) return "";
+    for (const block of content) {
+      if (!block || typeof block !== "object") continue;
+      const entry = block as Record<string, unknown>;
+      if (typeof entry.text === "string") return entry.text.slice(0, REPLAY_TEXT_MAX_CHARS);
+      if (typeof entry.thinking === "string")
+        return entry.thinking.slice(0, REPLAY_TEXT_MAX_CHARS);
+      if (typeof entry.content === "string") return entry.content.slice(0, REPLAY_TEXT_MAX_CHARS);
+    }
+    return "";
+  }
+
+  private extractCodexToolInput(
+    payload: Record<string, unknown>,
+  ): Record<string, unknown> | null {
+    if (typeof payload.arguments === "string") {
+      try {
+        const parsed = JSON.parse(payload.arguments);
+        return this.getObject(parsed);
+      } catch {}
+    } else {
+      const directArgs = this.getObject(payload.arguments);
+      if (directArgs) return directArgs;
+    }
+
+    if (typeof payload.input === "string") {
+      try {
+        const parsed = JSON.parse(payload.input);
+        return this.getObject(parsed);
+      } catch {
+        return null;
+      }
+    }
+
+    return this.getObject(payload.input);
+  }
+}

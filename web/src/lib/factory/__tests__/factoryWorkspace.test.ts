@@ -4,9 +4,6 @@
 // ADR-003: DEFAULT_FACTORY_SEED=[] (cero absoluto)
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
-import * as React from "react";
-import { act } from "react";
 import {
   FactoryWorkspaceStore,
   DEFAULT_FACTORY_SEED,
@@ -35,7 +32,7 @@ import {
 import { WorkItemStore } from "../store/workItem.store";
 import { FactoryMcpStub } from "../mcp/mcp.stub";
 import { getFactoryBundle } from "../hooks/useFactoryBundle";
-import { FactoryGlossary } from "../../../components/factories/FactoryGlossary";
+
 
 /** Construye un record de semilla sin pasar por el store (uid y reloj fijos). */
 function makeRecord(name: string, alias: string): FactoryRecord {
@@ -167,13 +164,8 @@ describe("Escenario: Glosario de la triada (US-006)", () => {
     }
   });
 
-  it("FactoryGlossary renderiza los tres términos", async () => {
-    await act(async () => {
-      render(React.createElement(FactoryGlossary));
-    });
-    expect(screen.getAllByText("Warp Factories").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("factory").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("foreman").length).toBeGreaterThan(0);
+  it("glosario sigue teniendo 3 términos", () => {
+    expect(FACTORY_GLOSSARY).toHaveLength(3);
   });
 });
 

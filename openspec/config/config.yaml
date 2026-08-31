@@ -1,0 +1,67 @@
+# SDD Configuration for TermCanvas
+# Generated: 2026-07-31
+
+project:
+  name: termcanvas
+  version: 0.39.10
+  description: "An infinite canvas desktop app for visually managing terminals"
+  root: C:\Users\Franco\Desktop\termcanvas
+
+stack:
+  runtime: electron
+  framework: react
+  language: typescript
+  state_management: zustand
+  ui_library: radix-ui
+  css: tailwindcss
+  build_tool: vite
+  package_manager: pnpm
+  testing: tsx-test
+
+testing:
+  runner: node-test
+  command: "pnpm test"
+  coverage: false
+  strict_tdd: false
+  test_location: tests/
+  test_pattern: "*.test.ts"
+
+quality:
+  typecheck: "pnpm typecheck"
+  build: "pnpm build"
+  linting: none
+  formatting: editorconfig
+
+persistence:
+  mode: hybrid
+  engram: true
+  openspec: true
+
+architecture:
+  pattern: hexagonal
+  state_management: zustand-stores
+  ipc: electron-preload
+  canvas: react-flow
+  terminal: xterm-webgl
+
+monorepo:
+  packages:
+    - termcanvas (main)
+    - hydra (sub-agent spawner)
+    - browse (browser automation)
+    - agent (agent integration)
+    - eval (evaluation tools)
+    - website (documentation)
+
+conventions:
+  commits: conventional
+  ai_attribution: false
+  code_style:
+    indent: 2
+    line_ending: lf
+    charset: utf-8
+
+sdd:
+  artifact_store: hybrid
+  delivery_strategy: single-pr
+  review_budget: 800

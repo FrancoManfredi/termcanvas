@@ -62,8 +62,85 @@ export class RemoteGitHubReposAdapter implements GitHubReposPort {
   }
 }
 
+const LOCAL_PAT_STORAGE_KEY_REPOS = "github_pat_session";
+
+function getLocalPat(): string | null {
+  try {
+    const raw = localStorage.getItem(LOCAL_PAT_STORAGE_KEY_REPOS);
+    if (!raw) return null;
+    const data = JSON.parse(raw) as { token?: string };
+    return data.token ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export class LocalGitHubReposAdapter implements GitHubReposPort {
-  async listRepos(): Promise<ParseResult<readonly GitHubRepo[]>> {
-    return ParseResult.ok<readonly GitHubRepo[]>([]);
+  async listRepos(opts?: { perPage?: number; page?: number; search?: string }): Promise<ParseResult<readonly GitHubRepo[]>> {
+    const pat = typeof window !== "undefined" ? getLocalPat() : null;
+    // Si hay PAT personal, listar repos reales directo contra GitHub API (sin server)
+    if (pat) {
+      const perPage = Math.min(Math.max(opts?.perPage ?? 30, 1), 100);
+      const page = Math.max(opts?.page ?? 1, 1);
+      const url = new URL("https://api.github.com/user/repos");
+      url.searchParams.set("per_page", String(perPage));
+      url.searchParams.set("page", String(page));
+      url.searchParams.set("sort", "updated");
+      url.searchParams.set("affiliation", "owner,collaborator,organization_member");
+      try {
+        const res = await fetch(url.toString(), {
+          headers: { authorization: `token ${pat}`, accept: "application/vnd.github+json", "user-agent": "termcanvas" },
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          if (res.status === 401) return ParseResult.singleFail<readonly GitHubRepo[]>("repos", "Token inválido o expirado — genera uno nuevo en github.com/settings/tokens", "bad_credentials");
+          if (res.status === 403 || res.status === 429) return ParseResult.singleFail<readonly GitHubRepo[]>("repos", "Rate limited — esperá un minuto", "rate_limited");
+          return ParseResult.singleFail<readonly GitHubRepo[]>("repos", `GitHub API falló ${res.status} ${text.slice(0, 120)}`, "fetch_error");
+        }
+        const data = (await res.json()) as Array<{
+          full_name: string;
+          name: string;
+          owner: { login: string };
+          private: boolean;
+          updated_at: string;
+          html_url: string;
+          description?: string | null;
+        }>;
+        let repos = data.map((r) => ({
+          fullName: r.full_name,
+          name: r.name,
+          owner: r.owner.login,
+          private: r.private,
+          updatedAt: r.updated_at,
+          htmlUrl: r.html_url,
+          description: r.description ?? undefined,
+        }));
+        if (opts?.search?.trim()) {
+          const q = opts.search.trim().toLowerCase();
+          repos = repos.filter((r) => r.fullName.toLowerCase().includes(q) || (r.description ?? "").toLowerCase().includes(q));
+        }
+        return ParseResult.ok<readonly GitHubRepo[]>(repos);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        return ParseResult.singleFail<readonly GitHubRepo[]>("repos", msg, "network_error");
+      }
+    }
+    // Sin PAT → demo repos (modo irrompible)
+    const { DEMO_REPOS } = await import("../domain/quickstart.data");
+    let repos: readonly import("../domain/types").RepositoryRef[] = DEMO_REPOS;
+    if (opts?.search?.trim()) {
+      const q = opts.search.trim().toLowerCase();
+      repos = repos.filter((r) => `${r.owner}/${r.name}`.toLowerCase().includes(q));
+    }
+    const mapped = repos.map((r) => ({
+      fullName: `${r.owner}/${r.name}`,
+      name: r.name,
+      owner: r.owner,
+      private: false,
+      updatedAt: new Date().toISOString(),
+      htmlUrl: `https://github.com/${r.owner}/${r.name}`,
+      description: "Repositorio demo local",
+    }));
+    return ParseResult.ok<readonly GitHubRepo[]>(mapped);
   }
 }

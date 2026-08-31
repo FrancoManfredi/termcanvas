@@ -1,0 +1,10 @@
+{
+  "description": "Streamline your project management by creating personalized factories that connect to GitHub repositories and issue trackers, enhancing team collaboration.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

@@ -1,0 +1,125 @@
+---
+import { defaultLocale, siteCopy, type Locale } from "../lib/site";
+
+export interface Props {
+  locale?: Locale;
+}
+
+const { locale = defaultLocale } = Astro.props;
+const copy = siteCopy[locale].features;
+---
+
+<section class="features">
+  <div class="container-page">
+    <div class="features-head">
+      <span class="label-mono">{copy.eyebrow}</span>
+      <h2 class="features-title">{copy.title}</h2>
+    </div>
+    <div class="features-grid">
+      {
+        copy.items.map((f) => (
+          <article class="feature-card">
+            <span class="feature-label">{f.label}</span>
+            <h3 class="feature-title">{f.title}</h3>
+            <p class="feature-body">{f.body}</p>
+          </article>
+        ))
+      }
+    </div>
+    <div class="features-art">
+      <div class="features-art-frame">
+        <img src="/hero-hub.png" alt={copy.hubAlt} loading="lazy" />
+      </div>
+      <div class="features-art-caption">
+        <span class="label-mono">{copy.hubEyebrow}</span>
+        <p>{copy.hubBody}</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+  .features {
+    padding: 4rem 0;
+    border-top: 1px solid var(--color-border);
+  }
+  .features-head {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    max-width: 38rem;
+    margin-bottom: 3rem;
+  }
+  .features-title {
+    font-size: clamp(1.6rem, 2.6vw, 2.25rem);
+    line-height: 1.15;
+    letter-spacing: -0.015em;
+    font-weight: 600;
+  }
+  .features-grid {
+    display: grid;
+    gap: 1px;
+    background: var(--color-border);
+    border: 1px solid var(--color-border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  @media (min-width: 768px) {
+    .features-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+  .feature-card {
+    background: var(--color-card);
+    padding: 2rem 1.75rem;
+    transition: background 0.2s ease;
+  }
+  .feature-card:hover {
+    background: var(--color-card-hover);
+  }
+  .feature-label {
+    font-family: var(--font-mono);
+    color: var(--color-accent);
+    font-size: 0.78rem;
+  }
+  .feature-title {
+    margin-top: 0.4rem;
+    font-size: 1.1rem;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .feature-body {
+    margin-top: 0.75rem;
+    color: var(--color-ink-muted);
+    line-height: 1.65;
+    font-size: 0.95rem;
+  }
+  .features-art {
+    margin-top: 3.5rem;
+    display: grid;
+    gap: 2rem;
+    align-items: center;
+  }
+  @media (min-width: 1024px) {
+    .features-art {
+      grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+      gap: 3rem;
+    }
+  }
+  .features-art-frame {
+    border: 1px solid var(--color-border);
+    background: var(--color-card);
+    border-radius: 12px;
+    overflow: hidden;
+    box-shadow: var(--shadow-card);
+  }
+  .features-art-frame img {
+    display: block;
+    width: 100%;
+  }
+  .features-art-caption p {
+    margin-top: 0.75rem;
+    color: var(--color-ink-muted);
+    line-height: 1.65;
+  }
+</style>

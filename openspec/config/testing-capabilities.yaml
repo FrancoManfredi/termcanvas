@@ -1,0 +1,91 @@
+# Testing Capabilities for TermCanvas
+# Generated: 2026-07-31
+
+runner:
+  name: node-test
+  version: "20.x"
+  command: "pnpm test"
+  coverage_command: null
+  strict_tdd: false
+
+frameworks:
+  unit:
+    - name: node-test
+      description: "Node.js built-in test runner via tsx"
+      command: "tsx --test"
+      pattern: "*.test.ts"
+      
+  integration:
+    - name: node-test
+      description: "Integration tests using same runner"
+      command: "tsx --test"
+      pattern: "*.test.ts"
+      
+  e2e:
+    - name: playwright
+      description: "Browser automation for E2E tests"
+      command: "playwright test"
+      config: playwright.config.ts
+      available: true
+
+test_files:
+  total: 100+
+  location: tests/
+  pattern: "*.test.ts"
+  hydra_tests: hydra/tests/
+
+capabilities:
+  unit_testing: true
+  integration_testing: true
+  e2e_testing: true
+  visual_regression: false
+  snapshot_testing: false
+  property_based: false
+  mutation_testing: false
+
+coverage:
+  enabled: false
+  tool: null
+  threshold: null
+
+mocking:
+  available: true
+  tools:
+    - name: mock
+      description: "Node.js built-in mock functions"
+    - name: jest-mock
+      description: "Jest-compatible mocking (via tsx)"
+
+assertions:
+  - name: assert
+    description: "Node.js built-in assert module"
+  - name: expect
+    description: "Jest-compatible expect (via tsx)"
+
+fixtures:
+  available: true
+  location: tests/fixtures/
+  pattern: "*.json"
+
+ci:
+  enabled: false
+  provider: null
+  workflows: []
+
+performance:
+  test_timeout: 30000
+  parallel: false
+  watch_mode: true
+
+limitations:
+  - "No built-in coverage reporting"
+  - "No visual regression testing"
+  - "No mutation testing"
+  - "Limited mocking capabilities compared to Jest/Vitest"
+  - "No built-in snapshot testing"
+
+recommendations:
+  - "Consider adding coverage with c8 or v8"
+  - "Add visual regression testing if UI stability is critical"
+  - "Use Playwright for E2E tests"
+  - "Consider Vitest for better DX and coverage"

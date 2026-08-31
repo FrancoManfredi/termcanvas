@@ -1,0 +1,102 @@
+---
+import {
+  articlesPath,
+  defaultLocale,
+  localeLabels,
+  siteCopy,
+  withLocale,
+  type Locale,
+} from "../lib/site";
+
+export interface Props {
+  locale?: Locale;
+  alternatePaths?: Partial<Record<Locale, string>>;
+}
+
+const { locale = defaultLocale, alternatePaths = {} } = Astro.props;
+const copy = siteCopy[locale];
+const otherLocale: Locale = locale === "zh" ? "en" : "zh";
+const languageHref = alternatePaths[otherLocale] ?? withLocale(otherLocale);
+const navItems = [
+  { href: articlesPath(locale), label: copy.nav.articles },
+  { href: "https://github.com/blueberrycongee/termcanvas/releases", label: copy.nav.download },
+  { href: "https://github.com/blueberrycongee/termcanvas", label: copy.nav.github },
+];
+
+const path = Astro.url.pathname;
+---
+
+<header class="site-header">
+  <div class="container-page flex h-14 items-center justify-between">
+    <a href={withLocale(locale)} class="brand" aria-label={copy.name}>
+      <img class="brand-logo" src="/logo.svg" alt="" width="28" height="28" />
+      <span class="brand-name">TermCanvas</span>
+    </a>
+    <nav class="flex items-center gap-1">
+      {
+        navItems.map((item) => {
+          const isExternal = item.href.startsWith("http");
+          const isActive = !isExternal && path.startsWith(item.href);
+          return (
+            <a
+              href={item.href}
+              class:list={["nav-link", { "nav-link-active": isActive }]}
+              target={isExternal ? "_blank" : undefined}
+              rel={isExternal ? "noopener" : undefined}
+            >
+              {item.label}
+            </a>
+          );
+        })
+      }
+      <a class="nav-link language-link" href={languageHref} hreflang={otherLocale}>
+        {localeLabels[otherLocale]}
+      </a>
+    </nav>
+  </div>
+</header>
+
+<style>
+  .site-header {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    background: color-mix(in oklab, var(--color-bg) 85%, transparent);
+    backdrop-filter: saturate(180%) blur(8px);
+    border-bottom: 1px solid var(--color-border);
+  }
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .brand-logo {
+    width: 1.5rem;
+    height: 1.5rem;
+    display: block;
+  }
+  .brand-name {
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .nav-link {
+    padding: 0.4rem 0.75rem;
+    font-size: 0.9rem;
+    color: var(--color-ink-muted);
+    border-radius: 999px;
+    transition: color 0.15s ease, background 0.15s ease;
+  }
+  .nav-link:hover {
+    color: var(--color-ink);
+    background: var(--color-surface-muted);
+  }
+  .nav-link-active {
+    color: var(--color-ink);
+    background: var(--color-surface-muted);
+  }
+  .language-link {
+    margin-left: 0.25rem;
+    border: 1px solid var(--color-border-soft);
+    background: var(--color-surface);
+  }
+</style>

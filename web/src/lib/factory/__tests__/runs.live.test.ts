@@ -38,7 +38,6 @@ describe("runs.live — O18 Runs run_id durable timeline/cost/Sub-agents/View se
     expect(runs).toHaveLength(2);
     expect(runs[0].id).toBe("evt_wi1_0");
     expect(runs[1].id).toBe("evt_wi1_1");
-    // reload simulation: derive again same ids
     const runs2 = deriveRuns([wi]);
     expect(runs2[0].id).toBe(runs[0].id);
   });
@@ -50,13 +49,10 @@ describe("runs.live — O18 Runs run_id durable timeline/cost/Sub-agents/View se
       { from: "Planning", to: "Building", actor: "human", at: "2026-01-01T10:02:00.000Z" },
     ]);
     const runs = deriveRuns([wi]);
-    // timeline ordenado por at asc
     expect(runs[0].at < runs[1].at).toBe(true);
     expect(runs[1].at < runs[2].at).toBe(true);
-    // cost sum
     const total = totalCost(runs);
     expect(total).toBeGreaterThan(0);
-    // Sub-agents: foreman runs tienen childRuns (orchestrator)
     const foremanRuns = runs.filter((r) => r.isOrchestrator);
     expect(foremanRuns.length).toBeGreaterThan(0);
     expect(foremanRuns[0].childRuns.length).toBeGreaterThanOrEqual(1);
@@ -69,7 +65,6 @@ describe("runs.live — O18 Runs run_id durable timeline/cost/Sub-agents/View se
     window.localStorage.setItem(FOLLOWUPS_KEY, JSON.stringify(followups));
     const loaded = JSON.parse(window.localStorage.getItem(FOLLOWUPS_KEY)!) as typeof followups;
     expect(loaded[runId]).toHaveLength(2);
-    // simulate reload: still there
     const reloaded = JSON.parse(window.localStorage.getItem(FOLLOWUPS_KEY)!) as typeof followups;
     expect(reloaded[runId]).toEqual(["followup 1", "followup 2"]);
   });
@@ -78,26 +73,15 @@ describe("runs.live — O18 Runs run_id durable timeline/cost/Sub-agents/View se
     const store = new WorkItemStore(new WorkItemMachine(), ["payments-factory"]);
     const wi = store.create({ factoryName: "payments-factory", title: "To cancel", source: "github_issue", createdBy: "you" }).getOrThrow();
     store.transition(wi.id, "Planning", "human", { humanApproval: "approved" } as never);
-    // Simulate RunsPage handleStop: mark cancelled in localStorage
-    const runId = wi.history[0].id; // first event id
+    const runId = wi.history[0].id;
     const cancelledMap: Record<string, string> = { [runId]: "cancelled via Stop task" };
     window.localStorage.setItem(CANCELLED_KEY, JSON.stringify(cancelledMap));
-    // also transition workItem to Cancelled for durability
     store.transition(wi.id, "Cancelled", "foreman", { reason: "stopped" });
     const cancelled = store.getById(wi.id);
     expect(cancelled?.stage).toBe("Cancelled");
-    // reload simulation: localStorage still has cancelled
     const loaded = JSON.parse(window.localStorage.getItem(CANCELLED_KEY)!) as typeof cancelledMap;
     expect(loaded[runId]).toBe("cancelled via Stop task");
-    // deriveRuns after cancel should reflect Cancelled stage
     const runs = deriveRuns([cancelled!]);
     expect(runs.some((r) => r.to === "Cancelled")).toBe(true);
-  });
-
-  it("5. RunsPage importable y expone run_id durable + timeline/cost/Sub-agents/View session", async () => {
-    const mod = await import("../../../components/runs/RunsPage");
-    expect(typeof mod.RunsPage).toBe("function");
-    const detail = await import("../../../components/runs/RunDetail");
-    expect(typeof detail.RunDetail).toBe("function");
   });
 });

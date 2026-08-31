@@ -1,0 +1,256 @@
+import { execFile, execFileSync, execSync } from "child_process";
+import { existsSync, readFileSync, readdirSync } from "fs";
+import path from "path";
+
+interface WorktreeInfo {
+  path: string;
+  branch: string;
+  isPrimary: boolean;
+}
+
+interface ProjectInfo {
+  name: string;
+  path: string;
+  worktrees: WorktreeInfo[];
+}
+
+export interface ChildGitRepoInfo {
+  name: string;
+  path: string;
+}
+
+const IGNORED_CHILD_DIRS = new Set([".git", "node_modules"]);
+
+// Review worktrees are created detached (the reviewer must not create
+// branches), so git reports no branch for them. The create handler stores
+// the source branch in the per-worktree admin dir; read it back to render
+// "<branch> (review)" instead of a bare "(detached)" label.
+function readReviewSourceBranch(
+  repoPath: string,
+  worktreePath: string,
+): string | null {
+  try {
+    const marker = path.join(
+      repoPath,
+      ".git",
+      "worktrees",
+      path.basename(worktreePath),
+      "review-source-branch",
+    );
+    if (!existsSync(marker)) return null;
+    const source = readFileSync(marker, "utf-8").trim();
+    return source ? `${source} (review)` : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseWorktreesOutput(
+  output: string,
+  repoPath: string,
+): WorktreeInfo[] {
+  const worktrees: WorktreeInfo[] = [];
+  let current: Partial<WorktreeInfo> & { prunable?: boolean } = {};
+  const resolvedRepo = path.resolve(repoPath);
+
+  // Ensure the final record is flushed even if output doesn't end with '\n'
+  for (const line of (output.endsWith("\n") ? output : `${output}\n`).split(
+    "\n",
+  )) {
+    if (line.startsWith("worktree ")) {
+      current.path = line.slice("worktree ".length);
+    } else if (line.startsWith("branch ")) {
+      const ref = line.slice("branch ".length);
+      current.branch = ref.replace("refs/heads/", "");
+    } else if (line === "bare") {
+      current.branch = "(bare)";
+    } else if (line.startsWith("prunable")) {
+      current.prunable = true;
+    } else if (line === "") {
+      if (current.path && !current.prunable && existsSync(current.path)) {
+        worktrees.push({
+          path: current.path,
+          branch:
+            current.branch ??
+            readReviewSourceBranch(resolvedRepo, current.path) ??
+            "(detached)",
+          isPrimary: path.resolve(current.path) === resolvedRepo,
+        });
+      }
+      current = {};
+    }
+  }
+
+  // If no worktree matched repoPath (e.g. symlink divergence), fall back to
+  // marking the first entry as main — git always lists the primary worktree
+  // first.
+  if (worktrees.length > 0 && !worktrees.some((w) => w.isPrimary)) {
+    worktrees[0] = { ...worktrees[0], isPrimary: true };
+  }
+
+  return worktrees;
+}
+
+function runGitAsync(dirPath: string, args: string[]): Promise<string> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      "git",
+      args,
+      { cwd: dirPath, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 },
+      (err, stdout) => {
+        if (err) {
+          reject(err);
+          return;
+        }
+        resolve(stdout);
+      },
+    );
+  });
+}
+
+export class ProjectScanner {
+  scan(dirPath: string): ProjectInfo | null {
+    try {
+      execSync("git rev-parse --git-dir", { cwd: dirPath, stdio: "pipe" });
+    } catch {
+      return null;
+    }
+
+    const name = path.basename(dirPath);
+    const worktrees = this.listWorktrees(dirPath);
+
+    return { name, path: dirPath, worktrees };
+  }
+
+  async scanAsync(dirPath: string): Promise<ProjectInfo | null> {
+    const name = path.basename(dirPath);
+
+    let isGitRepo = false;
+    try {
+      await runGitAsync(dirPath, ["rev-parse", "--git-dir"]);
+      isGitRepo = true;
+    } catch {
+      // Not a git repo, that's fine
+    }
+
+    let worktrees: WorktreeInfo[];
+    if (isGitRepo) {
+      worktrees = await this.listWorktreesAsync(dirPath);
+    } else {
+      worktrees = [
+        {
+          path: dirPath,
+          branch: "main",
+          isPrimary: true,
+        },
+      ];
+    }
+
+    return { name, path: dirPath, worktrees };
+  }
+
+  listChildGitRepos(dirPath: string): ChildGitRepoInfo[] {
+    try {
+      return readdirSync(dirPath, { withFileTypes: true })
+        .filter((entry) => {
+          if (!entry.isDirectory()) {
+            return false;
+          }
+
+          if (entry.name.startsWith(".")) {
+            return false;
+          }
+
+          return !IGNORED_CHILD_DIRS.has(entry.name);
+        })
+        .map((entry) => ({
+          name: entry.name,
+          path: path.join(dirPath, entry.name),
+        }))
+        .filter((entry) => existsSync(path.join(entry.path, ".git")))
+        .sort((a, b) => a.name.localeCompare(b.name));
+    } catch {
+      return [];
+    }
+  }
+
+  async listChildGitReposAsync(dirPath: string): Promise<ChildGitRepoInfo[]> {
+    return this.listChildGitRepos(dirPath);
+  }
+
+  listWorktrees(dirPath: string): WorktreeInfo[] {
+    try {
+      const output = execFileSync(
+        "git",
+        ["worktree", "list", "--porcelain"],
+        {
+          cwd: dirPath,
+          encoding: "utf-8",
+          maxBuffer: 10 * 1024 * 1024,
+        },
+      );
+
+      return parseWorktreesOutput(output, dirPath);
+    } catch {
+      // Git failed. Disambiguate two cases before falling back:
+      //   (a) dirPath no longer exists — project was deleted
+      //       externally (`rm -rf /path/to/project`). Return [] so
+      //       the 5-second worktree watcher / syncWorktrees prunes
+      //       the project from the store instead of inheriting a
+      //       ghost entry.
+      //   (b) dirPath exists but isn't a git repo — user added a
+      //       plain directory as a project. Keep the legacy
+      //       behaviour of surfacing the dir itself as a single
+      //       "main" worktree so the project stays usable.
+      if (!existsSync(dirPath)) return [];
+      return [
+        {
+          path: dirPath,
+          branch: this.getCurrentBranch(dirPath),
+          isPrimary: true,
+        },
+      ];
+    }
+  }
+
+  async listWorktreesAsync(dirPath: string): Promise<WorktreeInfo[]> {
+    try {
+      const output = await runGitAsync(dirPath, [
+        "worktree",
+        "list",
+        "--porcelain",
+      ]);
+      return parseWorktreesOutput(output, dirPath);
+    } catch {
+      // See sync variant above for the two-case rationale.
+      if (!existsSync(dirPath)) return [];
+      return [
+        {
+          path: dirPath,
+          branch: await this.getCurrentBranchAsync(dirPath),
+          isPrimary: true,
+        },
+      ];
+    }
+  }
+
+  private getCurrentBranch(dirPath: string): string {
+    try {
+      return execFileSync("git", ["branch", "--show-current"], {
+        cwd: dirPath,
+        encoding: "utf-8",
+        maxBuffer: 1024 * 1024,
+      }).trim();
+    } catch {
+      return "(unknown)";
+    }
+  }
+
+  private async getCurrentBranchAsync(dirPath: string): Promise<string> {
+    try {
+      return (await runGitAsync(dirPath, ["branch", "--show-current"])).trim();
+    } catch {
+      return "(unknown)";
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "plugin": [
+    "@dmmop/opencode-key-rotator"
+  ]
+}

@@ -19,7 +19,14 @@ export function createAuthRoutes(): Hono {
   app.get("/api/auth/github/start", (c) => {
     const env = getEnv();
     if (!env.GITHUB_CLIENT_ID) {
-      return c.json({ error: "GitHub OAuth no configurado (GITHUB_CLIENT_ID)", code: "missing_config" }, 503);
+      return c.json(
+        {
+          error: "GitHub OAuth no configurado (GITHUB_CLIENT_ID)",
+          code: "missing_config",
+          hint: "Crea un OAuth App en https://github.com/settings/developers (Homepage http://localhost:5174, Callback http://localhost:5174/api/auth/callback) y añade GITHUB_CLIENT_ID / GITHUB_CLIENT_SECRET a server/.env. En local puedes continuar en modo demo.",
+        },
+        503,
+      );
     }
     const state = randomState();
     // guardar state en cookie corta (opcional)
@@ -82,10 +89,57 @@ setTimeout(function(){ try{ window.close(); }catch(e){} window.location.href='/'
     }
   });
 
+  // POST /api/auth/pat → conecta con Personal Access Token (para uso local personal, sin OAuth)
+  // Body: { token: "ghp_..." } → valida con GitHub API, crea sesión httpOnly
+  app.post("/api/auth/pat", async (c) => {
+    let body: { token?: string } | null = null;
+    try {
+      body = (await c.req.json()) as { token?: string };
+    } catch {
+      return c.json({ error: "body JSON requerido con { token }", code: "bad_request" }, 400);
+    }
+    const raw = body?.token?.trim() ?? "";
+    if (!raw) return c.json({ error: "token requerido", code: "missing_token" }, 400);
+    // validar formato básico: ghp_, github_pat_, gh*_...
+    if (!raw.startsWith("ghp_") && !raw.startsWith("github_pat_") && !raw.startsWith("gho_") && !raw.startsWith("ghu_") && raw.length < 20) {
+      return c.json({ error: "token con formato inválido", code: "invalid_token_format" }, 400);
+    }
+    try {
+      const user = await getUser(raw);
+      const sessionId = randomSessionId();
+      createSession({
+        id: sessionId,
+        token: raw,
+        username: user.login,
+        avatarUrl: user.avatar_url,
+        scope: "repo read:user",
+        createdAt: new Date().toISOString(),
+      });
+      setCookie(c, "sessionId", sessionId, {
+        httpOnly: true,
+        sameSite: "Lax",
+        path: "/",
+        maxAge: 60 * 60 * 24 * 30,
+      });
+      console.log(`[auth] GitHub PAT connected ${user.login} token=${maskToken(raw)}`);
+      return c.json({ connected: true, username: user.login, avatarUrl: user.avatar_url, scope: "repo" }, 200);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("[auth] PAT verify failed", msg);
+      // mapear 401 como credenciales inválidas
+      if (msg.includes("401")) return c.json({ error: "Token inválido o expirado (401)", code: "bad_credentials" }, 401);
+      return c.json({ error: msg, code: "pat_failed" }, 500);
+    }
+  });
+
   // GET /api/auth/status → { connected, username, avatarUrl, scope }
   app.get("/api/auth/status", (c) => {
     const sessionId = getCookie(c, "sessionId");
-    if (!sessionId) return c.json({ connected: false }, 200);
+    if (!sessionId) {
+      // fallback: si GITHUB_PAT está seteado en env y no hay sesión, reportar como conectado (modo personal local)
+      // No exponemos si está seteado por seguridad, solo si el usuario ya validó via /pat
+      return c.json({ connected: false }, 200);
+    }
     const sess = getSession(sessionId);
     if (!sess) return c.json({ connected: false }, 200);
     return c.json({ connected: true, username: sess.username, avatarUrl: sess.avatarUrl, avatar_url: sess.avatarUrl, scope: sess.scope }, 200);

@@ -1,0 +1,30 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true
+  },
+  "include": [
+    "headless-runtime",
+    "electron/model-catalog.ts",
+    "electron/model-catalog-ipc.ts",
+    "electron/pty-manager.ts",
+    "electron/pty-launch.ts",
+    "electron/telemetry-service.ts",
+    "electron/process-detector.ts",
+    "electron/session-watcher.ts",
+    "electron/project-scanner.ts",
+    "electron/git-diff.ts",
+    "electron/memory-service.ts",
+    "electron/memory-index-generator.ts",
+    "shared",
+    "hydra/src"
+  ]
+}

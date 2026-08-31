@@ -1,0 +1,110 @@
+---
+import { getCollection } from "astro:content";
+import BaseLayout from "../../../layouts/BaseLayout.astro";
+import ArticleCard from "../../../components/ArticleCard.astro";
+import {
+  articlePath,
+  articlesPath,
+  isLocale,
+  locales,
+  siteCopy,
+  type Locale,
+} from "../../../lib/site";
+
+export function getStaticPaths() {
+  return locales.map((locale) => ({
+    params: { locale },
+    props: { locale },
+  }));
+}
+
+const { locale } = Astro.props;
+if (!isLocale(locale)) {
+  return Astro.redirect("/");
+}
+
+const copy = siteCopy[locale];
+const all = await getCollection(
+  "articles",
+  ({ data }) => data.draft !== true && data.locale === locale
+);
+const sorted = all.sort(
+  (a, b) => b.data.date.valueOf() - a.data.date.valueOf()
+);
+const alternatePaths: Record<Locale, string> = {
+  zh: articlesPath("zh"),
+  en: articlesPath("en"),
+};
+---
+
+<BaseLayout
+  title={copy.articlesTitle}
+  description={copy.articlesDescription}
+  locale={locale}
+  canonicalPath={articlesPath(locale)}
+  alternatePaths={alternatePaths}
+>
+  <section class="page">
+    <div class="container-page">
+      <header class="head">
+        <span class="label-mono">{copy.articles.eyebrow}</span>
+        <h1>{copy.articles.title}</h1>
+        <p class="lede">{copy.articles.lede}</p>
+      </header>
+      {
+        sorted.length === 0 ? (
+          <p class="empty">{copy.articles.empty}</p>
+        ) : (
+          <div class="grid">
+            {sorted.map((entry) => (
+              <ArticleCard
+                href={articlePath(locale, entry.id)}
+                title={entry.data.title}
+                date={entry.data.date}
+                summary={entry.data.summary}
+                tag={entry.data.tag}
+                cover={entry.data.cover}
+                locale={locale}
+              />
+            ))}
+          </div>
+        )
+      }
+    </div>
+  </section>
+</BaseLayout>
+
+<style>
+  .page {
+    padding: 5rem 0 4rem;
+  }
+  .head {
+    max-width: 42rem;
+    margin-bottom: 3rem;
+  }
+  .head h1 {
+    margin-top: 0.5rem;
+    font-size: clamp(2rem, 3.4vw, 2.75rem);
+    line-height: 1.15;
+    letter-spacing: -0.015em;
+    font-weight: 600;
+  }
+  .lede {
+    margin-top: 1.25rem;
+    color: var(--color-ink-muted);
+    line-height: 1.7;
+    font-size: 1.05rem;
+  }
+  .grid {
+    display: grid;
+    gap: 1.25rem;
+  }
+  @media (min-width: 768px) {
+    .grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+  .empty {
+    color: var(--color-ink-muted);
+  }
+</style>

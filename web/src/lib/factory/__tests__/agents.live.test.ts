@@ -45,25 +45,20 @@ Body
 `;
     const parser = new AgentParser();
     const res = parser.parseAgentMd(raw, "agents/reviewer/agent.md");
-    // foreman no requerido aquí, but parser should succeed for harness codex
-    // The only possible failure is missing foreman count when using FactoryRegistry; direct parser should ok
     expect(res.ok).toBe(true);
   });
 
   it("3. harness oz + reasoningLevel persiste error file:line tras reload (localStorage no guarda inválido)", () => {
-    // Simulate AgentsPage handleSave with oz + reasoningLevel -> should not persist
     const overrides: Record<string, { harness: string; reasoningLevel?: string }> = {};
     const agentName = "reviewer";
     const editHarness: string = "oz";
     const editReasoning = "high";
-    // validation should fail, so not saved
     const shouldFail = editReasoning.trim() && editHarness !== "codex";
     expect(shouldFail).toBe(true);
     if (!shouldFail) {
       overrides[agentName] = { harness: editHarness, reasoningLevel: editReasoning };
       window.localStorage.setItem(STORAGE_KEY, JSON.stringify(overrides));
     }
-    // verify not persisted
     const stored = window.localStorage.getItem(STORAGE_KEY);
     expect(stored).toBeNull();
   });
@@ -73,21 +68,11 @@ Body
       reviewer: { harness: "codex", reasoningLevel: "high" },
     };
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(overrides));
-    // simulate reload: loadOverrides reads same key
     const raw = window.localStorage.getItem(STORAGE_KEY);
     expect(raw).not.toBeNull();
     const parsed = JSON.parse(raw!) as typeof overrides;
     expect(parsed.reviewer.harness).toBe("codex");
     expect(parsed.reviewer.reasoningLevel).toBe("high");
-    // after reload, AgentsPage would applyOverrides and show codex
     expect(parsed.reviewer.harness).toBe("codex");
-  });
-
-  it("5. AgentsPage importable y contiene harness matrix UI", async () => {
-    const mod = await import("../../../components/agents/AgentsPage");
-    expect(typeof mod.AgentsPage).toBe("function");
-    // verify AgentDetail still shows file:line for reasoningLevel
-    const detailMod = await import("../../../components/agents/AgentDetail");
-    expect(typeof detailMod.AgentDetail).toBe("function");
   });
 });

@@ -30,6 +30,10 @@ export interface GitHubAuthPort {
   logout(): Promise<void>;
   subscribe(cb: () => void): () => void;
   getVersion(): number;
+  /** Opcional: popup + postMessage híbrido. Local lo implementa como mock sincrónico. */
+  connectWithPopup?(): Promise<GitHubAuthState>;
+  /** Personal Access Token para uso local personal (sin OAuth). */
+  connectWithPat?(token: string): Promise<GitHubAuthState>;
 }
 
 export interface GitHubReposPort {

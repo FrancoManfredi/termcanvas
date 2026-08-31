@@ -1,0 +1,63 @@
+appId: com.blueberrycongee.termcanvas
+productName: TermCanvas
+copyright: Copyright © 2026 blueberrycongee
+
+publish:
+  provider: github
+  owner: blueberrycongee
+  repo: termcanvas
+
+directories:
+  output: out
+  buildResources: build
+
+files:
+  - dist/**/*
+  - dist-electron/**/*
+
+extraResources:
+  - from: dist-cli
+    to: cli
+    filter:
+      - "**/*"
+  - from: skills
+    to: skills
+    filter:
+      - "**/*"
+  - from: resources/architecture-tactics
+    to: architecture-tactics
+    filter:
+      - "**/*"
+asarUnpack:
+  - node_modules/node-pty/**/*
+
+mac:
+  identity: "-"
+  category: public.app-category.developer-tools
+  icon: build/icon.icns
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+    - target: zip
+      arch:
+        - x64
+        - arm64
+
+linux:
+  category: Development
+  icon: build/icon.png
+  target:
+    - AppImage
+    - deb
+
+win:
+  icon: build/icon.ico
+  artifactName: "${productName}-Setup-${version}.${ext}"
+  target:
+    - nsis
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true

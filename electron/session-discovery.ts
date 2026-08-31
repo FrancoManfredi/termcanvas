@@ -1,0 +1,1175 @@
+import fs from "fs";
+import { createRequire } from "node:module";
+import os from "os";
+import path from "path";
+import { findBestOpenCodeSession } from "./opencode-session.ts";
+import { resolveSessionFile } from "./session-watcher.ts";
+
+export interface FoundSession {
+  sessionId: string;
+  filePath: string;
+  confidence: "strong" | "medium" | "weak";
+}
+
+interface CodexSessionIndexEntry {
+  id?: string;
+  updated_at?: string;
+}
+
+interface WuuSessionIndexEntry {
+  id?: string;
+  created_at?: string;
+}
+
+interface RecentCodexSessionFile {
+  sessionId: string;
+  filePath: string;
+  mtimeMs: number;
+  cwd: string | null;
+  timestampMs: number | null;
+}
+
+const CODEX_SESSION_LOOKBACK_DAYS = 7;
+const CODEX_INDEX_RECENT_LIMIT = 24;
+const CODEX_FALLBACK_SCAN_LIMIT = 32;
+const CODEX_STATE_DB_CANDIDATE_LIMIT = 24;
+const require = createRequire(import.meta.url);
+
+interface SqliteStatement {
+  all(...params: unknown[]): unknown;
+  get(...params: unknown[]): unknown;
+}
+
+interface SqliteDatabase {
+  prepare(sql: string): SqliteStatement;
+  close(): void;
+}
+
+type DatabaseSyncCtor = new (
+  filePath: string,
+  options?: { readonly?: boolean },
+) => SqliteDatabase;
+
+let cachedDatabaseSyncCtor: DatabaseSyncCtor | null | undefined;
+
+function getDatabaseSyncCtor(): DatabaseSyncCtor | null {
+  if (cachedDatabaseSyncCtor !== undefined) {
+    return cachedDatabaseSyncCtor;
+  }
+
+  try {
+    const mod = require("node:sqlite") as { DatabaseSync?: DatabaseSyncCtor };
+    cachedDatabaseSyncCtor =
+      typeof mod.DatabaseSync === "function" ? mod.DatabaseSync : null;
+  } catch {
+    cachedDatabaseSyncCtor = null;
+  }
+
+  return cachedDatabaseSyncCtor;
+}
+
+function safeParseJson(filePath: string): Record<string, unknown> | null {
+  try {
+    const raw = fs.readFileSync(filePath, "utf-8");
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function readCodexSessionMeta(filePath: string): {
+  sessionId: string | null;
+  cwd: string | null;
+  timestampMs: number | null;
+} {
+  try {
+    const lines = fs.readFileSync(filePath, "utf-8").split("\n").slice(0, 20);
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const parsed = JSON.parse(line) as { type?: string; payload?: Record<string, unknown> };
+      if (parsed.type !== "session_meta" || !parsed.payload) continue;
+      const sessionId =
+        typeof parsed.payload.id === "string" ? parsed.payload.id : null;
+      const cwd = typeof parsed.payload.cwd === "string" ? parsed.payload.cwd : null;
+      const timestampMs =
+        typeof parsed.payload.timestamp === "string"
+          ? new Date(parsed.payload.timestamp).getTime()
+          : null;
+      return { sessionId, cwd, timestampMs };
+    }
+  } catch {
+  }
+  return { sessionId: null, cwd: null, timestampMs: null };
+}
+
+function readJsonlTailLines(filePath: string, limit: number): string[] {
+  if (limit <= 0) return [];
+
+  let fd: number;
+  try {
+    fd = fs.openSync(filePath, "r");
+  } catch {
+    return [];
+  }
+
+  try {
+    const fileSize = fs.fstatSync(fd).size;
+    if (fileSize === 0) return [];
+
+    let cursor = fileSize;
+    let leftover = "";
+    const lines: string[] = [];
+
+    while (cursor > 0 && lines.length < limit) {
+      const readBytes = Math.min(CHUNK_BYTES, cursor);
+      cursor -= readBytes;
+      const buf = Buffer.alloc(readBytes);
+      fs.readSync(fd, buf, 0, readBytes, cursor);
+
+      const chunk = buf.toString("utf-8") + leftover;
+      const parts = chunk.split("\n");
+      leftover = parts[0] ?? "";
+
+      for (let i = parts.length - 1; i >= 1 && lines.length < limit; i -= 1) {
+        const line = parts[i]?.trim();
+        if (line) {
+          lines.push(line);
+        }
+      }
+    }
+
+    const firstLine = leftover.trim();
+    if (firstLine && lines.length < limit) {
+      lines.push(firstLine);
+    }
+
+    return lines;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function getCodexSessionIndexPath(homeDir = os.homedir()): string {
+  return path.join(homeDir, ".codex", "session_index.jsonl");
+}
+
+function getCodexStateDbPath(homeDir = os.homedir()): string | null {
+  const codexDir = path.join(homeDir, ".codex");
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(codexDir);
+  } catch {
+    return null;
+  }
+
+  const candidates = entries
+    .map((entry) => {
+      const match = /^state_(\d+)\.sqlite$/.exec(entry);
+      if (!match) return null;
+      return {
+        filePath: path.join(codexDir, entry),
+        version: Number.parseInt(match[1] ?? "", 10),
+      };
+    })
+    .filter(
+      (candidate): candidate is { filePath: string; version: number } =>
+        candidate !== null && Number.isFinite(candidate.version),
+    )
+    .sort((left, right) => right.version - left.version);
+
+  return candidates[0]?.filePath ?? null;
+}
+
+function findBestCodexSessionInStateDb(
+  cwd: string,
+  startedAt?: string,
+  homeDir = os.homedir(),
+): FoundSession | null {
+  const dbPath = getCodexStateDbPath(homeDir);
+  if (!dbPath || !fs.existsSync(dbPath)) {
+    return null;
+  }
+
+  const DatabaseSync = getDatabaseSyncCtor();
+  if (!DatabaseSync) {
+    return null;
+  }
+
+  const startedMs = startedAt ? new Date(startedAt).getTime() : NaN;
+  let db: SqliteDatabase | null = null;
+
+  try {
+    db = new DatabaseSync(dbPath, { readonly: true });
+    const rows = db.prepare(`
+      SELECT id, rollout_path, created_at, updated_at
+      FROM threads
+      WHERE cwd = ? AND archived = 0
+      ORDER BY created_at DESC
+      LIMIT ?
+    `).all(cwd, CODEX_STATE_DB_CANDIDATE_LIMIT) as Array<{
+      id?: string;
+      rollout_path?: string;
+      created_at?: number;
+      updated_at?: number;
+    }>;
+
+    const candidates = rows
+      .map((row) => {
+        if (typeof row.id !== "string" || row.id.length === 0) {
+          return null;
+        }
+        const createdAtMs =
+          typeof row.created_at === "number" ? row.created_at * 1000 : null;
+        const updatedAtMs =
+          typeof row.updated_at === "number" ? row.updated_at * 1000 : null;
+        const anchorMs = createdAtMs ?? updatedAtMs ?? 0;
+        const distance = Number.isFinite(startedMs)
+          ? Math.abs(anchorMs - startedMs)
+          : 0;
+        const filePath =
+          typeof row.rollout_path === "string" ? row.rollout_path : "";
+
+        return {
+          sessionId: row.id,
+          filePath,
+          confidence: "medium" as const,
+          anchorMs,
+          distance,
+        };
+      })
+      .filter(
+        (candidate): candidate is {
+          sessionId: string;
+          filePath: string;
+          confidence: "medium";
+          anchorMs: number;
+          distance: number;
+        } => candidate !== null,
+      )
+      .sort((left, right) => {
+        if (left.distance !== right.distance) return left.distance - right.distance;
+        return right.anchorMs - left.anchorMs;
+      });
+
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    const { sessionId, filePath, confidence } = candidates[0];
+    return { sessionId, filePath, confidence };
+  } catch {
+    return null;
+  } finally {
+    db?.close();
+  }
+}
+
+function readLatestCodexSessionIdFromStateDb(homeDir = os.homedir()): string | null {
+  const dbPath = getCodexStateDbPath(homeDir);
+  if (!dbPath || !fs.existsSync(dbPath)) {
+    return null;
+  }
+
+  const DatabaseSync = getDatabaseSyncCtor();
+  if (!DatabaseSync) {
+    return null;
+  }
+
+  let db: SqliteDatabase | null = null;
+  try {
+    db = new DatabaseSync(dbPath, { readonly: true });
+    const row = db.prepare(`
+      SELECT id
+      FROM threads
+      WHERE archived = 0
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get() as { id?: string } | undefined;
+    return typeof row?.id === "string" ? row.id : null;
+  } catch {
+    return null;
+  } finally {
+    db?.close();
+  }
+}
+
+function readRecentCodexSessionIndexEntries(
+  homeDir = os.homedir(),
+  limit = CODEX_INDEX_RECENT_LIMIT,
+): Array<{ sessionId: string; updatedAtMs: number | null }> {
+  const indexPath = getCodexSessionIndexPath(homeDir);
+  if (!fs.existsSync(indexPath)) {
+    return [];
+  }
+
+  const entries: Array<{ sessionId: string; updatedAtMs: number | null }> = [];
+  const seen = new Set<string>();
+
+  for (const line of readJsonlTailLines(indexPath, limit * 3)) {
+    let parsed: CodexSessionIndexEntry;
+    try {
+      parsed = JSON.parse(line) as CodexSessionIndexEntry;
+    } catch {
+      continue;
+    }
+
+    if (typeof parsed.id !== "string" || parsed.id.length === 0 || seen.has(parsed.id)) {
+      continue;
+    }
+
+    seen.add(parsed.id);
+    entries.push({
+      sessionId: parsed.id,
+      updatedAtMs:
+        typeof parsed.updated_at === "string"
+          ? new Date(parsed.updated_at).getTime()
+          : null,
+    });
+
+    if (entries.length >= limit) {
+      break;
+    }
+  }
+
+  return entries;
+}
+
+function listRecentCodexSessionFiles(homeDir = os.homedir()): RecentCodexSessionFile[] {
+  const sessionsDir = path.join(homeDir, ".codex", "sessions");
+  const files: RecentCodexSessionFile[] = [];
+  const now = new Date();
+
+  for (let d = 0; d < CODEX_SESSION_LOOKBACK_DAYS; d += 1) {
+    const date = new Date(now.getTime() - d * 86_400_000);
+    const yyyy = String(date.getFullYear());
+    const mm = String(date.getMonth() + 1).padStart(2, "0");
+    const dd = String(date.getDate()).padStart(2, "0");
+    const dayDir = path.join(sessionsDir, yyyy, mm, dd);
+    if (!fs.existsSync(dayDir)) {
+      continue;
+    }
+
+    let dayEntries: string[];
+    try {
+      dayEntries = fs.readdirSync(dayDir);
+    } catch {
+      continue;
+    }
+
+    for (const entry of dayEntries) {
+      if (!entry.endsWith(".jsonl")) {
+        continue;
+      }
+      const filePath = path.join(dayDir, entry);
+      try {
+        const stat = fs.statSync(filePath);
+        const meta = readCodexSessionMeta(filePath);
+        files.push({
+          sessionId: meta.sessionId ?? path.basename(entry, ".jsonl"),
+          filePath,
+          mtimeMs: stat.mtimeMs,
+          cwd: meta.cwd,
+          timestampMs: meta.timestampMs,
+        });
+      } catch {
+        continue;
+      }
+    }
+  }
+
+  return files;
+}
+
+export function readLatestCodexSessionId(homeDir = os.homedir()): string | null {
+  const fromDb = readLatestCodexSessionIdFromStateDb(homeDir);
+  if (fromDb) {
+    return fromDb;
+  }
+  const latest = readRecentCodexSessionIndexEntries(homeDir, 1)[0];
+  return latest?.sessionId ?? null;
+}
+
+export function findBestCodexSession(
+  cwd: string,
+  startedAt?: string,
+  homeDir = os.homedir(),
+): FoundSession | null {
+  const fromDb = findBestCodexSessionInStateDb(cwd, startedAt, homeDir);
+  if (fromDb) {
+    return fromDb;
+  }
+
+  const startedMs = startedAt ? new Date(startedAt).getTime() : NaN;
+  const recentFiles = listRecentCodexSessionFiles(homeDir);
+  const recentFileMap = new Map(
+    recentFiles.map((entry) => [entry.sessionId, entry]),
+  );
+
+  const indexedCandidates = readRecentCodexSessionIndexEntries(homeDir)
+    .map((entry) => {
+      const recentFile = recentFileMap.get(entry.sessionId);
+      if (!recentFile) {
+        return null;
+      }
+      if (recentFile.cwd !== cwd) {
+        return null;
+      }
+      const anchorMs = Number.isFinite(recentFile.timestampMs ?? NaN)
+        ? recentFile.timestampMs!
+        : Number.isFinite(entry.updatedAtMs ?? NaN)
+          ? entry.updatedAtMs!
+          : recentFile.mtimeMs;
+      const distance = Number.isFinite(startedMs) ? Math.abs(anchorMs - startedMs) : 0;
+      return {
+        sessionId: entry.sessionId,
+        filePath: recentFile.filePath,
+        confidence: "medium" as const,
+        anchorMs,
+        distance,
+      };
+    })
+    .filter(
+      (candidate): candidate is {
+        sessionId: string;
+        filePath: string;
+        confidence: "medium";
+        anchorMs: number;
+        distance: number;
+      } => candidate !== null,
+    )
+    .sort((left, right) => {
+      if (left.distance !== right.distance) return left.distance - right.distance;
+      return right.anchorMs - left.anchorMs;
+    });
+
+  if (indexedCandidates.length > 0) {
+    const { sessionId, filePath, confidence } = indexedCandidates[0];
+    return { sessionId, filePath, confidence };
+  }
+
+  const fallbackCandidates = [...recentFiles]
+    .sort((left, right) => right.mtimeMs - left.mtimeMs)
+    .slice(0, CODEX_FALLBACK_SCAN_LIMIT)
+    .map((entry) => {
+      if (entry.cwd !== cwd) {
+        return null;
+      }
+      const anchorMs = Number.isFinite(entry.timestampMs ?? NaN)
+        ? entry.timestampMs!
+        : entry.mtimeMs;
+      const distance = Number.isFinite(startedMs) ? Math.abs(anchorMs - startedMs) : 0;
+      return {
+        sessionId: entry.sessionId,
+        filePath: entry.filePath,
+        confidence: "medium" as const,
+        anchorMs,
+        distance,
+      };
+    })
+    .filter(
+      (candidate): candidate is {
+        sessionId: string;
+        filePath: string;
+        confidence: "medium";
+        anchorMs: number;
+        distance: number;
+      } => candidate !== null,
+    )
+    .sort((left, right) => {
+      if (left.distance !== right.distance) return left.distance - right.distance;
+      return right.anchorMs - left.anchorMs;
+    });
+
+  if (fallbackCandidates.length > 0) {
+    const { sessionId, filePath, confidence } = fallbackCandidates[0];
+    return { sessionId, filePath, confidence };
+  }
+
+  // Do not fall back to the globally latest Codex session here. Auto-attach
+  // only has cwd + launch time as identity; if those don't yield a match,
+  // binding some other terminal's newest session is worse than timing out.
+  return null;
+}
+
+function getWuuSessionsDir(cwd: string): string {
+  return path.join(cwd, ".wuu", "sessions");
+}
+
+function parseWuuSessionStartedAtMs(sessionId: string): number | null {
+  const match = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})-/.exec(sessionId);
+  if (!match) {
+    return null;
+  }
+
+  const startedAt = Date.UTC(
+    Number.parseInt(match[1] ?? "", 10),
+    Number.parseInt(match[2] ?? "", 10) - 1,
+    Number.parseInt(match[3] ?? "", 10),
+    Number.parseInt(match[4] ?? "", 10),
+    Number.parseInt(match[5] ?? "", 10),
+    Number.parseInt(match[6] ?? "", 10),
+  );
+
+  return Number.isFinite(startedAt) ? startedAt : null;
+}
+
+function readWuuSessionIndex(sessDir: string): Array<{
+  sessionId: string;
+  createdAtMs: number | null;
+}> {
+  const indexPath = path.join(sessDir, "index.jsonl");
+  if (!fs.existsSync(indexPath)) {
+    return [];
+  }
+
+  const entries: Array<{ sessionId: string; createdAtMs: number | null }> = [];
+  const seen = new Set<string>();
+
+  for (const line of readJsonlTailLines(indexPath, 64)) {
+    let parsed: WuuSessionIndexEntry;
+    try {
+      parsed = JSON.parse(line) as WuuSessionIndexEntry;
+    } catch {
+      continue;
+    }
+
+    if (typeof parsed.id !== "string" || parsed.id.length === 0 || seen.has(parsed.id)) {
+      continue;
+    }
+
+    seen.add(parsed.id);
+    entries.push({
+      sessionId: parsed.id,
+      createdAtMs:
+        typeof parsed.created_at === "string"
+          ? new Date(parsed.created_at).getTime()
+          : null,
+    });
+  }
+
+  return entries;
+}
+
+function listRecentWuuSessionFiles(sessDir: string): Array<{
+  sessionId: string;
+  filePath: string;
+  anchorMs: number;
+}> {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(sessDir);
+  } catch {
+    return [];
+  }
+
+  return entries
+    .filter((entry) => entry.endsWith(".jsonl") && entry !== "index.jsonl")
+    .map((entry) => {
+      const filePath = path.join(sessDir, entry);
+      try {
+        const stat = fs.statSync(filePath);
+        return {
+          sessionId: path.basename(entry, ".jsonl"),
+          filePath,
+          anchorMs:
+            parseWuuSessionStartedAtMs(path.basename(entry, ".jsonl")) ?? stat.mtimeMs,
+        };
+      } catch {
+        return null;
+      }
+    })
+    .filter(
+      (entry): entry is { sessionId: string; filePath: string; anchorMs: number } =>
+        entry !== null,
+    )
+    .sort((left, right) => right.anchorMs - left.anchorMs)
+    .slice(0, 32);
+}
+
+export function findBestWuuSession(
+  cwd: string,
+  startedAt?: string,
+): FoundSession | null {
+  const sessionsDir = getWuuSessionsDir(cwd);
+  const startedMs = startedAt ? new Date(startedAt).getTime() : NaN;
+  const lowerBoundMs =
+    Number.isFinite(startedMs) ? startedMs - 1_000 : Number.NEGATIVE_INFINITY;
+
+  const indexedCandidates = readWuuSessionIndex(sessionsDir)
+    .map((entry) => {
+      const filePath = resolveSessionFile(entry.sessionId, "wuu", cwd);
+      if (!filePath || !fs.existsSync(filePath)) {
+        return null;
+      }
+      const anchorMs = Number.isFinite(entry.createdAtMs ?? NaN)
+        ? entry.createdAtMs!
+        : parseWuuSessionStartedAtMs(entry.sessionId) ?? fs.statSync(filePath).mtimeMs;
+      if (anchorMs < lowerBoundMs) {
+        return null;
+      }
+      return {
+        sessionId: entry.sessionId,
+        filePath,
+        anchorMs,
+      };
+    })
+    .filter(
+      (entry): entry is { sessionId: string; filePath: string; anchorMs: number } =>
+        entry !== null,
+    )
+    .sort((left, right) => right.anchorMs - left.anchorMs);
+
+  if (indexedCandidates.length > 0) {
+    const { sessionId, filePath } = indexedCandidates[0];
+    return {
+      sessionId,
+      filePath,
+      confidence: Number.isFinite(startedMs) ? "medium" : "weak",
+    };
+  }
+
+  const scannedCandidates = listRecentWuuSessionFiles(sessionsDir)
+    .filter((entry) => entry.anchorMs >= lowerBoundMs)
+    .sort((left, right) => right.anchorMs - left.anchorMs);
+
+  if (scannedCandidates.length > 0) {
+    const { sessionId, filePath } = scannedCandidates[0];
+    return {
+      sessionId,
+      filePath,
+      confidence: Number.isFinite(startedMs) ? "medium" : "weak",
+    };
+  }
+
+  return null;
+}
+
+interface ClaudeSessionSidecar {
+  pid: number | null;
+  cwd: string | null;
+  startedAtMs: number | null;
+  sessionId: string | null;
+  filePath: string;
+}
+
+function readClaudeSessionSidecar(filePath: string): ClaudeSessionSidecar | null {
+  const parsed = safeParseJson(filePath);
+  if (!parsed) return null;
+  return {
+    pid: typeof parsed.pid === "number" ? parsed.pid : null,
+    cwd: typeof parsed.cwd === "string" ? parsed.cwd : null,
+    startedAtMs:
+      typeof parsed.startedAt === "number"
+        ? parsed.startedAt
+        : typeof parsed.startedAt === "string"
+          ? new Date(parsed.startedAt).getTime()
+          : null,
+    sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : null,
+    filePath,
+  };
+}
+
+export function findBestClaudeSession(
+  cwd: string,
+  startedAt?: string,
+  pid?: number | null,
+  homeDir = os.homedir(),
+): FoundSession | null {
+  const sessionsDir = path.join(homeDir, ".claude", "sessions");
+  const startedMs = startedAt ? new Date(startedAt).getTime() : NaN;
+
+  if (typeof pid === "number") {
+    const exactPath = path.join(sessionsDir, `${pid}.json`);
+    const exact = readClaudeSessionSidecar(exactPath);
+    if (exact?.sessionId) {
+      return {
+        sessionId: exact.sessionId,
+        filePath: exact.filePath,
+        confidence: "strong",
+      };
+    }
+  }
+
+  let files: string[] = [];
+  try {
+    files = fs.readdirSync(sessionsDir)
+      .filter((entry) => entry.endsWith(".json"))
+      .map((entry) => path.join(sessionsDir, entry));
+  } catch {
+    return null;
+  }
+
+  const candidates = files
+    .map((filePath) => readClaudeSessionSidecar(filePath))
+    .filter((entry): entry is ClaudeSessionSidecar => entry !== null)
+    .filter((entry) => entry.cwd === cwd && typeof entry.sessionId === "string")
+    .map((entry) => {
+      const stat = fs.statSync(entry.filePath);
+      const anchorMs = Number.isFinite(entry.startedAtMs ?? NaN)
+        ? entry.startedAtMs!
+        : stat.mtimeMs;
+      const distance = Number.isFinite(startedMs) ? Math.abs(anchorMs - startedMs) : 0;
+      return {
+        sessionId: entry.sessionId!,
+        filePath: entry.filePath,
+        confidence: Number.isFinite(startedMs) ? "medium" as const : "weak" as const,
+        anchorMs,
+        distance,
+      };
+    })
+    .sort((left, right) => {
+      if (left.distance !== right.distance) return left.distance - right.distance;
+      return right.anchorMs - left.anchorMs;
+    });
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const { sessionId, filePath, confidence } = candidates[0];
+  return { sessionId, filePath, confidence };
+}
+
+function getKimiSessionsDir(cwd: string, homeDir = os.homedir()): string | null {
+  const metadataPath = path.join(homeDir, ".kimi", "kimi.json");
+  try {
+    const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf-8")) as {
+      work_dirs?: Array<{ path: string; sessions_dir?: string }>;
+    };
+    const workDirs = metadata.work_dirs ?? [];
+    for (const wd of workDirs) {
+      if (wd.path === cwd && wd.sessions_dir) {
+        return wd.sessions_dir;
+      }
+    }
+  } catch {
+    // ignore
+  }
+  // Fallback: compute from path hash
+  const crypto = require("node:crypto");
+  const pathMd5 = crypto.createHash("md5").update(cwd).digest("hex");
+  const fallbackDir = path.join(homeDir, ".kimi", "sessions", pathMd5);
+  if (fs.existsSync(fallbackDir)) {
+    return fallbackDir;
+  }
+  return null;
+}
+
+function listKimiSessionFiles(sessionsDir: string): Array<{
+  sessionId: string;
+  filePath: string;
+  anchorMs: number;
+}> {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(sessionsDir);
+  } catch {
+    return [];
+  }
+
+  return entries
+    .map((entry) => {
+      const sessionDir = path.join(sessionsDir, entry);
+      const contextFile = path.join(sessionDir, "context.jsonl");
+      try {
+        const stat = fs.statSync(contextFile);
+        return {
+          sessionId: entry,
+          filePath: contextFile,
+          anchorMs: stat.mtimeMs,
+        };
+      } catch {
+        return null;
+      }
+    })
+    .filter(
+      (entry): entry is { sessionId: string; filePath: string; anchorMs: number } =>
+        entry !== null,
+    )
+    .sort((left, right) => right.anchorMs - left.anchorMs)
+    .slice(0, 32);
+}
+
+export function findBestKimiSession(
+  cwd: string,
+  startedAt?: string,
+  homeDir = os.homedir(),
+): FoundSession | null {
+  const sessionsDir = getKimiSessionsDir(cwd, homeDir);
+  if (!sessionsDir) {
+    return null;
+  }
+
+  const startedMs = startedAt ? new Date(startedAt).getTime() : NaN;
+  const lowerBoundMs =
+    Number.isFinite(startedMs) ? startedMs - 1_000 : Number.NEGATIVE_INFINITY;
+
+  const candidates = listKimiSessionFiles(sessionsDir)
+    .filter((entry) => entry.anchorMs >= lowerBoundMs)
+    .sort((left, right) => right.anchorMs - left.anchorMs);
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  const { sessionId, filePath } = candidates[0];
+  return {
+    sessionId,
+    filePath,
+    confidence: Number.isFinite(startedMs) ? "medium" : "weak",
+  };
+}
+
+function toCodebuddyProjectKey(cwd: string): string {
+  let key = cwd;
+  if (/^[A-Za-z]:[\\/]/.test(key)) {
+    key = key[0].toLowerCase() + key.slice(1);
+  }
+  key = key.replace(/:/g, "").replace(/[/\\]/g, "-");
+  return key;
+}
+
+function cwdEqual(a: string, b: string): boolean {
+  const norm = (s: string): string => s.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  return norm(a) === norm(b);
+}
+
+function readCodebuddySessionMeta(filePath: string): {
+  sessionId: string | null;
+  cwd: string | null;
+  timestampMs: number | null;
+} {
+  try {
+    const raw = fs.readFileSync(filePath, "utf-8");
+    const lines = raw.split("\n");
+    const limit = Math.min(lines.length, 20);
+    for (let i = 0; i < limit; i++) {
+      const line = lines[i]?.trim();
+      if (!line) continue;
+      try {
+        const parsed = JSON.parse(line) as Record<string, unknown>;
+        if (typeof parsed.cwd === "string") {
+          let timestampMs: number | null = null;
+          const ts = parsed.timestamp;
+          if (typeof ts === "number" && Number.isFinite(ts)) {
+            timestampMs = ts;
+          } else if (typeof ts === "string") {
+            const t = new Date(ts).getTime();
+            if (Number.isFinite(t)) timestampMs = t;
+          }
+          return {
+            sessionId: typeof parsed.sessionId === "string" ? parsed.sessionId : null,
+            cwd: parsed.cwd,
+            timestampMs,
+          };
+        }
+      } catch {
+        continue;
+      }
+    }
+    for (let i = 0; i < limit; i++) {
+      const line = lines[i]?.trim();
+      if (!line) continue;
+      try {
+        const parsed = JSON.parse(line) as Record<string, unknown>;
+        if (typeof parsed.sessionId === "string") {
+          let timestampMs: number | null = null;
+          const ts = parsed.timestamp;
+          if (typeof ts === "number" && Number.isFinite(ts)) timestampMs = ts;
+          else if (typeof ts === "string") {
+            const t = new Date(ts).getTime();
+            if (Number.isFinite(t)) timestampMs = t;
+          }
+          return {
+            sessionId: parsed.sessionId,
+            cwd: typeof parsed.cwd === "string" ? parsed.cwd : null,
+            timestampMs,
+          };
+        }
+      } catch {
+        continue;
+      }
+    }
+  } catch {}
+  return { sessionId: null, cwd: null, timestampMs: null };
+}
+
+function collectCodebuddyCandidates(
+  cwd: string,
+  homeDir: string,
+): Array<{ sessionId: string; filePath: string; anchorMs: number }> {
+  const result: Array<{ sessionId: string; filePath: string; anchorMs: number }> = [];
+  const seen = new Set<string>();
+  const projectKey = toCodebuddyProjectKey(cwd);
+  const projectDir = path.join(homeDir, ".codebuddy", "projects", projectKey);
+  const sessionsDir = path.join(homeDir, ".codebuddy", "sessions");
+
+  const scanDir = (dir: string, isProjectDirForCwd: boolean): void => {
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith(".jsonl")) continue;
+      if (entry === "storage.json") continue;
+      const filePath = path.join(dir, entry);
+      if (seen.has(filePath)) continue;
+      seen.add(filePath);
+      try {
+        const stat = fs.statSync(filePath);
+        if (!stat.isFile()) continue;
+        if (stat.size === 0) continue;
+        const meta = readCodebuddySessionMeta(filePath);
+        const fileCwd = meta.cwd;
+        let isMatch = false;
+        if (isProjectDirForCwd) {
+          if (fileCwd === null) {
+            isMatch = true;
+          } else {
+            isMatch = cwdEqual(fileCwd, cwd);
+          }
+        } else {
+          if (fileCwd === null) {
+            isMatch = false;
+          } else {
+            isMatch = cwdEqual(fileCwd, cwd);
+          }
+        }
+        if (!isMatch) continue;
+        const sessionId = meta.sessionId ?? path.basename(entry, ".jsonl");
+        if (!sessionId) continue;
+        const anchorMs = stat.mtimeMs;
+        result.push({ sessionId, filePath, anchorMs });
+      } catch {
+        continue;
+      }
+    }
+  };
+
+  scanDir(projectDir, true);
+
+  const projSessions = path.join(projectDir, "sessions");
+  if (fs.existsSync(projSessions)) {
+    scanDir(projSessions, true);
+    try {
+      const subdirs = fs.readdirSync(projSessions);
+      for (const sub of subdirs) {
+        const subPath = path.join(projSessions, sub);
+        try {
+          if (fs.statSync(subPath).isDirectory()) scanDir(subPath, true);
+        } catch {}
+      }
+    } catch {}
+  }
+
+  if (fs.existsSync(sessionsDir)) {
+    scanDir(sessionsDir, false);
+    try {
+      const subdirs = fs.readdirSync(sessionsDir);
+      for (const sub of subdirs) {
+        const subPath = path.join(sessionsDir, sub);
+        try {
+          if (fs.statSync(subPath).isDirectory()) {
+            scanDir(subPath, false);
+            try {
+              const sub2 = fs.readdirSync(subPath);
+              for (const s2 of sub2) {
+                const p2 = path.join(subPath, s2);
+                try {
+                  if (fs.statSync(p2).isDirectory()) scanDir(p2, false);
+                } catch {}
+              }
+            } catch {}
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+
+  if (result.length === 0) {
+    const projectsRoot = path.join(homeDir, ".codebuddy", "projects");
+    try {
+      const projectDirs = fs.readdirSync(projectsRoot);
+      for (const dir of projectDirs) {
+        const full = path.join(projectsRoot, dir);
+        if (full === projectDir) continue;
+        try {
+          if (!fs.statSync(full).isDirectory()) continue;
+        } catch {
+          continue;
+        }
+        scanDir(full, false);
+        const sess = path.join(full, "sessions");
+        if (fs.existsSync(sess)) {
+          scanDir(sess, false);
+          try {
+            const subs = fs.readdirSync(sess);
+            for (const s of subs) {
+              const sp = path.join(sess, s);
+              try {
+                if (fs.statSync(sp).isDirectory()) scanDir(sp, false);
+              } catch {}
+            }
+          } catch {}
+        }
+      }
+    } catch {}
+  }
+
+  return result.sort((a, b) => b.anchorMs - a.anchorMs).slice(0, 32);
+}
+
+export function findBestCodebuddySession(
+  cwd: string,
+  startedAt?: string,
+  homeDir = os.homedir(),
+): FoundSession | null {
+  const startedMs = startedAt ? new Date(startedAt).getTime() : NaN;
+  const lowerBoundMs = Number.isFinite(startedMs) ? startedMs - 1_000 : Number.NEGATIVE_INFINITY;
+
+  const candidates = collectCodebuddyCandidates(cwd, homeDir).filter(
+    (entry) => entry.anchorMs >= lowerBoundMs,
+  );
+
+  if (candidates.length === 0) return null;
+
+  if (Number.isFinite(startedMs)) {
+    candidates.sort((a, b) => {
+      const distA = Math.abs(a.anchorMs - startedMs);
+      const distB = Math.abs(b.anchorMs - startedMs);
+      if (distA !== distB) return distA - distB;
+      return b.anchorMs - a.anchorMs;
+    });
+  }
+
+  const best = candidates[0];
+  return {
+    sessionId: best.sessionId,
+    filePath: best.filePath,
+    confidence: Number.isFinite(startedMs) ? "medium" : "weak",
+  };
+}
+
+export { findBestOpenCodeSession };
+
+const CHUNK_BYTES = 64 * 1024;
+const MAX_SCAN_BYTES = 512 * 1024;
+
+/**
+ * Scan a JSONL file backwards in 64KB chunks (up to 512KB total) looking
+ * for a line matching {@link needle}.  Returns the first (most recent)
+ * matching line, or null.
+ */
+function scanTailForLine(filePath: string, needle: string): string | null {
+  let fd: number;
+  try {
+    fd = fs.openSync(filePath, "r");
+  } catch {
+    return null;
+  }
+
+  try {
+    const fileSize = fs.fstatSync(fd).size;
+    if (fileSize === 0) return null;
+
+    let scanned = 0;
+    let cursor = fileSize;
+    let leftover = "";
+
+    while (scanned < MAX_SCAN_BYTES && cursor > 0) {
+      const readBytes = Math.min(CHUNK_BYTES, cursor);
+      cursor -= readBytes;
+      const buf = Buffer.alloc(readBytes);
+      fs.readSync(fd, buf, 0, readBytes, cursor);
+
+      const chunk = buf.toString("utf-8") + leftover;
+      const lines = chunk.split("\n");
+      // First element may be a partial line — carry it over
+      leftover = lines[0];
+
+      for (let i = lines.length - 1; i >= 1; i--) {
+        if (lines[i].includes(needle)) {
+          return lines[i];
+        }
+      }
+
+      scanned += readBytes;
+    }
+
+    if (leftover.includes(needle)) {
+      return leftover;
+    }
+
+    return null;
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+/**
+ * Read the permissionMode from a Claude session JSONL (last user entry).
+ * Returns "bypassPermissions" for --dangerously-skip-permissions, or null.
+ */
+export function readClaudeSessionPermissionMode(
+  sessionId: string,
+  cwd: string,
+): string | null {
+  const filePath = resolveSessionFile(sessionId, "claude", cwd);
+  if (!filePath) return null;
+
+  const line = scanTailForLine(filePath, '"permissionMode"');
+  if (!line) return null;
+
+  try {
+    const entry = JSON.parse(line) as {
+      type?: string;
+      permissionMode?: string;
+    };
+    if (entry.type === "user" && typeof entry.permissionMode === "string") {
+      return entry.permissionMode;
+    }
+  } catch {
+  }
+
+  return null;
+}
+
+/**
+ * Read approval/sandbox policy from a Codex session JSONL (last turn_context).
+ * Returns true when running with --dangerously-bypass-approvals-and-sandbox.
+ */
+export function readCodexSessionBypassState(
+  sessionId: string,
+  cwd: string,
+): boolean {
+  const filePath = resolveSessionFile(sessionId, "codex", cwd);
+  if (!filePath) return false;
+
+  const line = scanTailForLine(filePath, '"approval_policy"');
+  if (!line) return false;
+
+  try {
+    const entry = JSON.parse(line) as {
+      type?: string;
+      payload?: {
+        approval_policy?: string;
+        sandbox_policy?: { type?: string };
+      };
+    };
+    if (entry.type === "turn_context" && entry.payload) {
+      const { approval_policy, sandbox_policy } = entry.payload;
+      return (
+        approval_policy === "never" &&
+        sandbox_policy?.type === "danger-full-access"
+      );
+    }
+  } catch {
+  }
+
+  return false;
+}

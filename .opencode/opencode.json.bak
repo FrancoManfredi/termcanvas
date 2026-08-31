@@ -1,0 +1,6 @@
+﻿{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": [
+    "./node_modules/opencode-key-rotator/dist/index.js"
+  ]
+}

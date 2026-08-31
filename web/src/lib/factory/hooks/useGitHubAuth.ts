@@ -10,6 +10,7 @@ export interface UseGitHubAuthApi {
   readonly status: GitHubAuthState;
   readonly loading: boolean;
   connect(): Promise<GitHubAuthState>;
+  connectWithPat(token: string): Promise<GitHubAuthState>;
   refresh(): Promise<GitHubAuthState>;
   disconnect(): Promise<void>;
 }
@@ -71,8 +72,10 @@ export function useGitHubAuth(port?: GitHubAuthPort): UseGitHubAuthApi {
   const connect = useCallback(async (): Promise<GitHubAuthState> => {
     setLoading(true);
     try {
-      if (authPort instanceof RemoteGitHubAuthAdapter) {
-        const s = await authPort.connectWithPopup();
+      // Si el port expone connectWithPopup (Remote y Local mock), usarlo — evita abrir popup vacío
+      const maybePopup = (authPort as unknown as { connectWithPopup?: () => Promise<GitHubAuthState> }).connectWithPopup;
+      if (typeof maybePopup === "function") {
+        const s = await maybePopup.call(authPort);
         setStatus(s);
         return s;
       }
@@ -83,6 +86,24 @@ export function useGitHubAuth(port?: GitHubAuthPort): UseGitHubAuthApi {
       const s = await authPort.getStatus();
       setStatus(s);
       return s;
+    } finally {
+      setLoading(false);
+    }
+  }, [authPort]);
+
+  const connectWithPat = useCallback(async (token: string): Promise<GitHubAuthState> => {
+    setLoading(true);
+    try {
+      const maybePat = (authPort as unknown as { connectWithPat?: (t: string) => Promise<GitHubAuthState> }).connectWithPat;
+      if (typeof maybePat === "function") {
+        const s = await maybePat.call(authPort, token);
+        setStatus(s);
+        return s;
+      }
+      // fallback: si el adapter no soporta PAT, error
+      const next: GitHubAuthState = { connected: false, status: "error", error: "PAT no soportado por este adapter" };
+      setStatus(next);
+      return next;
     } finally {
       setLoading(false);
     }
@@ -105,7 +126,7 @@ export function useGitHubAuth(port?: GitHubAuthPort): UseGitHubAuthApi {
     setStatus(s);
   }, [authPort]);
 
-  return { status, loading, connect, refresh, disconnect };
+  return { status, loading, connect, connectWithPat, refresh, disconnect };
 }
 
 // singleton default for simpler usage in steps

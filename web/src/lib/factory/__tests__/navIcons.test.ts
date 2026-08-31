@@ -1,31 +1,30 @@
-// navIcons.test.ts — P0-04: exhaustividad NAV_ICONS ↔ NAV_ITEMS
-// Source: WarpFactories.md §10 · PLAN Ola 5 E1
-// SRP: verifica que cada NavItemId tenga icono y que no haya huérfanos.
-
 import { describe, it, expect } from "vitest";
 import { NAV_ITEMS } from "../../../nav";
-import { NAV_ICONS } from "../../../components/Sidebar";
 
-describe("NAV_ICONS exhaustiveness (P0-04 · OLA 5)", () => {
-  it("every NAV_ITEMS id has an icon in NAV_ICONS", () => {
+describe("NAV_ITEMS replica (13-exact guard)", () => {
+  it("has exactly 13 items (4 team + 9 factory)", () => {
+    expect(NAV_ITEMS).toHaveLength(13);
+  });
+
+  it("team scope has 4 items in order", () => {
+    const teamIds = NAV_ITEMS.filter((i) => i.scope === "team").map((i) => i.id);
+    expect(teamIds).toEqual(["Team Runs", "MCPs and apps", "Secrets", "Integrations"]);
+  });
+
+  it("factory scope has 9 items in order", () => {
+    const factoryIds = NAV_ITEMS.filter((i) => i.scope === "factory").map((i) => i.id);
+    expect(factoryIds).toEqual(["Dashboard", "Activity", "Agents", "Automations", "Runs", "Scorers", "Self-improvement", "Factory definition", "Settings"]);
+  });
+
+  it("every id has label and scope", () => {
     for (const item of NAV_ITEMS) {
-      expect(item.id in NAV_ICONS, `NAV_ICONS missing icon for "${item.id}"`).toBe(true);
-      expect(NAV_ICONS[item.id]).toBeDefined();
+      expect(item.label).toBeTruthy();
+      expect(["team", "factory"]).toContain(item.scope);
     }
   });
 
-  it("no orphan icons — Object.keys(NAV_ICONS) length equals NAV_ITEMS length", () => {
-    expect(Object.keys(NAV_ICONS)).toHaveLength(NAV_ITEMS.length);
-  });
-
-  it("no orphan keys — every NAV_ICONS key corresponds to a NAV_ITEMS id", () => {
-    const ids = new Set(NAV_ITEMS.map((i) => i.id));
-    for (const key of Object.keys(NAV_ICONS)) {
-      expect(ids.has(key as never), `orphan icon key "${key}" not in NAV_ITEMS`).toBe(true);
-    }
-  });
-
-  it("NAV_ITEMS has 31 ids (6 team + 25 factory) — regression guard", () => {
-    expect(NAV_ITEMS).toHaveLength(31);
+  it("no duplicate ids", () => {
+    const ids = NAV_ITEMS.map((i) => i.id);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 });

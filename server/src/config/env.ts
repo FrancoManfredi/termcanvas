@@ -14,6 +14,7 @@ const envSchema = z.object({
   GITHUB_CLIENT_ID: z.string().optional(),
   GITHUB_CLIENT_SECRET: z.string().optional(),
   GITHUB_OAUTH_CALLBACK_URL: z.string().default("http://localhost:5174/api/auth/callback"),
+  GITHUB_PAT: z.string().optional(),
   SESSION_SECRET: z.string().optional(),
   NODE_ENV: z.string().default("development"),
 });
@@ -44,4 +45,12 @@ export function hasGitHubAppConfig(env: Env = getEnv()): boolean {
 
 export function hasGitHubOAuthConfig(env: Env = getEnv()): boolean {
   return Boolean(env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET);
+}
+
+export function hasGitHubPatConfig(env: Env = getEnv()): boolean {
+  return Boolean(env.GITHUB_PAT && env.GITHUB_PAT.trim().length > 0);
+}
+
+export function getGitHubPat(env: Env = getEnv()): string | undefined {
+  return env.GITHUB_PAT?.trim() || undefined;
 }

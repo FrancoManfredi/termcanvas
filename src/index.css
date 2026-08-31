@@ -1,0 +1,1636 @@
+@import "tailwindcss";
+@import "@xyflow/react/dist/style.css";
+@import "@xterm/xterm/css/xterm.css";
+@import "@wterm/react/css";
+
+@theme {
+  --duration-instant: 80ms;
+  --duration-quick: 140ms;
+  --duration-natural: 220ms;
+  --duration-deliberate: 320ms;
+}
+
+@font-face {
+  font-family: "Geist Sans";
+  src: url("/node_modules/geist/dist/fonts/geist-sans/Geist-Variable.woff2")
+    format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Geist Mono";
+  src: url("/node_modules/geist/dist/fonts/geist-mono/GeistMono-Variable.woff2")
+    format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Geist Pixel Square";
+  src: url("/node_modules/geist/dist/fonts/geist-pixel/GeistPixel-Square.woff2")
+    format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+:root,
+[data-theme="dark"] {
+  --bg: #1a1918;
+  --sidebar: #141312;
+  --sidebar-hover: #1c1b1a;
+  --surface: #222120;
+  --surface-hover: #2a2928;
+  --border: #333231;
+  --border-hover: #43423f;
+  --text-primary: #e4e2df;
+  --text-secondary: #918e89;
+  --text-muted: #7a7773;
+  --text-faint: #3e3c39;
+  /* --text-metadata sits between secondary and muted: bright enough to
+     read at a glance, dim enough not to fight the primary line. Used
+     for scannable metadata like a project name in a list row, a relative
+     age, an "N msgs" line — anywhere we want the user to actually parse
+     the text rather than just sense its presence. --text-faint is
+     decoration only; --text-muted is for tertiary controls; metadata is
+     the "I want you to read this" middle tier. */
+  --text-metadata: #a8a59f;
+  --text-timestamp: #918e89;
+  /* --role-user / --role-assistant retired: the replay view used to
+     paint a "You" eyebrow in accent and an "Assistant" eyebrow in amber.
+     The amber clashed with inline `<code>` (also amber) on code-heavy
+     replies, and the eyebrows themselves were redundant once typography
+     differentiated speakers. Speaker is now expressed via prose weight
+     and an accent gutter glyph; amber is no longer used in this view. */
+  --accent: #c4c0b8;
+  --accent-soft: rgba(196, 192, 184, 0.14);
+  --accent-foreground: #1a1918;
+  --pin: #e0b75b;
+  --pin-soft: rgba(224, 183, 91, 0.16);
+  --pin-foreground: #1a1918;
+  --red: #e87272;
+  --red-soft: rgba(232, 114, 114, 0.16);
+  --amber: #d4a24e;
+  --cyan: #6cc4b0;
+  --cyan-soft: rgba(108, 196, 176, 0.16);
+  --opencode-color: #5bbfad;
+  --green: #4ade80;
+  --purple: #9b7ad8;
+  --git-graph-blue: #6aa7ff;
+  --git-graph-purple: #b889f6;
+  --git-graph-cyan: #5cc8b2;
+  --git-graph-amber: #e0b75b;
+  --git-graph-pink: #ec7aa8;
+  --git-graph-green: #82d96d;
+  --usage-primary: #5ea1ff;
+  --usage-secondary: #65d6ad;
+  --usage-tertiary: #b889f6;
+  --usage-cache: #e0b75b;
+  --usage-danger: #ef7d7d;
+  --usage-heatmap-1: color-mix(in srgb, var(--usage-primary) 22%, transparent);
+  --usage-heatmap-2: color-mix(in srgb, var(--usage-primary) 42%, transparent);
+  --usage-heatmap-3: color-mix(in srgb, var(--usage-primary) 66%, transparent);
+  --usage-heatmap-4: color-mix(in srgb, var(--usage-primary) 92%, transparent);
+  /* User-prompt bubble fill in the replay view. Reads as a soft
+     surface lift above --bg, never as a colored "you" highlight. The
+     dark value (#2a2928) matches --surface-hover by intent — same
+     "lifted neutral" semantic — but a separate token is justified
+     because the light-theme equivalent (#F3F3F4) is a hand-picked
+     value that does NOT match light --surface-hover. Keeping both
+     under one --bubble-bg name lets the component reference the
+     semantic role, not whichever neutral happens to land near it. */
+  --bubble-bg: #2a2928;
+  /* Cast colour for floating-UI shadows. Warm near-black so it lands
+     in the same hue family as the dark neutrals (#1a1918 / #222120)
+     instead of looking ashy. Components compose translucency on top
+     via color-mix(); never used at full opacity. */
+  --shadow-color: #0a0908;
+  /* Modal scrim. Used by every dialog/palette/popup that needs to
+     darken the canvas behind it. Defined as a complete colour
+     (with built-in alpha) so call-sites just reference --scrim and
+     never reach for raw rgba(). Dark theme uses a deep black at 55%
+     — same value the existing modals had hand-coded; the token just
+     makes it consistent and trackable. */
+  --scrim: rgba(0, 0, 0, 0.55);
+  --radius: 8px;
+  /* Find-match decorations. Dark theme gets a low-luminance brass marker:
+     warm enough to belong to the neutral palette, far enough from xterm's
+     blue selection to identify search state at a glance. */
+  --find-match-bg: rgba(184, 134, 64, 0.22);
+  --find-match-outline: rgba(212, 162, 78, 0.34);
+  --find-match-active-bg: rgba(245, 197, 110, 0.32);
+  --find-match-active-outline: rgba(245, 197, 110, 0.92);
+  --find-match-active-shadow: rgba(212, 162, 78, 0.18);
+  color-scheme: dark;
+}
+
+[data-theme="light"] {
+  --bg: #eae8e4;
+  --sidebar: #e2e0dc;
+  --sidebar-hover: #dbd9d5;
+  --surface: #f3f2ef;
+  --surface-hover: #e5e3df;
+  --border: #dbd8d3;
+  --border-hover: #c9c5bf;
+  --text-primary: #1c1917;
+  --text-secondary: #57534e;
+  --text-muted: #6b6660;
+  --text-faint: #c4c0ba;
+  --text-metadata: #4a4540;
+  --text-timestamp: #57534e;
+  /* See dark-theme block above: --role-user / --role-assistant retired
+     in the replay-view rework. */
+  --accent: #44403c;
+  --accent-soft: rgba(68, 64, 60, 0.12);
+  --accent-foreground: #f3f2ef;
+  --pin: #b45309;
+  --pin-soft: rgba(180, 83, 9, 0.14);
+  --pin-foreground: #fff7ed;
+  --red: #dc2626;
+  --red-soft: rgba(220, 38, 38, 0.12);
+  --amber: #d97706;
+  --cyan: #0d9488;
+  --cyan-soft: rgba(13, 148, 136, 0.14);
+  --opencode-color: #0f6b5f;
+  --green: #16a34a;
+  --purple: #7c3aed;
+  --git-graph-blue: #2563eb;
+  --git-graph-purple: #7c3aed;
+  --git-graph-cyan: #0f766e;
+  --git-graph-amber: #b45309;
+  --git-graph-pink: #be185d;
+  --git-graph-green: #15803d;
+  --usage-primary: #2563eb;
+  --usage-secondary: #0f766e;
+  --usage-tertiary: #7c3aed;
+  --usage-cache: #b45309;
+  --usage-danger: #dc2626;
+  --usage-heatmap-1: color-mix(in srgb, var(--usage-primary) 18%, transparent);
+  --usage-heatmap-2: color-mix(in srgb, var(--usage-primary) 34%, transparent);
+  --usage-heatmap-3: color-mix(in srgb, var(--usage-primary) 56%, transparent);
+  --usage-heatmap-4: color-mix(in srgb, var(--usage-primary) 78%, transparent);
+  /* See dark-theme block for rationale. The exact value (#F3F3F4) was
+     picked deliberately for the user-prompt bubble; it sits a touch
+     cooler than --surface (#f3f2ef) and reads as "soft container" on
+     the cream-paper light background. */
+  --bubble-bg: #f3f3f4;
+  /* See dark-theme block. Warm dark grey (close to text-primary)
+     keeps shadows in the same hue family as the light neutrals so
+     they read as "soft depth" rather than "hard cutout". */
+  --shadow-color: #1c1917;
+  /* Light-theme scrim is the same warm dark as --shadow-color but at
+     a lower 42% alpha. A pure-black 55% scrim reads as a hard
+     theatre-curtain on cream paper; the warm tone keeps the modal
+     feeling lifted from the same surface family, and the lower alpha
+     stops the popup from looking like it's floating on coal. */
+  --scrim: rgba(28, 25, 23, 0.42);
+  --radius: 8px;
+  /* Light theme uses the same brass role but shifted darker and less
+     saturated. It should read like an editorial marker on paper, not a neon
+     label or a status color. */
+  --find-match-bg: rgba(146, 100, 40, 0.16);
+  --find-match-outline: rgba(120, 80, 30, 0.22);
+  --find-match-active-bg: rgba(180, 111, 35, 0.26);
+  --find-match-active-outline: rgba(120, 72, 24, 0.72);
+  --find-match-active-shadow: rgba(180, 111, 35, 0.12);
+  color-scheme: light;
+}
+
+:root {
+  /* ── Type scale ─────────────────────────────────────────── */
+  --text-tiny: 10px; /* eyebrow / micro caption */
+  --text-xs: 11px; /* tertiary metadata, status */
+  --text-sm: 12px; /* secondary UI controls */
+  --text-base: 13px; /* default body */
+  --text-md: 14px; /* primary reading content */
+  --text-lg: 16px; /* section title */
+  --text-xl: 20px; /* display */
+
+  /* Numeric-display sizes, used for the big cost/stat figures. They
+     carry their own sizes rather than reusing --text-* because mono
+     tabular numerals look oversized at a given point size vs sans. */
+  --text-stat-lg: 22px; /* sidebar summary */
+  --text-stat-xl: 26px; /* overlay hero stat */
+
+  /* First-impression display size. Reserved for the empty-canvas /
+     pre-content moment where the product needs typographic presence
+     without leaning on a marketing hero. The jump from --text-xl (20px)
+     to --text-hero (32px) is the rhythmic step the type scale was missing
+     for this rare role; introduce more values only if a new role
+     genuinely cannot be expressed by what's here. */
+  --text-hero: 32px;
+
+  /* ── Line heights ────────────────────────────────────────── */
+  --leading-tight: 1.25;
+  --leading-snug: 1.4;
+  --leading-normal: 1.55;
+  --leading-relaxed: 1.65;
+
+  /* ── Tracking ────────────────────────────────────────────── */
+  --tracking-display: -0.012em;
+  --tracking-title: -0.005em;
+  --tracking-number: -0.02em;
+  --tracking-eyebrow: 0.085em;
+
+  /* ── Weights ─────────────────────────────────────────────── */
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+
+  /* ── Motion ──────────────────────────────────────────────── */
+  /* Durations are role-based, not size-based. Use --duration-instant for
+     state hand-offs the eye should not catch (focus, hover background);
+     --duration-quick for affordance feedback (button press, chevron rotate);
+     --duration-natural for entrances/exits the user is meant to perceive;
+     --duration-deliberate for spatial moves where the user needs to track
+     where something went (panel slide, drawer open). Going longer than
+     deliberate makes the UI feel sluggish, not premium. */
+  --duration-instant: 80ms;
+  --duration-quick: 140ms;
+  --duration-natural: 220ms;
+  --duration-deliberate: 320ms;
+
+  /* Easings. --ease-out-soft is the workhorse: arrives confident, settles
+     gently — right for things appearing or moving toward rest. --ease-out-snap
+     overshoots-then-settles slightly, used sparingly for affordances we want
+     the user to *notice* (a pin engaging, a save confirming). --ease-in-soft
+     is for exits — the user shouldn't track something that's leaving.
+     --ease-in-out-soft is for in-place state shifts (a value updating). */
+  --ease-out-soft: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-out-snap: cubic-bezier(0.34, 1.32, 0.64, 1);
+  --ease-in-soft: cubic-bezier(0.4, 0, 0.6, 0.2);
+  --ease-in-out-soft: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* ── Elevation ───────────────────────────────────────────────
+     Two layered shadow primitives the floating-UI family shares.
+     Cast colour comes from --shadow-color so depth lands in the
+     same hue family as the neutrals (warm near-black in dark, warm
+     ink in light). Each token is a pair — a tight contact shadow
+     plus a softer cast — read together as one elevation rather
+     than a stack of effects.
+       --shadow-elev-1: drawers anchored to a panel edge, small
+         floating widgets, on-canvas cards. Subtle.
+       --shadow-elev-2: floating modals/widgets that sit free over
+         the canvas (toasts, modal dialogs, file editor). Deeper. */
+  --shadow-elev-1:
+    0 1px 2px color-mix(in srgb, var(--shadow-color) 14%, transparent),
+    0 6px 16px color-mix(in srgb, var(--shadow-color) 14%, transparent);
+  --shadow-elev-2:
+    0 2px 6px color-mix(in srgb, var(--shadow-color) 22%, transparent),
+    0 14px 36px color-mix(in srgb, var(--shadow-color) 26%, transparent);
+
+}
+
+body {
+  font-family:
+    "Geist Sans",
+    -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-feature-settings: "ss03", "cv11", "zero";
+  background: var(--bg);
+  color: var(--text-primary);
+}
+
+/* ───────────────────────────────────────────────────────────
+   Semantic typography roles
+   Each role defines size + weight + tracking + leading + color.
+   Compose with `tc-color-*` overrides only when truly needed.
+   Keeps every text decision answerable to "what role am I?"
+   ─────────────────────────────────────────────────────────── */
+.tc-display {
+  font-size: var(--text-xl);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-display);
+  line-height: var(--leading-tight);
+  color: var(--text-primary);
+}
+.tc-title {
+  font-size: var(--text-lg);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-title);
+  line-height: var(--leading-snug);
+  color: var(--text-primary);
+}
+.tc-body {
+  font-size: var(--text-md);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-normal);
+  color: var(--text-primary);
+}
+.tc-body-sm {
+  font-size: var(--text-base);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-normal);
+  color: var(--text-primary);
+}
+.tc-ui {
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  line-height: var(--leading-snug);
+  color: var(--text-secondary);
+}
+.tc-label {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-snug);
+  color: var(--text-muted);
+}
+.tc-eyebrow {
+  font-size: var(--text-tiny);
+  font-weight: var(--weight-medium);
+  text-transform: uppercase;
+  letter-spacing: var(--tracking-eyebrow);
+  color: var(--text-muted);
+}
+.tc-caption {
+  font-size: var(--text-tiny);
+  line-height: var(--leading-snug);
+  color: var(--text-faint);
+}
+/* Scannable metadata — a tier brighter than .tc-label, used for the
+   bits of secondary info we actually want the user to read (project
+   name, relative age, "N msgs"). Stays in the type scale (--text-xs)
+   so we don't sprinkle 10/11/12 px values around. */
+.tc-meta {
+  font-size: var(--text-xs);
+  font-weight: var(--weight-regular);
+  line-height: var(--leading-snug);
+  color: var(--text-metadata);
+}
+.tc-timestamp {
+  font-size: 10px;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-feature-settings: "ss03", "zero";
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+}
+/* .tc-role / .tc-role-user / .tc-role-assistant retired alongside the
+   --role-* tokens. The replay view now leans on a gutter glyph + prose
+   weight to mark speakers, so per-role badges have nothing to badge. */
+
+/* Color overrides — apply on top of a role to shift emphasis */
+.tc-color-primary {
+  color: var(--text-primary);
+}
+.tc-color-secondary {
+  color: var(--text-secondary);
+}
+.tc-color-muted {
+  color: var(--text-muted);
+}
+.tc-color-faint {
+  color: var(--text-faint);
+}
+.tc-color-accent {
+  color: var(--accent);
+}
+
+/* Numeric-display roles. Self-contained: already mono + tabular-nums
+   + tight tracking. Use these for the large cost/stat figures so
+   every such number in the app has the same visual rhythm without
+   repeating the same four classes at every site. */
+.tc-stat-xl {
+  font-size: var(--text-stat-xl);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-number);
+  line-height: 1;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-feature-settings: "ss03", "zero";
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+.tc-stat-lg {
+  font-size: var(--text-stat-lg);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-number);
+  line-height: 1;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-feature-settings: "ss03", "zero";
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+
+/* Hero display. Pairs --text-hero with weight + tracking + leading so the
+   call-site never reinvents these values. Tighter tracking than tc-display
+   because heading text reads better with condensed letter-spacing at large
+   sizes, and a 1.15 leading keeps two-line statements compact instead of
+   floaty. Use sparingly — first-impression states only. */
+.tc-hero {
+  font-size: var(--text-hero);
+  font-weight: var(--weight-semibold);
+  letter-spacing: -0.02em;
+  line-height: 1.15;
+  color: var(--text-primary);
+}
+
+/* Inline keyboard-shortcut chip. Renders as <span> for static hints or
+   <button>/<a> for clickable affordances; styling stays identical so the
+   chip doesn't reflow on hover. Only the interactive variants light up. */
+.tc-kbd {
+  display: inline-flex;
+  align-items: center;
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--text-sm);
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.02em;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  transition:
+    border-color var(--duration-quick) var(--ease-out-soft),
+    background-color var(--duration-quick) var(--ease-out-soft),
+    color var(--duration-quick) var(--ease-out-soft);
+}
+button.tc-kbd,
+a.tc-kbd {
+  cursor: pointer;
+}
+button.tc-kbd:hover,
+a.tc-kbd:hover {
+  border-color: var(--border-hover);
+  background: var(--surface);
+  color: var(--text-primary);
+}
+button.tc-kbd:active,
+a.tc-kbd:active {
+  background: var(--surface-hover);
+}
+
+/* Treatments */
+.tc-mono {
+  font-family: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-feature-settings: "ss03", "zero";
+}
+.tc-num {
+  font-variant-numeric: tabular-nums;
+}
+
+.canvas-bg {
+  background-color: var(--bg);
+}
+
+[data-theme="light"] .panel,
+[data-theme="light"] .terminal-tile {
+  border-color: #ddd9d4;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.06),
+    0 2px 6px rgba(0, 0, 0, 0.03);
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.tc-xyflow .react-flow__node {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  padding: 0;
+}
+
+/* Edge resize handles — Figma-style small rectangles at edge midpoints */
+.tc-xyflow .react-flow__resize-control.line {
+  z-index: 20;
+  background: var(--surface);
+  border-color: var(--border-hover);
+  border-width: 1px;
+  border-style: solid;
+  border-radius: 1px;
+}
+.tc-xyflow .react-flow__resize-control.line.top,
+.tc-xyflow .react-flow__resize-control.line.bottom {
+  width: 24px;
+  height: 6px;
+  left: 50%;
+  border-top-width: 1px;
+  border-bottom-width: 1px;
+}
+.tc-xyflow .react-flow__resize-control.line.top {
+  top: 0;
+  transform: translate(-50%, -100%);
+}
+.tc-xyflow .react-flow__resize-control.line.bottom {
+  bottom: 0;
+  top: auto;
+  transform: translate(-50%, 100%);
+}
+.tc-xyflow .react-flow__resize-control.line.left,
+.tc-xyflow .react-flow__resize-control.line.right {
+  width: 6px;
+  height: 24px;
+  top: 50%;
+  border-left-width: 1px;
+  border-right-width: 1px;
+}
+.tc-xyflow .react-flow__resize-control.line.left {
+  left: 0;
+  transform: translate(-100%, -50%);
+}
+.tc-xyflow .react-flow__resize-control.line.right {
+  right: 0;
+  left: auto;
+  transform: translate(100%, -50%);
+}
+
+/* Keep resize hit areas outside the tile so edge selection in xterm
+   does not start a resize gesture first. */
+.tc-xyflow .react-flow__resize-control.handle.left {
+  translate: -100% -50%;
+}
+.tc-xyflow .react-flow__resize-control.handle.right {
+  translate: 0 -50%;
+}
+.tc-xyflow .react-flow__resize-control.handle.top {
+  translate: -50% -100%;
+}
+.tc-xyflow .react-flow__resize-control.handle.bottom {
+  translate: -50% 0;
+}
+.tc-xyflow .react-flow__resize-control.handle.top.left {
+  translate: -100% -100%;
+}
+.tc-xyflow .react-flow__resize-control.handle.top.right {
+  translate: 0 -100%;
+}
+.tc-xyflow .react-flow__resize-control.handle.bottom.left {
+  translate: -100% 0;
+}
+.tc-xyflow .react-flow__resize-control.handle.bottom.right {
+  translate: 0 0;
+}
+
+.tc-xyflow .react-flow__viewport {
+  will-change: transform;
+}
+
+.tc-xyflow .react-flow__attribution {
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  border: 1px solid color-mix(in srgb, var(--border) 78%, transparent);
+  border-radius: 999px;
+  color: var(--text-secondary);
+  padding: 2px 8px;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Terminal tile chrome
+   The tile is the most-seen surface in the product. Every chrome
+   state shares the same temporal rhythm — --duration-quick with
+   --ease-out-soft. State is driven from data attributes so the
+   React side just toggles flags; the visual treatment lives here.
+   Precedence (high → low): drag-over / task-flash > receptive >
+   focused. Higher-precedence states fully replace lower ones.
+   ───────────────────────────────────────────────────────────── */
+.terminal-tile {
+  cursor: default;
+  transition:
+    border-color var(--duration-quick) var(--ease-out-soft),
+    box-shadow var(--duration-quick) var(--ease-out-soft);
+}
+
+.terminal-tile[data-drag-over="true"],
+.terminal-tile[data-task-flash="true"] {
+  box-shadow:
+    0 0 0 2px var(--accent),
+    0 0 12px color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+.terminal-tile[data-receptive="true"]:not(
+    [data-drag-over="true"],
+    [data-task-flash="true"]
+  ) {
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+/* Handoff drop affordance — a different ring colour than folder/file drop
+   so the eye reads "this is a different gesture". Cyan vs accent is the
+   pairing established in the canvas tokens. */
+.terminal-tile[data-handoff-target="true"]:not(
+    [data-drag-over="true"],
+    [data-task-flash="true"]
+  ) {
+  box-shadow:
+    0 0 0 2px var(--cyan),
+    0 0 12px color-mix(in srgb, var(--cyan) 26%, transparent);
+}
+
+/* Source tile reads as "this is what's being moved" while the chip is in
+   flight — a small dim, not an outline, so it doesn't compete with the
+   receptive-target ring on the opposite tile. */
+.terminal-tile[data-handoff-source="true"] {
+  opacity: 0.85;
+  transition: opacity var(--duration-quick) var(--ease-out-soft);
+}
+
+/* Focus, normal canvas: paired 1px accent border + 1px inset accent
+   line at low opacity. Confident enough to spot from across the
+   canvas, quiet enough never to compete with the tile contents. */
+.terminal-tile[data-focused="true"]:not(
+    [data-drag-over="true"],
+    [data-task-flash="true"],
+    [data-receptive="true"],
+    [data-overview="true"]
+  ) {
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, var(--accent) 22%, transparent),
+    inset 0 0 0 1px color-mix(in srgb, var(--accent) 9%, transparent);
+}
+
+/* Focus, overview mode: a stronger ring still readable when the
+   canvas is fit-to-all and tiles are near thumbnail size. */
+.terminal-tile[data-focused="true"][data-overview="true"]:not(
+    [data-drag-over="true"],
+    [data-task-flash="true"],
+    [data-receptive="true"]
+  ) {
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--text-secondary) 45%, transparent),
+    inset 0 2px 0 0 color-mix(in srgb, var(--text-secondary) 25%, transparent);
+}
+
+/* Header. Lifts to --surface-hover when the tile owns focus — a
+   paired colour shift with the focus ring so the active tile reads
+   as grouped, not merely outlined. */
+.tc-tile-header {
+  background-color: transparent;
+  transition: background-color var(--duration-quick) var(--ease-out-soft);
+}
+.terminal-tile[data-focused="true"]:not(
+    [data-drag-over="true"],
+    [data-task-flash="true"]
+  )
+  .tc-tile-header {
+  background-color: var(--surface-hover);
+}
+
+/* Hover-only action affordances (minimise, close, edit-title icon).
+   Idle = invisible; reveal on tile hover, focus, or keyboard focus.
+   data-visible="always" keeps structural controls visible; data-pinned="true"
+   keeps state marks visible regardless — used for a starred tile so the mark
+   persists without hover. */
+.tc-tile-action {
+  opacity: 0;
+  transition:
+    opacity var(--duration-quick) var(--ease-out-soft),
+    color var(--duration-quick) var(--ease-out-soft),
+    background-color var(--duration-quick) var(--ease-out-soft);
+}
+.terminal-tile:hover .tc-tile-action,
+.terminal-tile[data-focused="true"] .tc-tile-action,
+.terminal-tile .tc-tile-action:focus-visible,
+.terminal-tile .tc-tile-action[data-visible="always"],
+.terminal-tile .tc-tile-action[data-pinned="true"] {
+  opacity: 1;
+}
+
+/* Inline edit-title cue. The cursor flips to text on hover so the
+   field reads as editable; the pencil chip (rendered as
+   .tc-tile-action) makes the affordance discoverable without
+   crowding the title. */
+.tc-tile-title-editable {
+  cursor: text;
+}
+
+/* Activity heatmap sparkline. Mounted only when the heatmap toggle is
+   on, but the fade is driven from the canvas-root data attribute so the
+   reveal is one canvas-wide transition rather than 50 per-tile flickers.
+   Quiet ink — --text-muted at 30% so it reads as ambient information,
+   never as an alert. */
+.tc-activity-sparkline {
+  flex-shrink: 0;
+  color: color-mix(in srgb, var(--text-muted) 30%, transparent);
+  opacity: 0;
+  transition: opacity var(--duration-natural) var(--ease-out-soft);
+  pointer-events: none;
+}
+[data-activity-heatmap="true"] .tc-activity-sparkline {
+  opacity: 1;
+}
+
+/* Force text cursor inside terminal tiles.
+   xterm v6 has many internal elements that set cursor away from text:
+   .enable-mouse-events → default, .xterm-cursor-pointer → pointer,
+   .xterm-viewport → default, .xterm-scrollable-element > .scrollbar → default.
+   Use !important to win over any cascade/specificity combination.
+   Also target the container (.tc-xterm-host) to cover pixel gaps between
+   the xterm element edge and the tile content area. */
+.tc-xterm-host,
+.terminal-tile .xterm,
+.terminal-tile .xterm.enable-mouse-events,
+.terminal-tile .xterm.xterm-cursor-pointer,
+.terminal-tile .xterm .xterm-cursor-pointer,
+.terminal-tile .xterm .xterm-viewport,
+.terminal-tile .xterm .xterm-screen,
+.terminal-tile .xterm .xterm-scrollable-element,
+.terminal-tile .xterm .xterm-scrollable-element > .scrollbar {
+  cursor: text !important;
+}
+
+.tc-xterm-host.modifier-held .xterm.xterm-cursor-pointer,
+.tc-xterm-host.modifier-held .xterm .xterm-cursor-pointer {
+  cursor: pointer !important;
+}
+
+/* Find-match decorations rendered by @xterm/addon-search. The addon
+   writes inline backgroundColor + outline directly on the decoration
+   element; we override both via CSS classes it stamps on, so the
+   highlight respects our theme tokens instead of the addon's inline colors. */
+.terminal-tile .xterm-find-result-decoration {
+  background-color: var(--find-match-bg) !important;
+  outline: 1px solid var(--find-match-outline) !important;
+  outline-offset: -1px;
+  border-radius: 2px;
+}
+.terminal-tile
+  .xterm-find-result-decoration.xterm-find-active-result-decoration {
+  background-color: var(--find-match-active-bg) !important;
+  outline: 1px solid var(--find-match-active-outline) !important;
+  outline-offset: -1px;
+  box-shadow:
+    inset 0 -2px 0 var(--find-match-active-outline),
+    0 0 0 1px var(--find-match-active-shadow);
+}
+
+/* xterm v6 scroll shadows sit at z-index 11 along the top and left edges
+   of the scrollable element.  They intercept mouse events in the top-left
+   area of the terminal, preventing text selection from starting there.
+   Disable their hit-testing so clicks fall through to the screen below. */
+.terminal-tile .xterm .xterm-scrollable-element > .shadow {
+  pointer-events: none !important;
+}
+
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Auto-hide scrollbars: thumb is transparent by default and only fades
+   in while the user is actively scrolling (see src/scrollFade.ts, which
+   toggles `tc-scrolling` on <html>) or while hovering the thumb itself. */
+::-webkit-scrollbar-thumb {
+  background-color: transparent;
+  border-radius: 3px;
+  transition: background-color 600ms ease;
+}
+
+html.tc-scrolling ::-webkit-scrollbar-thumb {
+  background-color: var(--border);
+  transition-duration: 120ms;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: var(--border-hover);
+  transition-duration: 120ms;
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
+}
+
+/* 1.6s reads as a steady heartbeat — alive, not languid. The original
+   2s loop drifted closer to a "still loading" cadence; pulling it in
+   anchors it to the same temporal rhythm as the motion tokens. */
+.status-pulse {
+  animation: pulse-dot 1.6s var(--ease-in-out-soft) infinite;
+}
+
+@keyframes usage-fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes usage-bar-grow {
+  from {
+    transform: scaleY(0);
+  }
+  to {
+    transform: scaleY(1);
+  }
+}
+
+@keyframes usage-bar-fill {
+  from {
+    width: 0%;
+  }
+}
+
+@keyframes usage-tooltip-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+@keyframes usage-calendar-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.usage-section-enter {
+  animation: usage-fade-in-up 0.3s ease-out both;
+}
+
+@keyframes usage-overlay-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.usage-overlay-enter {
+  animation: usage-overlay-in 0.15s ease-out both;
+}
+
+.usage-tooltip-enter {
+  animation: usage-tooltip-in 0.15s ease-out both;
+}
+
+.usage-calendar-enter {
+  animation: usage-calendar-in 0.2s ease-out both;
+}
+
+@keyframes heatmap-cell-in {
+  from {
+    opacity: 0;
+    transform: scale(0.5);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.heatmap-cell-enter {
+  animation: heatmap-cell-in 0.3s ease-out both;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes slideIn {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes demo-nudge {
+  0%,
+  100% {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  50% {
+    transform: translateX(2px);
+    opacity: 0.7;
+  }
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Motion utilities — role-based entrance/state classes built
+   on the motion tokens. Components compose these instead of
+   re-deriving keyframes + timings per surface. Each utility is
+   a single role; combine via wrapping elements when you need
+   layered behavior (e.g. fade-in container + pop child).
+   ───────────────────────────────────────────────────────────── */
+@keyframes tc-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes tc-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes tc-fade-down {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+@keyframes tc-pop {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes tc-slide-in-right {
+  from {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.tc-enter-fade {
+  animation: tc-fade-in var(--duration-natural) var(--ease-out-soft) both;
+}
+/* Quick opacity-only fade for in-place content swaps where the user
+   already knows where the new content will land — tab panels, segment
+   contents, anything that is conceptually a "show the other thing"
+   rather than an "arrive". Slower than tc-enter-fade and snap-free so
+   the eye doesn't track a phantom motion. */
+.tc-enter-fade-quick {
+  animation: tc-fade-in var(--duration-quick) var(--ease-out-soft) both;
+}
+.tc-enter-fade-up {
+  animation: tc-fade-up var(--duration-natural) var(--ease-out-soft) both;
+}
+.tc-enter-fade-up-quick {
+  animation: tc-fade-up var(--duration-quick) var(--ease-out-soft) both;
+}
+.tc-enter-fade-down {
+  animation: tc-fade-down var(--duration-natural) var(--ease-out-soft) both;
+}
+.tc-enter-pop {
+  animation: tc-pop var(--duration-quick) var(--ease-out-snap) both;
+}
+.tc-enter-slide-right {
+  animation: tc-slide-in-right var(--duration-natural) var(--ease-out-soft) both;
+}
+
+/* Command palette row. The selected-row highlight transitions with
+   --ease-out-snap so the band overshoots a hair as ↑/↓ moves between
+   rows — small spring that says "you grabbed this", consistent with
+   the affordance treatment elsewhere. Background-color only; no
+   transform shifts so the row text doesn't jiggle on selection. */
+.tc-cmd-row {
+  transition:
+    background-color var(--duration-quick) var(--ease-out-snap),
+    color var(--duration-quick) var(--ease-out-soft);
+}
+
+/* Composer submit feedback. Two coordinated cues that fire once per
+   successful send: a halo expanding off the input ("the field
+   accepted you"), and a one-beat scale on the send button
+   ("received"). The button uses --ease-out-snap deliberately — a
+   single small overshoot reads as confident acknowledgement; longer
+   springs would feel toy-like in a developer tool. */
+@keyframes tc-composer-input-flash {
+  0% {
+    opacity: 1;
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+  100% {
+    opacity: 0;
+    box-shadow: 0 0 0 6px color-mix(in srgb, var(--accent) 0%, transparent);
+  }
+}
+/* Animates `scale` (not `transform`) so the button's translateY(-50%)
+   stays intact while the keyframe runs. */
+@keyframes tc-composer-send-pulse {
+  0% {
+    scale: 1;
+  }
+  40% {
+    scale: 1.06;
+  }
+  100% {
+    scale: 1;
+  }
+}
+.tc-composer-input-flash {
+  animation: tc-composer-input-flash var(--duration-natural)
+    var(--ease-out-soft) forwards;
+}
+.tc-composer-send-button {
+  transition:
+    background-color var(--duration-quick) var(--ease-out-soft),
+    box-shadow var(--duration-quick) var(--ease-out-soft),
+    opacity var(--duration-quick) var(--ease-out-soft),
+    scale var(--duration-quick) var(--ease-out-soft);
+}
+.tc-composer-send-button:active:not(:disabled) {
+  scale: 0.96;
+  transition: scale var(--duration-instant) var(--ease-out-snap);
+}
+.tc-composer-send-pulse {
+  animation: tc-composer-send-pulse var(--duration-quick) var(--ease-out-snap);
+}
+
+/* Stagger helper — apply tc-stagger on a container, then the children
+   inherit a small delay multiplied by their position. Keeps motion
+   coherent across lists without each callsite passing inline delays. */
+.tc-stagger > * {
+  animation-delay: calc(var(--tc-stagger-step, 30ms) * var(--tc-stagger-i, 0));
+}
+.tc-stagger > *:nth-child(1) {
+  --tc-stagger-i: 0;
+}
+.tc-stagger > *:nth-child(2) {
+  --tc-stagger-i: 1;
+}
+.tc-stagger > *:nth-child(3) {
+  --tc-stagger-i: 2;
+}
+.tc-stagger > *:nth-child(4) {
+  --tc-stagger-i: 3;
+}
+.tc-stagger > *:nth-child(5) {
+  --tc-stagger-i: 4;
+}
+.tc-stagger > *:nth-child(6) {
+  --tc-stagger-i: 5;
+}
+.tc-stagger > *:nth-child(7) {
+  --tc-stagger-i: 6;
+}
+.tc-stagger > *:nth-child(8) {
+  --tc-stagger-i: 7;
+}
+.tc-stagger > *:nth-child(n + 9) {
+  --tc-stagger-i: 8;
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Canvas dragover affordance — fires when an OS folder is
+   dragged over the canvas. Two coordinated cues:
+     1. A 1px accent inset around the canvas viewport ("the
+        surface is receptive").
+     2. A small floating chip at top-center ("drop folder to
+        add as project") — only when folder detection succeeds.
+   Both live in pointer-events: none layers; they never
+   intercept the actual drop. Asymmetric timing: enters in
+   140ms (deliberate), exits in 80ms (gone before the user
+   tracks it leaving).
+   ───────────────────────────────────────────────────────────── */
+.tc-canvas-dragover-inset {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 1px var(--accent);
+  opacity: 0;
+  z-index: 25;
+  transition: opacity var(--duration-instant) var(--ease-in-soft);
+}
+.tc-canvas-dragover-inset[data-active="true"] {
+  opacity: 0.7;
+  transition: opacity var(--duration-quick) var(--ease-out-soft);
+}
+
+.tc-canvas-dragover-chip {
+  background: color-mix(in srgb, var(--surface) 75%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+  opacity: 0;
+  transform: translateY(-4px);
+  transition:
+    opacity var(--duration-instant) var(--ease-in-soft),
+    transform var(--duration-instant) var(--ease-in-soft);
+}
+.tc-canvas-dragover-chip[data-active="true"] {
+  opacity: 1;
+  transform: translateY(0);
+  transition:
+    opacity var(--duration-quick) var(--ease-out-soft),
+    transform var(--duration-quick) var(--ease-out-soft);
+}
+
+/* Handoff drag chip — floats next to the cursor while a terminal selection
+   is being dragged across the canvas. Cyan accent so it reads as the same
+   gesture as the receiving tile's ring. Lives in pointer-events: none so
+   it never blocks elementFromPoint hit tests. */
+.tc-handoff-chip {
+  position: fixed;
+  z-index: 9999;
+  pointer-events: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px 4px 8px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--cyan) 45%, transparent);
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  backdrop-filter: blur(6px);
+  box-shadow:
+    0 8px 22px -10px color-mix(in srgb, var(--shadow-color) 50%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--cyan) 14%, transparent);
+  font-family: "Geist Mono", monospace;
+  font-size: 10.5px;
+  line-height: 1;
+  color: var(--text-primary);
+  /* Sit slightly down-and-right of the cursor; matches OS drag-image idiom. */
+  transform: translate(12px, 12px);
+  white-space: nowrap;
+  max-width: 380px;
+}
+.tc-handoff-chip-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--cyan);
+  flex-shrink: 0;
+}
+.tc-handoff-chip-source {
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 9px;
+  flex-shrink: 0;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tc-handoff-chip-divider {
+  color: var(--text-faint);
+  flex-shrink: 0;
+}
+.tc-handoff-chip-preview {
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Empty-state response: the affordance the user already sees
+   (the "drag a folder" hint and the kbd shortcut chip) shifts
+   to accent while a folder is being dragged — "yes, this is
+   what's about to happen". The hint text leads the change;
+   the kbd chip follows so the alternative path is also legible. */
+.tc-canvas-empty-drag-hint {
+  transition: color var(--duration-instant) var(--ease-in-soft);
+}
+.tc-canvas-empty-drag-hint[data-dragover="true"] {
+  color: var(--accent);
+  transition: color var(--duration-quick) var(--ease-out-soft);
+}
+
+button.tc-kbd[data-dragover="true"],
+a.tc-kbd[data-dragover="true"] {
+  border-color: color-mix(in srgb, var(--accent) 65%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent);
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Discovery cue — quiet capability hint chip rendered at the
+   top-center of the canvas. Default tone is muted; hover lifts
+   contrast a notch and reveals the dismiss control. Lives in
+   layout via the renderer (DiscoveryCue.tsx); only the chrome
+   lives here.
+   ───────────────────────────────────────────────────────────── */
+.tc-discovery-chip {
+  background: color-mix(in srgb, var(--surface) 65%, transparent);
+  border-color: color-mix(in srgb, var(--border) 55%, transparent);
+  transition:
+    background-color var(--duration-quick) var(--ease-out-soft),
+    border-color var(--duration-quick) var(--ease-out-soft);
+}
+.tc-discovery-chip:hover {
+  background: var(--surface);
+  border-color: var(--border);
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Sidebar list rows. Every row in LeftPanel / RightPanel /
+   ProjectTree / SessionsPanel / SessionsOverlay shares the same
+   hover affordance — a quiet bg lift plus a primary-text shift.
+   Motion routes through the role-based duration/easing tokens so
+   the panels rhyme with the toolbar, palette, and tile chrome.
+   The row hover-bg uses --sidebar-hover (not --surface-hover) so
+   it stays a touch quieter than tile/cards — sidebar density is
+   higher, and a stronger highlight reads as noise across many
+   adjacent rows.
+   ───────────────────────────────────────────────────────────── */
+.tc-row-hover {
+  transition:
+    background-color var(--duration-quick) var(--ease-out-soft),
+    color var(--duration-quick) var(--ease-out-soft);
+}
+.tc-row-hover:hover {
+  background-color: var(--sidebar-hover);
+}
+
+/* File-tree adjacent lists should use the same face as @pierre/trees so
+   matching row metrics do not still read as two different components. */
+.tc-sidebar-tree-font {
+  font-family: system-ui;
+}
+
+.tc-left-tree-branch {
+  position: relative;
+}
+.tc-left-tree-branch::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--left-tree-rail-x);
+  width: 1px;
+  background: var(--border);
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+/* Quieter variant for icon-button-like targets sitting inside a
+   row: only colour shifts on hover, no surface lift (the row
+   underneath already lifts). Use on chevron toggles and resize
+   handle highlights. */
+.tc-row-icon {
+  transition:
+    color var(--duration-quick) var(--ease-out-soft),
+    background-color var(--duration-quick) var(--ease-out-soft),
+    opacity var(--duration-quick) var(--ease-out-soft);
+}
+
+/* Sidebar section header. Sits at the top of every panel surface
+   (LeftPanel, SessionsPanel list, RightPanel repo selector,
+   SessionsOverlay drawer) and carries the eyebrow label, optional
+   count, and one trailing affordance. The bottom rule is opt-in
+   via tc-row-divider; some headers (RightPanel tab strip) sit
+   above content that already has its own divider.
+
+   Padding rhythm: 12px horizontal, 8px vertical = px-3 py-2 in
+   tailwind units, lock-stepped with the 4/8/16 base scale. */
+.tc-row-divider {
+  border-bottom: 1px solid var(--border);
+}
+
+/* ─────────────────────────────────────────────────────────────
+   Settings rail — vertical category nav used inside the settings
+   modal. The rail sits at modal scale (180px column), so the
+   active state needs to read from the corner of the eye while
+   the user is reading the right pane. We use a soft accent fill
+   plus a 2px accent gutter on the left edge — gutter is the
+   primary cue, fill is secondary. Hover wakes a quiet surface
+   lift; idle items sit on transparent so the rail's column
+   border carries the structure.
+   ───────────────────────────────────────────────────────────── */
+.tc-settings-rail-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 6px 12px 6px 14px;
+  border-radius: 6px;
+  font-size: var(--text-base);
+  font-weight: var(--weight-regular);
+  color: var(--text-secondary);
+  background: transparent;
+  transition:
+    background-color var(--duration-quick) var(--ease-out-soft),
+    color var(--duration-quick) var(--ease-out-soft);
+}
+.tc-settings-rail-item::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  border-radius: 1px;
+  background: transparent;
+  transition: background-color var(--duration-quick) var(--ease-out-soft);
+}
+.tc-settings-rail-item:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+.tc-settings-rail-item:focus-visible {
+  outline: none;
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+.tc-settings-rail-item.is-active {
+  color: var(--text-primary);
+  background: var(--accent-soft);
+  font-weight: var(--weight-medium);
+}
+.tc-settings-rail-item.is-active::before {
+  background: var(--accent);
+}
+
+/* Respect reduced-motion: collapse all entrance animations and long
+   transitions. Everything still works, just without the parallax. */
+@media (prefers-reduced-motion: reduce) {
+  .tc-enter,
+  .tc-enter-fade,
+  .tc-enter-fade-quick,
+  .tc-enter-fade-up,
+  .tc-enter-fade-down,
+  .tc-enter-pop,
+  .tc-enter-slide-right,
+  .tc-composer-input-flash,
+  .tc-composer-send-pulse,
+  .usage-section-enter,
+  .usage-overlay-enter,
+  .usage-tooltip-enter,
+  .usage-calendar-enter,
+  .heatmap-cell-enter {
+    animation: none !important;
+  }
+  *,
+  *::before,
+  *::after {
+    transition-duration: 1ms !important;
+    animation-duration: 1ms !important;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Diseño de modales rediseñados (Figma: "Replicate Modal Dialog
+   Design"). Sistema SCOPED al modal: los tokens nuevos (paleta más
+   oscura, radius 10px) viven SOLO dentro de .modal-scrim para no
+   afectar al resto de la app; afuera siguen los tokens globales.
+   ─────────────────────────────────────────────────────────────────── */
+.modal-scrim {
+  --bg: #141312;
+  --sidebar: #100f0e;
+  --surface: #1a1918;
+  --surface-hover: #222120;
+  --border: #282725;
+  --border-hover: #383633;
+  --text-primary: #ededec;
+  --text-secondary: #9c9a96;
+  --text-muted: #706e6a;
+  --text-faint: #44423e;
+  --accent: #d8d5cd;
+  --accent-soft: rgba(216, 213, 205, 0.08);
+  --accent-foreground: #141312;
+  --red: #f06a6a;
+  --red-soft: rgba(240, 106, 106, 0.12);
+  --amber: #e5a952;
+  --amber-soft: rgba(229, 169, 82, 0.12);
+  --scrim: rgba(0, 0, 0, 0.72);
+  --radius: 10px;
+  color-scheme: dark;
+  /* Overlay: ocupa toda la ventana, centra el modal y difumina el fondo */
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background-color: var(--scrim);
+  backdrop-filter: blur(8px);
+}
+[data-theme="light"] .modal-scrim {
+  --bg: #f5f4f0;
+  --sidebar: #ecebe6;
+  --surface: #ffffff;
+  --surface-hover: #f0eee8;
+  --border: #e2e0d8;
+  --border-hover: #ceccc2;
+  --text-primary: #181716;
+  --text-secondary: #605d58;
+  --text-muted: #807c75;
+  --text-faint: #b8b4aa;
+  --accent: #2c2926;
+  --accent-soft: rgba(44, 41, 38, 0.08);
+  --accent-foreground: #ffffff;
+  --red: #dc2626;
+  --red-soft: rgba(220, 38, 38, 0.08);
+  --amber: #d97706;
+  --amber-soft: rgba(217, 119, 6, 0.08);
+  --scrim: rgba(24, 23, 22, 0.45);
+  --radius: 10px;
+  color-scheme: light;
+}
+
+/* Entrada minimalista del modal (180ms, sin rebote) */
+.tc-enter {
+  animation: tc-minimal-in 180ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+@keyframes tc-minimal-in {
+  from { opacity: 0; transform: scale(0.985) translateY(4px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.modal-shell {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 38rem; /* Clean, tight, focused modal width */
+  overflow: hidden;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background-color: var(--surface);
+  box-shadow: 0 20px 40px -15px rgba(0, 0, 0, 0.5);
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 20px;
+}
+
+/* Fitts's Law Optimized Buttons - Generous touch targets */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  border-radius: 7px;
+  font-size: 13px;
+  font-weight: 500;
+  min-height: 40px; /* Fitts's Law: Comfortable touch & click target */
+  padding: 0 16px;
+  transition: all 120ms ease;
+  user-select: none;
+  outline: none;
+  border: 1px solid transparent;
+}
+.btn:focus-visible {
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+}
+.btn-primary {
+  background-color: var(--accent);
+  color: var(--accent-foreground);
+  font-weight: 600;
+}
+.btn-primary:hover:not(:disabled) {
+  opacity: 0.92;
+  transform: translateY(-0.5px);
+}
+.btn-primary:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.btn-ghost {
+  border-color: var(--border);
+  background-color: transparent;
+  color: var(--text-secondary);
+}
+.btn-ghost:hover:not(:disabled) {
+  background-color: var(--surface-hover);
+  color: var(--text-primary);
+  border-color: var(--border-hover);
+}
+.btn-ghost:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+.btn-danger-ghost {
+  background-color: transparent;
+  color: var(--red);
+  font-size: 12px;
+  min-height: 32px;
+  padding: 0 10px;
+}
+.btn-danger-ghost:hover {
+  background-color: var(--red-soft);
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px; /* Fitts's Law: 36px minimum icon hit area */
+  border-radius: 7px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  transition: all 120ms ease;
+  outline: none;
+}
+.icon-btn:hover {
+  background-color: var(--surface-hover);
+  color: var(--text-primary);
+}
+.icon-btn:focus-visible {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+/* Minimal Input */
+.textarea-minimal {
+  width: 100%;
+  resize: none;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background-color: var(--bg);
+  padding: 12px 14px;
+  font-family: inherit;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  outline: none;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.textarea-minimal:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-soft);
+}
+.textarea-minimal::placeholder {
+  color: var(--text-muted);
+}
+
+/* Fitts's Law Large Row Items */
+.row-item-minimal {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background-color: var(--bg);
+  padding: 14px; /* Generous padding for fast clicking */
+  text-align: left;
+  cursor: pointer;
+  transition: all 120ms ease;
+  outline: none;
+}
+.row-item-minimal:hover {
+  background-color: var(--surface-hover);
+  border-color: var(--border-hover);
+}
+.row-item-minimal.active {
+  border-color: var(--accent);
+  background-color: var(--accent-soft);
+}
+
+/* Progress bar */
+.progress-line-track {
+  height: 3px;
+  width: 100%;
+  background-color: var(--border);
+  overflow: hidden;
+  border-radius: 99px;
+}
+.progress-line-fill {
+  height: 100%;
+  background-color: var(--accent);
+  transition: width 200ms ease;
+  border-radius: 99px;
+}
