@@ -1260,7 +1260,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
       // git worktree remove leaves the branch behind, so recreating an
       // issue worktree fails with "branch already exists". Capture the
       // branch before removing anything, then delete it best-effort on
-      // success — same contract hydra cleanup relies on.
+      // success — same contract worktree cleanup relies on.
       const getWorktreeBranch = async (): Promise<string | null> => {
         try {
           const { stdout } = await execFileAsync(
@@ -1321,7 +1321,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         // to delete a branch that is still checked out.
         const branchToDelete = branch ?? (isPrimary ? null : worktreeFolderName);
         // Reuse the shared --force builder so the renderer/IPC path matches
-        // the CLI, hydra, and headless paths exactly. Without --force, git
+        // the CLI and headless paths exactly. Without --force, git
         // refuses to remove worktrees containing modified or untracked files
         // — which is exactly what worker worktrees produce by design.
         const args = force

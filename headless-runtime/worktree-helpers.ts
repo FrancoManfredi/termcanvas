@@ -3,8 +3,8 @@ import path from "node:path";
 
 /**
  * Local worktree helpers — independent copy for headless-runtime.
- * Previously shared via hydra package, now duplicated here so headless-runtime
- * is self-contained.
+ * Previously shared via separate package, now duplicated here so
+ * headless-runtime is self-contained.
  */
 
 export function resolveMainRepoRoot(repoPath: string): string {
