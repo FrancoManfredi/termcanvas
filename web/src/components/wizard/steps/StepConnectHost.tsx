@@ -1,6 +1,6 @@
 import { GithubIcon } from "../../atoms/icons/GithubIcon";
 import { useGitHubAuth } from "../../../lib/factory/hooks/useGitHubAuth";
-import { hasEnvPat } from "../../../lib/factory/config/githubToken";
+import { hasEnvPat, tokenSource } from "../../../lib/factory/config/githubToken";
 
 const BTN_PRESS = "transition-[transform,background-color,border-color,color,box-shadow] duration-150 active:scale-[0.96]";
 
@@ -12,10 +12,18 @@ export function StepConnectHost({ onNext }: { onNext: () => void }) {
   const isError = status.status === "error";
 
   const viaBadge = hasEnvPat() ? "via .env" : "via localStorage";
+  const envDebug = (import.meta as unknown as { env?: Record<string, unknown> }).env?.VITE_GITHUB_TOKEN
+    ? `env:${String((import.meta as unknown as { env: Record<string, unknown> }).env.VITE_GITHUB_TOKEN).slice(0, 4)}***`
+    : "env:vacío";
+  const src = tokenSource();
 
   return (
     <div className="anim-fade-in-up">
       <h1 className="text-2xl font-semibold text-gray-900 mb-2">Connect your code host</h1>
+      <p className="text-[11px] text-gray-400 mb-2">
+        debug: {envDebug} · hasEnvPat:{String(hasEnvPat())} · src:{src} · status:{status.status}{" "}
+        {status.username ? `· @${status.username}` : ""}
+      </p>
       <p className="text-sm text-gray-500 mb-7 leading-relaxed">
         Warp will connect to your code host so that you can select which repos you want to use in your factory.
       </p>
