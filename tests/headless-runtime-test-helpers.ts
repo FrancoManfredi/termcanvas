@@ -6,10 +6,6 @@ import { ServerEventBus } from "../headless-runtime/event-bus.ts";
 import { ProjectStore, generateId, type ProjectData } from "../headless-runtime/project-store.ts";
 import type { ProjectScanner } from "../electron/project-scanner.ts";
 import { TelemetryService } from "../electron/telemetry-service.ts";
-import {
-  WORKBENCH_STATE_SCHEMA_VERSION,
-  type WorkbenchRecord as WorkflowRecord,
-} from "../hydra/src/workflow-store.ts";
 
 type PtyDataListener = (data: string) => void;
 type PtyExitListener = (exitCode: number) => void;
@@ -173,14 +169,14 @@ export function addProjectWithMainWorktree(
 
 export function writeWorkflowFixture(
   repoPath: string,
-  overrides: Partial<WorkflowRecord> = {},
-): WorkflowRecord {
-  const workflowId = overrides.id ?? `workflow-${generateId()}`;
-  const workflowDir = path.join(repoPath, ".hydra", "workbenches", workflowId);
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const workflowId = (overrides.id as string) ?? `workflow-${generateId()}`;
+  const workflowDir = path.join(repoPath, ".tmp-workflows", workflowId);
   fs.mkdirSync(workflowDir, { recursive: true });
 
-  const workflow: WorkflowRecord = {
-    schema_version: WORKBENCH_STATE_SCHEMA_VERSION,
+  const workflow: Record<string, unknown> = {
+    schema_version: "workflow/v1",
     id: workflowId,
     lead_terminal_id: "terminal-test-helper",
     intent_file: "inputs/intent.md",

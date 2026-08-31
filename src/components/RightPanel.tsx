@@ -2,7 +2,6 @@ import { useMemo, useCallback, useState, useRef, useEffect } from "react";
 import { useCanvasStore, COLLAPSED_TAB_WIDTH } from "../stores/canvasStore";
 import { useProjectStore } from "../stores/projectStore";
 import { useT } from "../i18n/useT";
-import { useNotificationStore } from "../stores/notificationStore";
 import { FilesContent } from "./RightPanel/FilesContent";
 import { DiffContent } from "./RightPanel/DiffContent";
 import { GitContent } from "./RightPanel/GitContent";
@@ -87,11 +86,9 @@ export function RightPanel() {
   const setCollapsed = useCanvasStore((s) => s.setRightPanelCollapsed);
   const setWidth = useCanvasStore((s) => s.setRightPanelWidth);
   const setActiveTab = useCanvasStore((s) => s.setRightPanelActiveTab);
-  const notify = useNotificationStore((s) => s.notify);
 
   const focusedWorktreeId = useProjectStore((s) => s.focusedWorktreeId);
   const projects = useProjectStore((s) => s.projects);
-  const [hydraEnabling, setHydraEnabling] = useState(false);
   const [directoryIsGitRepo, setDirectoryIsGitRepo] = useState(false);
   const [childRepos, setChildRepos] = useState<RepoContextOption[]>([]);
   const [selectedChildRepoPath, setSelectedChildRepoPath] = useState<string | null>(null);
@@ -129,15 +126,6 @@ export function RightPanel() {
       });
     }
   }, [collapsed, projects]);
-
-  const focusedProject = useMemo(() => {
-    if (!focusedWorktreeId) return null;
-    for (const p of projects) {
-      const wt = p.worktrees.find((w) => w.id === focusedWorktreeId);
-      if (wt) return p;
-    }
-    return null;
-  }, [focusedWorktreeId, projects]);
 
   const worktreePath = useMemo(() => {
     if (!focusedWorktreeId) return null;
@@ -343,33 +331,6 @@ export function RightPanel() {
     },
     [openFileEditor]
   );
-
-  const handleEnableHydra = useCallback(async () => {
-    if (!focusedProject) {
-      notify("warn", t.hydra_enable_missing_target);
-      return;
-    }
-
-    setHydraEnabling(true);
-    try {
-      const result = await window.termcanvas.project.enableHydra(focusedProject.path);
-      if (!result.ok) {
-        notify("error", t.hydra_enable_failed(result.error));
-        return;
-      }
-
-      notify(
-        "info",
-        result.changed
-          ? t.hydra_enable_success(focusedProject.name)
-          : t.hydra_enable_already_current(focusedProject.name),
-      );
-    } catch (error) {
-      notify("error", t.hydra_enable_failed(String(error)));
-    } finally {
-      setHydraEnabling(false);
-    }
-  }, [focusedProject, notify, t]);
 
   const dragging = useSidebarDragStore((s) => s.active);
   // Animate the outer width on expand/collapse; pause the transition
@@ -612,11 +573,7 @@ export function RightPanel() {
           <>
             {activeTab === "diff" && <DiffContent worktreePath={repoContextPath} />}
             {activeTab === "git" && (
-              <GitContent
-                worktreePath={repoContextPath}
-                onEnableHydra={focusedProject ? handleEnableHydra : undefined}
-                hydraEnabling={hydraEnabling}
-              />
+              <GitContent worktreePath={repoContextPath} />
             )}
             {activeTab === "memory" && (
               <MemoryContent worktreePath={repoContextPath} onFileClick={handleFileClick} />

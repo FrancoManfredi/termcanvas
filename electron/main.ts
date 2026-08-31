@@ -48,10 +48,6 @@ import {
   syncCliIntegrationOnStartup,
   writeCliIntegrationState,
 } from "./cli-integration";
-import {
-  checkHydraProjectStatus,
-  enableHydraForProject,
-} from "./hydra-project.ts";
 import { buildLaunchSpec } from "./pty-launch.js";
 import { registerInterviewIpc, closeInterviewService, setInterviewActivitySink } from "./interview-service";
 import { registerModelCatalogIpc } from "./model-catalog-ipc";
@@ -64,8 +60,10 @@ import {
   collectUsageRange,
   collectHeatmapData,
 } from "./usage-collector";
-import { buildGitWorktreeRemoveArgs } from "../hydra/src/cleanup";
-import { resolveMainRepoRoot } from "../hydra/src/worktree-path";
+import {
+  buildGitWorktreeRemoveArgs,
+  resolveMainRepoRoot,
+} from "./worktree-helpers.ts";
 import {
   installDownloadedUpdate,
   setupAutoUpdater,
@@ -1402,14 +1400,6 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
       }
     },
   );
-
-  ipcMain.handle("project:enable-hydra", (_event, dirPath: string) => {
-    return enableHydraForProject(dirPath);
-  });
-
-  ipcMain.handle("project:check-hydra", (_event, dirPath: string) => {
-    return checkHydraProjectStatus(dirPath);
-  });
 
   ipcMain.handle("git:watch", (_event, worktreePath: string) => {
     gitWatcher.watch(worktreePath, {
@@ -5703,7 +5693,7 @@ function dataUrlToPngBuffer(dataUrl: string): Buffer {
   return image.toPNG();
 }
 
-const CLI_NAMES = ["termcanvas", "hydra", "browse"];
+const CLI_NAMES = ["termcanvas", "browse"];
 const AGENT_SHIM_NAMES = ["codex", "claude"];
 
 function ensureCliLinks(): void {

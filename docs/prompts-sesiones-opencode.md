@@ -10,8 +10,8 @@ Se inyectan automáticamente sin importar el propósito del terminal.
 
 | Prompt | Fuente | Cómo se inyecta |
 |---|---|---|
-| `AGENTS.md` (raíz) | `AGENTS.md` (Hydra Orchestration Toolkit + TermCanvas Pin System) | opencode lo lee del cwd; es idéntico a `CLAUDE.md` (mismo tamaño 9238 B) |
-| Skills del repo | `skills/skills/*/SKILL.md` (`using-termcanvas` con `alwaysApply: true`, `hydra`, `challenge`, `investigate`, `security-audit`, `code-review`, `qa`) | Expuestos vía `.agents/skills/termcanvas` → symlink a `../../skills/skills`; el CLI de agente los carga como skill |
+| `AGENTS.md` (raíz) | `AGENTS.md` (TermCanvas Pin System) | opencode lo lee del cwd; es idéntico a `CLAUDE.md` (mismo tamaño 9238 B) |
+| Skills del repo | `skills/skills/*/SKILL.md` (`using-termcanvas` con `alwaysApply: true`, `challenge`, `investigate`, `security-audit`, `code-review`, `qa`) | Expuestos vía `.agents/skills/termcanvas` → symlink a `../../skills/skills`; el CLI de agente los carga como skill |
 | Índice de memoria | `skills/scripts/memory-session-start.sh` | Hook `SessionStart` (`skills/hooks/hooks.json`) → GET `http://127.0.0.1:<port>/api/memory/index?worktree=...` (servido por `headless-runtime/api-server.ts:489`) → se inyecta como `additionalContext` (bloque `<memory-graph>`) |
 
 ## 2. Prompt del asistente embebido (Agent Bubble / sesiones internas)
@@ -49,14 +49,11 @@ el agente lo lee desde el worktree.
 | Propósito | Prompt | Archivo |
 |---|---|---|
 | Agente único | "You are a senior software engineer. Fix the following issue in this repository." | `eval/src/agents/single.ts:14` (`buildPrompt`) |
-| Descomposición | "You are a task decomposition engine. Analyze this issue and break it into independent sub-tasks." (responde solo JSON array) | `eval/src/agents/hydra.ts:216` |
-| Sub-agente eval | "You are working on a sub-task for the {repo} repository..." | `eval/src/agents/hydra.ts:300` |
 
 ## 6. Otros prompts de soporte
 
 | Propósito | Prompt | Archivo |
 |---|---|---|
-| Spike de subprocess | `TASK_MD` (crear 3 archivos: hello.txt, report.md, result.json con schema exacto) | `hydra/scripts/spike-subprocess-worker.ts:66` |
 | Prompt del coordinador | `buildCoordinatorPrompt()` — agente que orquesta workers (secciones: Role, Available Tools, Worker Capabilities, Task Workflow, Worker Prompts, Continue vs Spawn, Failure Handling, Cost Awareness, Approval Handling) | `agent/src/coordinator-prompt.ts:19` (exportado; es la pieza "coordinator agent" del runtime) |
 | Compresión estática/dinámica | `buildFullSystemPrompt()` (parte estática + `<!-- dynamic-boundary -->` + parte dinámica) y `buildSystemReminder()` (`<system-reminder>` como mensaje user efímero) | `agent/src/context-injection.ts:20,25` |
 
@@ -73,12 +70,8 @@ src/canvas/issueReviewPrompt.ts          → terminal revisar solución
 src/canvas/issueFixPrompt.ts             → terminal aplicar fix
 src/canvas/resolveConflictPrompt.ts      → terminal resolver conflicto
 src/utils/repoContext.ts                 → sección CONTEXTO DEL REPOSITORIO (compartida)
-hydra/src/roles/builtin/*.md             → persona de workers Hydra (lead/dev/designer/reviewer/qa/janitor)
-hydra/src/run-task.ts                    → task.md de cada run Hydra
-hydra/src/prompt.ts                      → task file + input de spawn
 agent/src/context-injection.ts           → system prompt estático/dinámico + system-reminders
 agent/src/coordinator-prompt.ts          → prompt del agente coordinador
 agent/src/compaction.ts                  → prompt de resumen/compresión
-eval/src/agents/{single,hydra}.ts        → prompts de evaluación
-hydra/scripts/spike-subprocess-worker.ts → spike de subprocess worker
+eval/src/agents/single.ts                → prompts de evaluación
 ```

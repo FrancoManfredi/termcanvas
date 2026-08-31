@@ -67,30 +67,6 @@ function buildCli(): Plugin {
   };
 }
 
-function buildHydra(): Plugin {
-  const outfile = "dist-cli/hydra.js";
-  const opts = {
-    entryPoints: ["hydra/src/cli.ts"],
-    outfile,
-    format: "esm" as const,
-    platform: "node" as const,
-    bundle: true,
-    banner: { js: "#!/usr/bin/env node" },
-    plugins: [cliSymlinkPlugin(outfile)],
-  };
-  return {
-    name: "build-hydra",
-    async buildStart() {
-      if (this.meta.watchMode) {
-        const ctx = await esbuildCtx(opts);
-        await ctx.watch();
-      } else {
-        await esbuild(opts);
-      }
-    },
-  };
-}
-
 function buildBrowse(): Plugin {
   const outfile = "dist-cli/browse.js";
   const opts = {
@@ -153,7 +129,6 @@ export default defineConfig({
     tailwindcss(),
     buildPreload(),
     buildCli(),
-    buildHydra(),
     buildBrowse(),
     buildAgentShims(),
     electron([

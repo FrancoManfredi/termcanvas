@@ -127,10 +127,6 @@ test("registerCli writes the CLI dir into the Windows user PATH and preserves ty
         platform: "win32",
       },
       {
-        jsPath: path.win32.join(CLI_DIR, "hydra.js"),
-        platform: "win32",
-      },
-      {
         jsPath: path.win32.join(CLI_DIR, "browse.js"),
         platform: "win32",
       },

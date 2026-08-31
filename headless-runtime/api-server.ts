@@ -18,9 +18,7 @@ import type { TerminalType } from "./project-store.ts";
 import type { ServerEventBus } from "./event-bus.ts";
 import { ensureProjectTracked, rescanTrackedProject } from "./project-sync.ts";
 import { createWorktreeControl, type WorktreeControl } from "./worktree-control.ts";
-import { createWorkflowControl, type WorkflowControl } from "./workflow-control.ts";
 import { destroyTrackedTerminal, launchTrackedTerminal } from "./terminal-launch.ts";
-import { listActiveWorkflowSummaries } from "./workflow-status.ts";
 
 interface HeadlessApiServerDeps {
   projectStore: ProjectStore;
@@ -33,7 +31,6 @@ interface HeadlessApiServerDeps {
   rateLimit?: number;
   corsOrigins?: string[];
   serverVersion?: string;
-  workflowControl?: WorkflowControl;
   worktreeControl?: WorktreeControl;
 }
 
@@ -70,7 +67,6 @@ export class HeadlessApiServer {
   private static readonly MAX_SSE_CONNECTIONS = 50;
   private boundHost = "127.0.0.1";
   private boundPort = 0;
-  private readonly workflowControl: WorkflowControl;
   private readonly worktreeControl: WorktreeControl;
 
   constructor(deps: HeadlessApiServerDeps) {
@@ -79,14 +75,6 @@ export class HeadlessApiServer {
     this.rateLimit = deps.rateLimit ?? 0;
     this.corsOrigins = deps.corsOrigins ?? [];
     this.serverVersion = deps.serverVersion ?? "0.0.0";
-    this.workflowControl = deps.workflowControl ?? createWorkflowControl({
-      projectStore: deps.projectStore,
-      ptyManager: deps.ptyManager,
-      telemetryService: deps.telemetryService,
-      projectScanner: deps.projectScanner,
-      eventBus: deps.eventBus,
-      onMutation: deps.onMutation,
-    });
     this.worktreeControl = deps.worktreeControl ?? createWorktreeControl({
       projectStore: deps.projectStore,
       projectScanner: deps.projectScanner,
@@ -351,64 +339,6 @@ export class HeadlessApiServer {
       return this.projectRescan(id);
     }
 
-    if (method === "POST" && pathname === "/workflow/init") {
-      return this.workflowInit(body);
-    }
-    if (method === "POST" && pathname.match(/^\/workflow\/[^/]+\/dispatch$/)) {
-      const id = pathname.split("/")[2];
-      return this.workflowDispatch(id, body);
-    }
-    if (method === "POST" && pathname.match(/^\/workflow\/[^/]+\/watch-decision$/)) {
-      const id = pathname.split("/")[2];
-      return this.workflowWatchDecision(id, body);
-    }
-    if (method === "POST" && pathname.match(/^\/workflow\/[^/]+\/node\/[^/]+\/redispatch$/)) {
-      const parts = pathname.split("/");
-      return this.workflowRedispatchNode(parts[2], parts[4], body);
-    }
-    if (method === "POST" && pathname.match(/^\/workflow\/[^/]+\/node\/[^/]+\/approve$/)) {
-      const parts = pathname.split("/");
-      return this.workflowApproveNode(parts[2], parts[4], body);
-    }
-    if (method === "POST" && pathname.match(/^\/workflow\/[^/]+\/node\/[^/]+\/ask$/)) {
-      const parts = pathname.split("/");
-      return this.workflowAskNode(parts[2], parts[4], body);
-    }
-    if (method === "POST" && pathname.match(/^\/workflow\/[^/]+\/node\/[^/]+\/reset$/)) {
-      const parts = pathname.split("/");
-      return this.workflowResetNode(parts[2], parts[4], body);
-    }
-    if (method === "POST" && pathname.match(/^\/workflow\/[^/]+\/merge$/)) {
-      const id = pathname.split("/")[2];
-      return this.workflowMerge(id, body);
-    }
-    if (method === "POST" && pathname.match(/^\/workflow\/[^/]+\/complete$/)) {
-      const id = pathname.split("/")[2];
-      return this.workflowComplete(id, body);
-    }
-    if (method === "POST" && pathname.match(/^\/workflow\/[^/]+\/fail$/)) {
-      const id = pathname.split("/")[2];
-      return this.workflowFail(id, body);
-    }
-    if (method === "GET" && pathname === "/workflow/list") {
-      const repoPath = url.searchParams.get("repo");
-      return this.workflowList(repoPath);
-    }
-    if (method === "GET" && pathname === "/workflow/list-roles") {
-      const repoPath = url.searchParams.get("repo");
-      const agentType = url.searchParams.get("agentType") ?? url.searchParams.get("agent_type");
-      return this.workflowListRoles(repoPath, agentType);
-    }
-    if (method === "GET" && pathname.match(/^\/workflow\/[^/]+$/)) {
-      const id = pathname.split("/")[2];
-      const repoPath = url.searchParams.get("repo");
-      return this.workflowStatus(id, repoPath);
-    }
-    if (method === "DELETE" && pathname.match(/^\/workflow\/[^/]+$/)) {
-      const id = pathname.split("/")[2];
-      return this.workflowCleanup(id, url);
-    }
-
     if (method === "GET" && pathname === "/worktree/list") {
       const repoPath = url.searchParams.get("repo");
       return this.worktreeList(repoPath);
@@ -583,146 +513,6 @@ export class HeadlessApiServer {
       onMutation: this.deps.onMutation,
     });
     return { ok: true, worktrees: result.worktrees };
-  }
-
-  private requireRepo(body: unknown): string {
-    const { repo, repoPath } = body as { repo?: string; repoPath?: string };
-    const resolved = repoPath ?? repo;
-    if (!resolved) throw Object.assign(new Error("repo is required"), { status: 400 });
-    return resolved;
-  }
-
-  private async workflowInit(body: unknown): Promise<unknown> {
-    const b = body as Record<string, unknown>;
-    const { intent, worktree, worktreePath, timeoutMinutes, maxRetries, autoApprove } = b;
-    const repoPath = this.requireRepo(body);
-    if (!intent || typeof intent !== "string") {
-      throw Object.assign(new Error("intent is required"), { status: 400 });
-    }
-    return this.workflowControl.init({
-      intent, repoPath,
-      worktreePath: (worktreePath ?? worktree) as string | undefined,
-      defaultTimeoutMinutes: timeoutMinutes as number | undefined,
-      defaultMaxRetries: maxRetries as number | undefined,
-      autoApprove: autoApprove as boolean | undefined,
-      humanRequest: b.humanRequest as string | undefined,
-      overallPlan: b.overallPlan as string | undefined,
-      sharedConstraints: b.sharedConstraints as string[] | undefined,
-    });
-  }
-
-  private async workflowDispatch(workflowId: string, body: unknown): Promise<unknown> {
-    const b = body as Record<string, unknown>;
-    const repoPath = this.requireRepo(body);
-    const nodeId = (b.nodeId ?? b.node) as string | undefined;
-    const role = b.role as string | undefined;
-    const intent = b.intent as string | undefined;
-    if (!nodeId) throw Object.assign(new Error("nodeId is required"), { status: 400 });
-    if (!role) throw Object.assign(new Error("role is required"), { status: 400 });
-    if (!intent) throw Object.assign(new Error("intent is required"), { status: 400 });
-    return this.workflowControl.dispatch({
-      repoPath, workflowId, nodeId, role, intent,
-      dependsOn: b.dependsOn as string[] | undefined,
-      model: b.model as string | undefined,
-      contextRefs: b.contextRefs as Array<{ label: string; path: string }> | undefined,
-      feedback: b.feedback as string | undefined,
-      worktreePath: b.worktreePath as string | undefined,
-      worktreeBranch: b.worktreeBranch as string | undefined,
-      timeoutMinutes: b.timeoutMinutes as number | undefined,
-      maxRetries: b.maxRetries as number | undefined,
-      retryPolicy: b.retryPolicy as
-        | {
-            initial_interval_ms?: number;
-            backoff_coefficient?: number;
-            maximum_attempts?: number;
-            non_retryable_error_codes?: string[];
-          }
-        | undefined,
-    });
-  }
-
-  private async workflowWatchDecision(workflowId: string, body: unknown): Promise<unknown> {
-    return this.workflowControl.watchDecision(this.requireRepo(body), workflowId);
-  }
-
-  private async workflowRedispatchNode(workflowId: string, nodeId: string, body: unknown): Promise<unknown> {
-    const { intent } = body as { intent?: string };
-    return this.workflowControl.redispatch(this.requireRepo(body), workflowId, nodeId, intent);
-  }
-
-  private async workflowApproveNode(workflowId: string, nodeId: string, body: unknown): Promise<unknown> {
-    await this.workflowControl.approveNode(this.requireRepo(body), workflowId, nodeId);
-    return { ok: true };
-  }
-
-  private async workflowResetNode(workflowId: string, nodeId: string, body: unknown): Promise<unknown> {
-    const { feedback } = body as { feedback?: string };
-    return this.workflowControl.resetNode(this.requireRepo(body), workflowId, nodeId, feedback);
-  }
-
-  private async workflowAskNode(workflowId: string, nodeId: string, body: unknown): Promise<unknown> {
-    const b = body as Record<string, unknown>;
-    const message = b.message as string | undefined;
-    if (!message || typeof message !== "string") {
-      throw Object.assign(new Error("message is required"), { status: 400 });
-    }
-    return this.workflowControl.askNode({
-      repoPath: this.requireRepo(body),
-      workflowId,
-      nodeId,
-      message,
-      timeoutMs: b.timeoutMs as number | undefined,
-    });
-  }
-
-  private async workflowMerge(workflowId: string, body: unknown): Promise<unknown> {
-    const { nodeIds, nodes } = body as { nodeIds?: string[]; nodes?: string[] };
-    const ids = nodeIds ?? nodes;
-    if (!Array.isArray(ids)) throw Object.assign(new Error("nodeIds is required"), { status: 400 });
-    return this.workflowControl.mergeNodes(this.requireRepo(body), workflowId, ids);
-  }
-
-  private async workflowComplete(workflowId: string, body: unknown): Promise<unknown> {
-    const { summary } = body as { summary?: string };
-    await this.workflowControl.complete(this.requireRepo(body), workflowId, summary);
-    return { ok: true };
-  }
-
-  private async workflowFail(workflowId: string, body: unknown): Promise<unknown> {
-    const { reason } = body as { reason?: string };
-    if (!reason) throw Object.assign(new Error("reason is required"), { status: 400 });
-    await this.workflowControl.fail(this.requireRepo(body), workflowId, reason);
-    return { ok: true };
-  }
-
-  private workflowList(repoPath: string | null): unknown {
-    if (!repoPath) throw Object.assign(new Error("repo query parameter is required"), { status: 400 });
-    return this.workflowControl.list(repoPath);
-  }
-
-  private workflowListRoles(repoPath: string | null, agentType: string | null): unknown {
-    if (!repoPath) throw Object.assign(new Error("repo query parameter is required"), { status: 400 });
-    return this.workflowControl.listRoles(repoPath, agentType ?? undefined);
-  }
-
-  private workflowStatus(workflowId: string, repoPath: string | null): unknown {
-    if (!repoPath) throw Object.assign(new Error("repo query parameter is required"), { status: 400 });
-    return this.workflowControl.status(repoPath, workflowId);
-  }
-
-  private workflowCleanup(workflowId: string, url: URL): unknown {
-    const repoPath = url.searchParams.get("repo");
-    if (!repoPath) {
-      throw Object.assign(new Error("repo query parameter is required"), {
-        status: 400,
-      });
-    }
-    const force = url.searchParams.get("force");
-    return this.workflowControl.cleanup(
-      repoPath,
-      workflowId,
-      force === "1" || force === "true",
-    );
   }
 
   private worktreeList(repoPath: string | null): unknown {
@@ -952,25 +742,10 @@ export class HeadlessApiServer {
   }
 
   private workflowTelemetry(
-    workflowId: string,
-    repoPath: string | null,
+    _workflowId: string,
+    _repoPath: string | null,
   ): unknown {
-    if (!repoPath) {
-      throw Object.assign(
-        new Error("repo query parameter is required"),
-        { status: 400 },
-      );
-    }
-    const snapshot = this.deps.telemetryService.getWorkflowSnapshot(
-      repoPath,
-      workflowId,
-    );
-    if (!snapshot) {
-      throw Object.assign(new Error("Workflow telemetry not found"), {
-        status: 404,
-      });
-    }
-    return snapshot;
+    return null;
   }
 
   private async memoryIndex(worktree: string | null): Promise<unknown> {
@@ -1120,11 +895,8 @@ export class HeadlessApiServer {
     }, 30_000);
   }
 
-  private getActiveWorkflows() {
-    return listActiveWorkflowSummaries({
-      workspaceDir: this.deps.workspaceDir,
-      projectPaths: this.deps.projectStore.getProjects().map((project) => project.path),
-    });
+  private getActiveWorkflows(): Array<{ id: string; status: string; active_node_ids: string[]; updated_at: string }> {
+    return [];
   }
 
   private static calculateDirectorySize(targetPath: string): number {

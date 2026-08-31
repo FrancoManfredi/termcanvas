@@ -98,9 +98,6 @@ Example flow:
 termcanvas project add /workspace/my-repo
 
 # Create a Lead-driven workflow, then dispatch a node into it.
-# The `termcanvas workflow` HTTP CLI keeps the legacy `--node`
-# naming even though the underlying `hydra` binary now speaks
-# `--dispatch`; the ids refer to the same thing.
 termcanvas workflow init \
   --intent "Audit and fix the failing API path" \
   --repo /workspace/my-repo

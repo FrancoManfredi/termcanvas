@@ -147,9 +147,8 @@ Este documento se escribe en cada paso de la migración. Si lo rompes, el próxi
 
 **Sí se hará:**
 1. **PTY plumbing:** Extender `electron/pty-launch.ts` y `headless-runtime/terminal-launch.ts` para `terminalType: "codebuddy"` → `codebuddy --help` y `codebuddy mcp list` como smoke test (no modelo), inyectar `getMcpEnvForCwd` y `OPENCODE_CONFIG` equivalente si aplica. Verificar `buildLaunchSpec` genera `extraPathEntries` correctos.
-2. **Hydra roles:** `hydra/src/roles/loader.ts:27` añadir `RoleCli = "codebuddy"` y `hydra/src/roles/builtin/dev-codebuddy.md` con `terminals: [{cli: codebuddy, model: "auto"}]` pero sin `dispatch` real — solo `hydra init` + `hydra status` de prueba.
-3. **Skills wiring:** Conectar `src/skills/adapters/codebuddy.ts:77` `prepareScope` al `terminal:create` flow (ya hecho para global, falta para per-session `diag-*`). Test con `prepareScope` que escribe `.codebuddy/skills/diag-test/SKILL.md` y `codebuddy` lo lista sin invocar modelo.
-4. **Tests sin modelo (gate):** Nuevos `tests/codebuddy-pty.integration.test.ts` que verifican `buildLaunchSpec` para `codebuddy`, `hydra list-roles` incluye `codebuddy`, y `codebuddy --version`/`--help`/`mcp list` responden — todo sin `codebuddy -p`.
+2. **Skills wiring:** Conectar `src/skills/adapters/codebuddy.ts:77` `prepareScope` al `terminal:create` flow (ya hecho para global, falta para per-session `diag-*`). Test con `prepareScope` que escribe `.codebuddy/skills/diag-test/SKILL.md` y `codebuddy` lo lista sin invocar modelo.
+3. **Tests sin modelo (gate):** Nuevos `tests/codebuddy-pty.integration.test.ts` que verifican `buildLaunchSpec` para `codebuddy` y `codebuddy --version`/`--help`/`mcp list` responden — todo sin `codebuddy -p`.
 
 **Criterio de salida:** `pnpm exec tsx --test tests/codebuddy-pty.integration.test.ts` pasa, `codebuddy --version` y `mcp list` funcionan desde una shell de TermCanvas, y `docs/adapter-guide.md` tiene la nueva sección. Cero llamadas a modelo.
 

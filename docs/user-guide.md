@@ -378,7 +378,6 @@ Every shortcut is rebindable. Click the current binding, press a new key combina
 
 These are aimed at heavier users; skip until you're comfortable with the basics.
 
-- **Hydra orchestration** — a Lead agent that dispatches sub-tasks to worker agents across parallel worktrees. Enable per-project from the worktree header's "Enable Hydra" button: this writes orchestration instructions into `CLAUDE.md` / `AGENTS.md` so your agents know to use `hydra dispatch / watch / merge`. The `hydra` CLI is separate from the app — you use it from inside an agent terminal, not from the UI. Full design: [`docs/hydra-orchestration.md`](./hydra-orchestration.md).
 - **Activity heatmap (`⌘⇧A`)** — paints each tile with a 5-minute output-volume sparkline so a glance at the canvas tells you which agents are doing work right now. Toggle on / off.
 - **Pan-to-recent-activity (`⌥` + `` ` ``)** — fly the camera to whichever terminal had PTY output most recently. Repeat the chord to LRU-cycle through the recently-active set, Alt-Tab style.
 - **Telemetry** — every terminal emits lifecycle events (awaiting-input, tool-running, stall, completion). These drive the pet, status dots, attention queue, Hub, and `⌘K` session search. Disable from Settings → General if you want the app dead-quiet.
