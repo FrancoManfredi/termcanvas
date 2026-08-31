@@ -2,7 +2,7 @@
 // Source: WarpFactories.md §14 · US-142→144
 // ADR-003: P0-3..P0-8 — GitHub tick, repos reales, nombre custom, skip, crear→dashboard
 
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   FACTORY_MCP_DASHBOARD_URL,
   MCP_ONBOARDING_PROMPT,
@@ -40,7 +40,7 @@ export function QuickstartWizard({ onComplete }: QuickstartWizardProps) {
   const copy = STEP_COPY[currentStep];
   const isReview = isLastStep(state);
 
-  const githubReposAdapter = new RemoteGitHubReposAdapter();
+  const githubReposAdapter = useMemo(() => new RemoteGitHubReposAdapter(), []);
 
   function send(action: Parameters<typeof dispatch>[0]): void {
     setFinishMessage("");

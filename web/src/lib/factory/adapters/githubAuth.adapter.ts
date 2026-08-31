@@ -1,21 +1,47 @@
 // githubAuth.adapter — SRP: GitHub OAuth BFF adapter para web
 // DIP: implementa GitHubAuthPort sin exponer fetch/window al dominio
 // Source: ADR-003 Q1+Q2+Q6 (BFF, hybrid, postMessage + polling fallback)
+// Fix H2: solo notify si JSON distinto • H3: guard _pending + single interval + once + cleanup • H1: startAuth 503 throw
 
 import type { GitHubAuthPort, GitHubAuthState } from "../ports/github.ports";
 import { GITHUB_AUTH_POLL_INTERVAL_MS, GITHUB_AUTH_POLL_MAX_MS } from "../ports/github.ports";
 
 function getBasePath(): string {
-  // Usar ruta relativa para que vite proxy funcione; en remote será absoluta pero igual proxy
   return "";
+}
+
+function serializeState(s: GitHubAuthState): string {
+  return JSON.stringify({
+    connected: s.connected,
+    username: s.username ?? null,
+    avatarUrl: s.avatarUrl ?? null,
+    scope: s.scope ?? null,
+    status: s.status,
+    error: s.error ?? null,
+  });
 }
 
 export class RemoteGitHubAuthAdapter implements GitHubAuthPort {
   private cache: GitHubAuthState = { connected: false, status: "idle" };
   private listeners = new Set<() => void>();
   private version = 0;
+  private _pending: Promise<GitHubAuthState> | null = null;
+  private _lastNotifiedJson: string = serializeState(this.cache);
+
+  private notifyIfChanged(next: GitHubAuthState): void {
+    const nextJson = serializeState(next);
+    // siempre actualizar cache
+    this.cache = next;
+    if (nextJson !== this._lastNotifiedJson) {
+      this._lastNotifiedJson = nextJson;
+      this.version += 1;
+      for (const cb of [...this.listeners]) cb();
+    }
+  }
 
   private notify(): void {
+    // legacy: force notify (used only for connecting transient)
+    this._lastNotifiedJson = serializeState(this.cache);
     this.version += 1;
     for (const cb of [...this.listeners]) cb();
   }
@@ -37,8 +63,7 @@ export class RemoteGitHubAuthAdapter implements GitHubAuthPort {
       });
       if (!res.ok) {
         const next: GitHubAuthState = { connected: false, status: "idle" };
-        this.cache = next;
-        this.notify();
+        this.notifyIfChanged(next);
         return next;
       }
       const data = (await res.json()) as {
@@ -55,14 +80,12 @@ export class RemoteGitHubAuthAdapter implements GitHubAuthPort {
         scope: data.scope,
         status: data.connected ? "connected" : "idle",
       };
-      this.cache = next;
-      this.notify();
+      this.notifyIfChanged(next);
       return next;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       const next: GitHubAuthState = { connected: false, status: "error", error: msg };
-      this.cache = next;
-      this.notify();
+      this.notifyIfChanged(next);
       return next;
     }
   }
@@ -73,27 +96,81 @@ export class RemoteGitHubAuthAdapter implements GitHubAuthPort {
       redirect: "manual",
       headers: { accept: "application/json" },
     });
+    // H1: si 503 missing_config -> throw sin abrir popup
+    if (res.status === 503) {
+      let body: { error?: string; code?: string } | null = null;
+      try {
+        body = (await res.json()) as { error?: string; code?: string };
+      } catch {
+        body = null;
+      }
+      const msg = body?.error ?? "GitHub OAuth no configurado (GITHUB_CLIENT_ID)";
+      const code = body?.code ?? "missing_config";
+      const err = new Error(msg) as Error & { code?: string; status?: number };
+      err.code = code;
+      err.status = 503;
+      throw err;
+    }
     // Server puede responder 302 o JSON { authUrl }
     if (res.status === 302 || res.type === "opaqueredirect") {
       const loc = res.headers.get("location");
       if (loc) return loc;
     }
-    const data = (await res.json().catch(() => null)) as { authUrl?: string; url?: string } | null;
+    // Intentar parsear JSON con authUrl (incluso si !ok, salvo 503 ya manejado)
+    let data: { authUrl?: string; url?: string; error?: string; code?: string } | null = null;
+    try {
+      data = (await res.json()) as { authUrl?: string; url?: string; error?: string; code?: string };
+    } catch {
+      data = null;
+    }
     if (data?.authUrl) return data.authUrl;
     if (data?.url) return data.url;
+    if (!res.ok && data?.error && res.status >= 500) {
+      const err = new Error(data.error) as Error & { code?: string; status?: number };
+      if (data.code) err.code = data.code;
+      err.status = res.status;
+      throw err;
+    }
+    if (!res.ok && res.status >= 500 && !data?.authUrl && !data?.url) {
+      // sin authUrl y error 5xx, no intentar fallback silencioso; dejar que caller decida
+      // pero para compatibilidad devolvemos fallback solo si no es 503
+    }
     // Fallback: pedir endpoint directo
     return `${getBasePath()}/api/auth/github/start`;
   }
 
   /**
    * Abre popup y resuelve con postMessage + polling fallback.
-   * No es parte del port core, pero es la implementación P0 que el hook usa.
+   * H3: guard _pending, single interval single fetch, once listener, clearTimeout+clearInterval+removeEventListener
    */
   async connectWithPopup(): Promise<GitHubAuthState> {
+    if (this._pending) return this._pending;
+    this._pending = this._connectWithPopupInternal();
+    try {
+      const res = await this._pending;
+      return res;
+    } finally {
+      this._pending = null;
+    }
+  }
+
+  private async _connectWithPopupInternal(): Promise<GitHubAuthState> {
     this.cache = { connected: false, status: "connecting" };
     this.notify();
 
-    const authUrl = await this.startAuth();
+    let authUrl: string;
+    try {
+      authUrl = await this.startAuth();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      const code = (e as unknown as { code?: string })?.code;
+      const status = (e as unknown as { status?: number })?.status;
+      const isMissingConfig = code === "missing_config" || status === 503 || msg.includes("no configurado") || msg.includes("missing_config");
+      const errorMsg = isMissingConfig ? "GitHub OAuth no configurado (GITHUB_CLIENT_ID)" : msg;
+      const next: GitHubAuthState = { connected: false, status: "error", error: errorMsg };
+      this.notifyIfChanged(next);
+      return next;
+    }
 
     // Intentar abrir popup
     let popup: Window | null = null;
@@ -103,52 +180,45 @@ export class RemoteGitHubAuthAdapter implements GitHubAuthPort {
       popup = null;
     }
 
-    // Si popup bloqueado, fallback a navegar en misma pestaña? Para P0 solo poll
     if (!popup) {
-      // Poll sin popup (usuario debe navegar manualmente)
       return this.pollUntilConnected();
     }
 
-    // Promesa postMessage + poll race
     const result = await new Promise<GitHubAuthState>((resolve) => {
       let settled = false;
+      let pollId: number | undefined;
+      let timeoutId: number | undefined;
+
       const settle = (state: GitHubAuthState) => {
         if (settled) return;
         settled = true;
         cleanup();
-        this.cache = state;
-        this.notify();
+        this.notifyIfChanged(state);
         resolve(state);
       };
 
       const handleMessage = (event: MessageEvent) => {
-        // Validar origen
         if (event.origin !== window.location.origin) return;
         const data = event.data as { type?: string; username?: string; avatarUrl?: string } | undefined;
         if (data?.type !== "github:connected") return;
         void this.getStatus().then(settle);
       };
 
-      const pollFallback = () => {
+      const pollFallback = (): number => {
         const start = Date.now();
         const id = window.setInterval(() => {
           if (settled) return;
-          if (popup?.closed) {
-            // Si popup cerrado, chequear status una vez
-            void this.getStatus().then((s) => {
-              if (s.connected) settle(s);
-            });
-          }
-          void fetch(`${getBasePath()}/api/auth/status`, { credentials: "include" })
-            .then((r) => r.json().catch(() => ({ connected: false })))
-            .then((d: { connected?: boolean }) => {
-              if (d.connected) {
-                void this.getStatus().then(settle);
+          // H2+H3: single fetch per tick via getStatus (con notify condicional)
+          void this.getStatus()
+            .then((s) => {
+              if (settled) return;
+              if (s.connected) {
+                settle(s);
                 window.clearInterval(id);
               }
             })
             .catch(() => {
-              // ignore
+              // ignore network blip
             });
           if (Date.now() - start > GITHUB_AUTH_POLL_MAX_MS) {
             window.clearInterval(id);
@@ -160,7 +230,8 @@ export class RemoteGitHubAuthAdapter implements GitHubAuthPort {
 
       const cleanup = () => {
         window.removeEventListener("message", handleMessage);
-        if (pollId) window.clearInterval(pollId);
+        if (pollId !== undefined) window.clearInterval(pollId);
+        if (timeoutId !== undefined) window.clearTimeout(timeoutId);
         try {
           if (popup && !popup.closed) popup.close();
         } catch {
@@ -168,11 +239,10 @@ export class RemoteGitHubAuthAdapter implements GitHubAuthPort {
         }
       };
 
-      window.addEventListener("message", handleMessage);
-      const pollId = pollFallback();
+      window.addEventListener("message", handleMessage, { once: true } as AddEventListenerOptions);
+      pollId = pollFallback();
 
-      // Timeout absoluto 60s
-      window.setTimeout(() => {
+      timeoutId = window.setTimeout(() => {
         if (!settled) {
           void this.getStatus().then((s) => {
             if (s.connected) settle(s);
@@ -194,8 +264,8 @@ export class RemoteGitHubAuthAdapter implements GitHubAuthPort {
     } catch {
       // ignore
     }
-    this.cache = { connected: false, status: "idle" };
-    this.notify();
+    const next: GitHubAuthState = { connected: false, status: "idle" };
+    this.notifyIfChanged(next);
   }
 
   private async pollUntilConnected(): Promise<GitHubAuthState> {
@@ -206,8 +276,7 @@ export class RemoteGitHubAuthAdapter implements GitHubAuthPort {
       await new Promise((r) => window.setTimeout(r, GITHUB_AUTH_POLL_INTERVAL_MS));
     }
     const next: GitHubAuthState = { connected: false, status: "error", error: "timeout" };
-    this.cache = next;
-    this.notify();
+    this.notifyIfChanged(next);
     return next;
   }
 

@@ -46,8 +46,12 @@ export function StepConnectProvider({ provider, onSelectProvider, githubAuth }: 
             <>
               <button
                 type="button"
-                onClick={() => void connect()}
+                onClick={() => {
+                  if (isConnecting) return;
+                  void connect();
+                }}
                 disabled={isConnecting}
+                aria-busy={isConnecting}
                 className="inline-flex items-center gap-2 rounded-lg bg-zinc-900 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-800 disabled:opacity-50"
               >
                 {isConnecting ? "Conectando..." : "Conectar con GitHub"}

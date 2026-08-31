@@ -13,7 +13,7 @@ const envSchema = z.object({
   GITHUB_WEBHOOK_SECRET: z.string().optional(),
   GITHUB_CLIENT_ID: z.string().optional(),
   GITHUB_CLIENT_SECRET: z.string().optional(),
-  GITHUB_OAUTH_CALLBACK_URL: z.string().default("http://localhost:5174/auth/callback"),
+  GITHUB_OAUTH_CALLBACK_URL: z.string().default("http://localhost:5174/api/auth/callback"),
   SESSION_SECRET: z.string().optional(),
   NODE_ENV: z.string().default("development"),
 });
