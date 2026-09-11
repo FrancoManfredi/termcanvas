@@ -100,6 +100,7 @@ export interface WorkflowNode {
   context?: "fresh" | "shared" | { resume: string };
   provider?: string;
   model?: string;
+  agent?: string;
   effort?: (typeof EFFORT_LEVELS)[number];
   output_format?: Record<string, unknown>;
   systemPrompt?: string;
@@ -142,6 +143,8 @@ const NodeBaseSchema = z.object({
   model: z.string().min(1).optional(),
   effort: z.enum(EFFORT_LEVELS).optional(),
   output_format: z.record(z.string(), z.unknown()).optional(),
+  /** Agente OpenCode espejado (factory/agents/<name>/agent.md → .opencode/agents). */
+  agent: z.string().min(1).optional(),
   systemPrompt: z.string().optional(),
   mcp: z.string().min(1).optional(),
   skills: z.array(z.string().min(1)).optional(),

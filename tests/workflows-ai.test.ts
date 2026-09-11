@@ -279,6 +279,7 @@ description: capacidades
 nodes:
   - id: capped
     prompt: "hola"
+    agent: reviewer
     skills: [code-review]
     mcp: mcp.json
     allowed_tools: [read, grep]
@@ -291,6 +292,7 @@ nodes:
   });
   assert.equal(run.status, "completed");
   const req = log[0];
+  assert.equal(req.agent, "reviewer");
   assert.deepEqual(req.skills, ["code-review"]);
   assert.equal(req.mcp, "mcp.json");
   assert.deepEqual(req.allowedTools, ["read", "grep"]);

@@ -28,6 +28,8 @@ export interface AiNodeRequest {
   prompt: string;
   model?: string;
   effort?: string;
+  /** Agente OpenCode espejado (identidad ejecutante del turno). */
+  agent?: string;
   systemPrompt?: string;
   outputFormat?: Record<string, unknown>;
   timeoutMs?: number;
@@ -164,6 +166,14 @@ export function createOpencodeAiRunner(): AiNodeRunner {
       const modelRef = buildModelRef(req.model);
       if (modelRef) payload.model = modelRef;
       if (req.effort) payload.variant = req.effort;
+      if (req.agent) {
+        try {
+          const { sessionAgentArgs } = await import("../../factory/opencodeAgentSync");
+          Object.assign(payload, sessionAgentArgs(req.agent));
+        } catch {
+          payload.agent = req.agent;
+        }
+      }
       if (req.outputFormat) payload.format = structuredFormat(req.outputFormat);
       if (tools) payload.tools = tools;
 

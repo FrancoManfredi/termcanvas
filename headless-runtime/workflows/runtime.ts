@@ -27,6 +27,7 @@ import type { LoadedWorkflow } from "./executor";
 export interface StartRunParams {
   inputs?: Record<string, unknown>;
   args?: string;
+  cwd?: string;
   isolation?: "inherit" | "worktree";
   baseBranch?: string;
 }
@@ -92,7 +93,7 @@ export class WorkflowRuntime {
       resolveCreated = resolve;
     });
     const promise = runWorkflow(loaded, {
-      cwd: this.opts.cwd ?? this.opts.repoRoot,
+      cwd: params.cwd ?? this.opts.cwd ?? this.opts.repoRoot,
       runsDir: this.opts.runsDir,
       repoRoot: this.opts.repoRoot,
       inputs: params.inputs,

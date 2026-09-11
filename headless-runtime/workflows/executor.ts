@@ -318,6 +318,7 @@ export async function runWorkflow(
       prompt,
       model: node.model ?? def.model,
       effort: node.effort ?? def.effort,
+      agent: node.agent,
       systemPrompt: node.systemPrompt,
       outputFormat: node.output_format,
       timeoutMs: node.timeout,

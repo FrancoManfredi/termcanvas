@@ -201,6 +201,14 @@ import { matchRoute } from "./routing/routeTable";
 import { createWorkflowRouteHandler } from "../workflows/workflowRoutes";
 import { WorkflowRuntime } from "../workflows/runtime";
 import { defaultRunsDir } from "../workflows/artifacts";
+import {
+  handleGate,
+  handleRunEvent,
+  isWorkflowEngineEnabled,
+  runWorkflowJob,
+  tryHandleWorkflowAction,
+  WORKFLOW_ACTION_DOMAINS,
+} from "./engineBridge";
 import { createAgentFile, deleteAgentFile, listAgents, parseAgentFilePath, readAgentFull, writeAgentBody, writeAgentFull } from "./agents/agentFileRoutes";
 import { handleAutomationsListRoute, handleAutomationsTickRoute } from "./automations/automationRoutes";
 import { handleIntegrationsStatusRoute, handleIntegrationsTestPostRoute, handleIntegrationsWebhookInRoute, handleIntegrationsPostBackRoute } from "./integrations/integrationRoutes";
@@ -1040,6 +1048,10 @@ export async function runForemanDecisionAndDispatch(
   id: string,
   opts?: { skipTriageSpec?: boolean },
 ): Promise<void> {
+  if (isWorkflowEngineEnabled()) {
+    await runWorkflowJob(id, getWorkflowRuntime());
+    return;
+  }
   try {
     maybeRecycleOpencodeForAgentUpdate(id);
   } catch {
@@ -2547,14 +2559,48 @@ function runVerifyWithServerEffectsT2(jid: string): Promise<void> {
 
 // ── Workflows engine (Fase 4b): runtime en background + rutas pre-tabla ──
 let workflowRuntime: WorkflowRuntime | null = null;
-const workflowRepoRoot = (): string =>
-  process.env.TERMCANVAS_WORKFLOWS_ROOT ?? process.cwd();
+const workflowRepoRoot = (): string => {
+  const fromEnv = process.env.TERMCANVAS_WORKFLOWS_ROOT;
+  if (typeof fromEnv === "string" && fromEnv.trim().length > 0) {
+    return fromEnv.trim();
+  }
+  // cwd primero; si no tiene factory/workflows, la raíz del repo del módulo
+  // (daemon empaquetado corriendo desde resources u otro cwd).
+  const candidates = [
+    process.cwd(),
+    path.resolve(path.dirname(new URL(import.meta.url).pathname), "../.."),
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(path.join(candidate, "factory", "workflows"))) {
+        return candidate;
+      }
+    } catch {
+      // candidato inválido: sigue
+    }
+  }
+  return process.cwd();
+};
 function getWorkflowRuntime(): WorkflowRuntime {
   if (!workflowRuntime) {
     workflowRuntime = new WorkflowRuntime({
       repoRoot: workflowRepoRoot(),
       cwd: process.cwd(),
       runsDir: defaultRunsDir(),
+      onEvent: (event) => {
+        try {
+          handleRunEvent(event);
+        } catch {
+          // el espejo nunca rompe el run
+        }
+      },
+      onGate: (request) => {
+        try {
+          handleGate(request);
+        } catch {
+          // el espejo nunca rompe el run
+        }
+      },
     });
   }
   return workflowRuntime;
@@ -2596,6 +2642,25 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       res.writeHead(404, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: `not found: ${method} ${pathname}` }));
       return;
+    }
+    // ── Engine declarativo (F8c): acciones del panel sobre jobs espejados ──
+    // Si el job tiene un run del engine, accept/retry/approve/reject/respond/
+    // resume/cancel/discard se traducen a runtime.respond/resume/cancel.
+    // Jobs legacy (sin run) siguen por el switch intactos.
+    if (routed.id && WORKFLOW_ACTION_DOMAINS.has(routed.domain)) {
+      const action = await tryHandleWorkflowAction({
+        domain: routed.domain,
+        itemId: routed.id,
+        runtime: getWorkflowRuntime(),
+        req,
+      });
+      if (action.handled) {
+        res.writeHead(action.status ?? 200, {
+          "Content-Type": "application/json",
+        });
+        res.end(JSON.stringify(action.body ?? { ok: true }));
+        return;
+      }
     }
     switch (routed.domain) {
       case "health": await handleHealthRoute(res); break;
