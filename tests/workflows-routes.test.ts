@@ -219,6 +219,37 @@ nodes:
   }
 });
 
+test("GET /factory/workflows/:name devuelve definición y fuente", async () => {
+  const { tmp, runsDir } = sandbox();
+  writeRepoWorkflow(
+    tmp,
+    "quick",
+    `name: quick
+description: rápido
+nodes:
+  - id: a
+    bash: |
+      node -e "process.stdout.write('ok')"
+`,
+  );
+  const server = await startServer(tmp, runsDir);
+  try {
+    const response = await fetch(`${server.base}/factory/workflows/quick`);
+    assert.equal(response.status, 200);
+    const payload = (await response.json()) as {
+      workflow: { name: string; def: { nodes: Array<{ id: string }> } };
+      source: string;
+    };
+    assert.equal(payload.workflow.name, "quick");
+    assert.equal(payload.workflow.def.nodes[0].id, "a");
+    assert.match(payload.source, /name: quick/);
+    const missing = await fetch(`${server.base}/factory/workflows/nope`);
+    assert.equal(missing.status, 404);
+  } finally {
+    await server.close();
+  }
+});
+
 test("errores: sin name, id inválido, gate inexistente y ruta no-workflow", async () => {
   const { tmp, runsDir } = sandbox();
   writeRepoWorkflow(

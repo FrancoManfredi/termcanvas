@@ -14,7 +14,7 @@
 
 import type http from "node:http";
 import { isSafeRouteId } from "../factory/routing/routeParsers";
-import { listWorkflowSummaries } from "./loader";
+import { listWorkflowSummaries, loadWorkflow } from "./loader";
 import type { WorkflowRuntime } from "./runtime";
 
 const PREFIX = "/factory/workflows";
@@ -117,8 +117,35 @@ export function createWorkflowRouteHandler(
         return true;
       }
 
-      if (segments[0] === "runs" && segments.length >= 2) {
-        const runId = segments[1];
+      if (method === "GET" && segments.length === 1) {
+        const name = segments[0];
+        if (!isSafeRouteId(name)) {
+          sendJson(res, 400, { ok: false, error: "workflow name inválido" });
+          return true;
+        }
+        try {
+          const loaded = loadWorkflow(name, { repoRoot: getRepoRoot() });
+          sendJson(res, 200, {
+            workflow: {
+              name: loaded.def.name,
+              description: loaded.def.description,
+              tags: loaded.def.tags,
+              scope: loaded.scope,
+              filePath: loaded.sourcePath,
+              def: loaded.def,
+            },
+            source: loaded.source,
+          });
+        } catch (error) {
+          sendJson(res, 404, {
+            ok: false,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+        return true;
+      }
+
+      if (segments[0] === "runs" && segments.length >= 2) {        const runId = segments[1];
         if (!isSafeRouteId(runId)) {
           sendJson(res, 400, { ok: false, error: "run id inválido" });
           return true;
@@ -137,15 +164,15 @@ export function createWorkflowRouteHandler(
 
         if (method === "POST" && segments.length === 3) {
           const action = segments[2];
-          if (action === "approve" || action === "reject") {
-            const body = await readJsonBody(req);
-            const text = typeof body.text === "string" ? body.text : undefined;
-            runtime.respond(runId, { decision: action, text });
+          if (action === "cancel") {
+            runtime.cancel(runId);
             sendJson(res, 200, { ok: true });
             return true;
           }
-          if (action === "cancel") {
-            runtime.cancel(runId);
+          if (isSafeRouteId(action)) {
+            const body = await readJsonBody(req);
+            const text = typeof body.text === "string" ? body.text : undefined;
+            runtime.respond(runId, { decision: action, text });
             sendJson(res, 200, { ok: true });
             return true;
           }

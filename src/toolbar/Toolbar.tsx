@@ -13,6 +13,7 @@ import { useT } from "../i18n/useT";
 import { getWorkspaceBaseName } from "../titleHelper";
 import { formatShortcut, useShortcutStore } from "../stores/shortcutStore";
 import { useFactoryLabStore } from "../stores/factoryLabStore";
+import { useWorkflowLabStore } from "../stores/workflowLabStore";
 import { useWarpPanelStore } from "../features/warpPanel/warpPanelStore";
 
 
@@ -47,6 +48,8 @@ export function Toolbar() {
   const [showUpdate, setShowUpdate] = useState(false);
   const factoryLabActive = useFactoryLabStore((s) => s.factoryLabActive);
   const toggleFactoryLab = useFactoryLabStore((s) => s.toggleFactoryLab);
+  const workflowLabActive = useWorkflowLabStore((s) => s.workflowLabActive);
+  const toggleWorkflowLab = useWorkflowLabStore((s) => s.toggleWorkflowLab);
   const warpPanelActive = useWarpPanelStore((s) => s.warpPanelActive);
   const toggleWarpPanel = useWarpPanelStore((s) => s.toggleWarpPanel);
 
@@ -141,6 +144,24 @@ export function Toolbar() {
             aria-pressed={factoryLabActive}
           >
             <PlaygroundIcon active={factoryLabActive} />
+          </button>
+
+          <button
+            type="button"
+            data-workflow-lab-trigger="true"
+            data-active={workflowLabActive ? "true" : "false"}
+            className={iconButtonClass}
+            style={{
+              ...ICON_BUTTON_TRANSITION,
+              color: workflowLabActive ? "var(--text-primary)" : undefined,
+              backgroundColor: workflowLabActive ? "var(--surface-hover)" : undefined,
+            }}
+            onClick={toggleWorkflowLab}
+            title="Workflows — engine declarativo (runs, gates y DAG)"
+            aria-label={workflowLabActive ? "Salir de Workflows" : "Abrir Workflows"}
+            aria-pressed={workflowLabActive}
+          >
+            <WorkflowIcon active={workflowLabActive} />
           </button>
 
           <button
@@ -517,6 +538,54 @@ function StarIcon() {
         stroke="currentColor"
         strokeWidth="1.2"
         strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function WorkflowIcon({ active }: { active?: boolean }) {
+  // DAG por capas: dos nodos arriba conectados a uno abajo.
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <rect
+        x="1.5"
+        y="2"
+        width="5"
+        height="4"
+        rx="1"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        fill={active ? "currentColor" : "none"}
+        fillOpacity={active ? 0.14 : 0}
+      />
+      <rect
+        x="9.5"
+        y="2"
+        width="5"
+        height="4"
+        rx="1"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        fill={active ? "currentColor" : "none"}
+        fillOpacity={active ? 0.14 : 0}
+      />
+      <rect
+        x="5.5"
+        y="10"
+        width="5"
+        height="4"
+        rx="1"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        fill={active ? "currentColor" : "none"}
+        fillOpacity={active ? 0.2 : 0}
+      />
+      <path
+        d="M4 6v2h4v2M12 6v2H8"
+        stroke="currentColor"
+        strokeWidth="1"
+        strokeLinecap="round"
+        opacity={0.6}
       />
     </svg>
   );

@@ -37,6 +37,8 @@ import { loadAllDownloadedFonts } from "./terminal/fontLoader";
 import { startAutoSummaryWatcher } from "./terminal/summaryScheduler";
 import { FactoryLabPage } from "./features/factoryLab/FactoryLabPage";
 import { useFactoryLabStore } from "./stores/factoryLabStore";
+import { WorkflowLabPage } from "./features/workflowLab/WorkflowLabPage";
+import { useWorkflowLabStore } from "./stores/workflowLabStore";
 import { WarpPanelShell } from "./features/warpPanel/WarpPanelShell";
 import { HiddenCanvasBoundary } from "./features/warpPanel/HiddenCanvasBoundary";
 import { useWarpPanelStore } from "./features/warpPanel/warpPanelStore";
@@ -502,6 +504,7 @@ export function App() {
   }, []);
 
   const factoryLabActive = useFactoryLabStore((s) => s.factoryLabActive);
+  const workflowLabActive = useWorkflowLabStore((s) => s.workflowLabActive);
   // (warpPanelActive is subscribed once near the top — reused here.)
   // The hidden canvas tree depends on the Electron host bridge. Without it
   // (web renderer) its handlers would not exist anyway, so skip mounting it.
@@ -513,7 +516,11 @@ export function App() {
   return (
     <div className="h-screen w-screen overflow-hidden bg-[var(--bg)] text-[var(--text-primary)]">
       <Toolbar />
-      {factoryLabActive ? (
+      {workflowLabActive ? (
+        <div className="fixed left-0 right-0 bottom-0 top-11 z-20 flex flex-col bg-[var(--bg)] overflow-hidden" role="main" aria-label="Workflows">
+          <WorkflowLabPage />
+        </div>
+      ) : factoryLabActive ? (
         <div className="fixed left-0 right-0 bottom-0 top-11 z-20 flex flex-col bg-[var(--bg)] overflow-hidden" role="main" aria-label="Factory Lab">
           <FactoryLabPage />
         </div>

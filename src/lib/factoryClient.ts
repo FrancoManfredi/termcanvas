@@ -2679,3 +2679,385 @@ export async function saveFactoryAgentBody(
     };
   }
 }
+
+
+// ── Workflows engine (Fase 4c): cliente del engine declarativo ──
+
+export const FACTORY_WORKFLOWS_TIMEOUT_MS = 3000;
+export const FACTORY_WORKFLOW_RUN_TIMEOUT_MS = 10000;
+export const FACTORY_WORKFLOW_DECISION_TIMEOUT_MS = 5000;
+export const FACTORY_WORKFLOW_DEFINITION_TIMEOUT_MS = 3000;
+
+export interface WorkflowSummary {
+  name: string;
+  description: string;
+  tags: string[];
+  scope: string;
+  filePath: string;
+}
+
+export interface WorkflowRunNodeState {
+  id: string;
+  status: string;
+  attempts: number;
+  output?: string;
+  outputJson?: unknown;
+  error?: string;
+  skipReason?: string;
+  sessionId?: string;
+  costUsd?: number;
+}
+
+export interface WorkflowRunInfo {
+  id: string;
+  workflow: string;
+  description: string;
+  status: string;
+  startedAt: string;
+  finishedAt?: string;
+  error?: string;
+  nodes: Record<string, WorkflowRunNodeState>;
+}
+
+export interface WorkflowPendingGate {
+  runId: string;
+  nodeId: string;
+  message: string;
+  decisions: string[];
+  attempt: number;
+}
+
+export interface WorkflowDefinitionInfo {
+  name: string;
+  description: string;
+  tags: string[];
+  scope: string;
+  filePath: string;
+  def: {
+    name: string;
+    description: string;
+    nodes: Array<Record<string, unknown>>;
+    [key: string]: unknown;
+  };
+}
+
+export interface WorkflowRunDetail {
+  run: WorkflowRunInfo;
+  pending: WorkflowPendingGate | null;
+}
+
+function parseWorkflowSummary(json: unknown): WorkflowSummary | null {
+  const record = asRecord(json);
+  if (!record) return null;
+  const name = asNonEmptyString(record.name);
+  if (!name) return null;
+  return {
+    name,
+    description: typeof record.description === "string" ? record.description : "",
+    tags: (asArray(record.tags) ?? []).filter((tag): tag is string => typeof tag === "string"),
+    scope: typeof record.scope === "string" ? record.scope : "repo",
+    filePath: typeof record.filePath === "string" ? record.filePath : "",
+  };
+}
+
+function parseRunNodeState(json: unknown): WorkflowRunNodeState | null {
+  const record = asRecord(json);
+  if (!record) return null;
+  const id = asNonEmptyString(record.id);
+  const status = asNonEmptyString(record.status);
+  if (!id || !status) return null;
+  const state: WorkflowRunNodeState = {
+    id,
+    status,
+    attempts: typeof record.attempts === "number" ? record.attempts : 0,
+  };
+  if (typeof record.output === "string") state.output = record.output;
+  if (record.outputJson !== undefined) state.outputJson = record.outputJson;
+  if (typeof record.error === "string") state.error = record.error;
+  if (typeof record.skipReason === "string") state.skipReason = record.skipReason;
+  if (typeof record.sessionId === "string") state.sessionId = record.sessionId;
+  if (typeof record.costUsd === "number") state.costUsd = record.costUsd;
+  return state;
+}
+
+function parseRunInfo(json: unknown): WorkflowRunInfo | null {
+  const record = asRecord(json);
+  if (!record) return null;
+  const id = asNonEmptyString(record.id);
+  const workflow = asNonEmptyString(record.workflow);
+  const status = asNonEmptyString(record.status);
+  if (!id || !workflow || !status) return null;
+  const nodesRecord = asRecord(record.nodes) ?? {};
+  const nodes: Record<string, WorkflowRunNodeState> = {};
+  for (const [key, value] of Object.entries(nodesRecord)) {
+    const parsed = parseRunNodeState(value);
+    if (parsed) nodes[key] = parsed;
+  }
+  const run: WorkflowRunInfo = {
+    id,
+    workflow,
+    description: typeof record.description === "string" ? record.description : "",
+    status,
+    startedAt: typeof record.startedAt === "string" ? record.startedAt : "",
+    nodes,
+  };
+  if (typeof record.finishedAt === "string") run.finishedAt = record.finishedAt;
+  if (typeof record.error === "string") run.error = record.error;
+  return run;
+}
+
+function parsePendingGate(json: unknown): WorkflowPendingGate | null {
+  const record = asRecord(json);
+  if (!record) return null;
+  const nodeId = asNonEmptyString(record.nodeId);
+  if (!nodeId) return null;
+  return {
+    runId: typeof record.runId === "string" ? record.runId : "",
+    nodeId,
+    message: typeof record.message === "string" ? record.message : "",
+    decisions: (asArray(record.decisions) ?? []).filter(
+      (decision): decision is string => typeof decision === "string",
+    ),
+    attempt: typeof record.attempt === "number" ? record.attempt : 1,
+  };
+}
+
+export async function getFactoryWorkflows(
+  opts: FactoryClientOptions = {},
+): Promise<FactoryResult<WorkflowSummary[]>> {
+  try {
+    const { port, fetchFn, timeoutMs } = await prepare(opts, FACTORY_WORKFLOWS_TIMEOUT_MS);
+    if (port === null || fetchFn === null) return unavailable([]);
+    const url = factoryUrl(port, "/factory/workflows");
+    if (!url) return unavailable([]);
+    const label = "GET /factory/workflows";
+    const raw = await requestRaw(url, { method: "GET" }, fetchFn, timeoutMs, label);
+    if (raw.transportError !== null) return transportFail([], raw.transportError);
+    if (!isHttpOk(raw.status)) return httpFail(raw.status as unknown as number, [], raw.json, label);
+    const record = asRecord(raw.json);
+    const list = record ? asArray(record.workflows) : null;
+    if (!list) return badShape(raw.status as unknown as number, [], label);
+    return {
+      ok: true,
+      status: raw.status,
+      data: list
+        .map(parseWorkflowSummary)
+        .filter((entry): entry is WorkflowSummary => entry !== null),
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      status: null,
+      data: [],
+      error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+    };
+  }
+}
+
+export async function getFactoryWorkflowDefinition(
+  name: string,
+  opts: FactoryClientOptions = {},
+): Promise<FactoryResult<{ info: WorkflowDefinitionInfo; source: string }>> {
+  const fallback = { info: null as unknown as WorkflowDefinitionInfo, source: "" };
+  try {
+    if (!isValidId(name)) return invalidId(fallback);
+    const { port, fetchFn, timeoutMs } = await prepare(opts, FACTORY_WORKFLOW_DEFINITION_TIMEOUT_MS);
+    if (port === null || fetchFn === null) return unavailable(fallback);
+    const url = factoryUrl(port, `/factory/workflows/${encodeURIComponent(name)}`);
+    if (!url) return unavailable(fallback);
+    const label = "GET /factory/workflows/:name";
+    const raw = await requestRaw(url, { method: "GET" }, fetchFn, timeoutMs, label);
+    if (raw.transportError !== null) return transportFail(fallback, raw.transportError);
+    if (!isHttpOk(raw.status)) return httpFail(raw.status as unknown as number, fallback, raw.json, label);
+    const record = asRecord(raw.json);
+    const info = asRecord(record?.workflow);
+    if (!record || !info || typeof record.source !== "string") {
+      return badShape(raw.status as unknown as number, fallback, label);
+    }
+    const parsedInfo: WorkflowDefinitionInfo = {
+      name: typeof info.name === "string" ? info.name : name,
+      description: typeof info.description === "string" ? info.description : "",
+      tags: (asArray(info.tags) ?? []).filter((tag): tag is string => typeof tag === "string"),
+      scope: typeof info.scope === "string" ? info.scope : "repo",
+      filePath: typeof info.filePath === "string" ? info.filePath : "",
+      def: (asRecord(info.def) ?? { name, description: "", nodes: [] }) as WorkflowDefinitionInfo["def"],
+    };
+    return { ok: true, status: raw.status, data: { info: parsedInfo, source: record.source } };
+  } catch (e) {
+    return {
+      ok: false,
+      status: null,
+      data: fallback,
+      error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+    };
+  }
+}
+
+export async function postFactoryWorkflowRun(
+  input: { name: string; args?: string; inputs?: Record<string, unknown> },
+  opts: FactoryClientOptions = {},
+): Promise<FactoryResult<WorkflowRunInfo>> {
+  const fallback = null as unknown as WorkflowRunInfo;
+  try {
+    if (!input || !isValidId(input.name)) return invalidId(fallback);
+    const { port, fetchFn, timeoutMs } = await prepare(opts, FACTORY_WORKFLOW_RUN_TIMEOUT_MS);
+    if (port === null || fetchFn === null) return unavailable(fallback);
+    const url = factoryUrl(port, "/factory/workflows/run");
+    if (!url) return unavailable(fallback);
+    const label = "POST /factory/workflows/run";
+    const raw = await requestRaw(
+      url,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: input.name.trim(),
+          ...(input.args !== undefined ? { args: input.args } : {}),
+          ...(input.inputs !== undefined ? { inputs: input.inputs } : {}),
+        }),
+      },
+      fetchFn,
+      timeoutMs,
+      label,
+    );
+    if (raw.transportError !== null) return transportFail(fallback, raw.transportError);
+    if (!isHttpOk(raw.status)) return httpFail(raw.status as unknown as number, fallback, raw.json, label);
+    const run = parseRunInfo(asRecord(raw.json)?.run);
+    if (!run) return badShape(raw.status as unknown as number, fallback, label);
+    return { ok: true, status: raw.status, data: run };
+  } catch (e) {
+    return {
+      ok: false,
+      status: null,
+      data: fallback,
+      error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+    };
+  }
+}
+
+export async function getFactoryWorkflowRuns(
+  opts: FactoryClientOptions = {},
+): Promise<FactoryResult<WorkflowRunInfo[]>> {
+  try {
+    const { port, fetchFn, timeoutMs } = await prepare(opts, FACTORY_WORKFLOWS_TIMEOUT_MS);
+    if (port === null || fetchFn === null) return unavailable([]);
+    const url = factoryUrl(port, "/factory/workflows/runs");
+    if (!url) return unavailable([]);
+    const label = "GET /factory/workflows/runs";
+    const raw = await requestRaw(url, { method: "GET" }, fetchFn, timeoutMs, label);
+    if (raw.transportError !== null) return transportFail([], raw.transportError);
+    if (!isHttpOk(raw.status)) return httpFail(raw.status as unknown as number, [], raw.json, label);
+    const record = asRecord(raw.json);
+    const list = record ? asArray(record.runs) : null;
+    if (!list) return badShape(raw.status as unknown as number, [], label);
+    return {
+      ok: true,
+      status: raw.status,
+      data: list.map(parseRunInfo).filter((entry): entry is WorkflowRunInfo => entry !== null),
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      status: null,
+      data: [],
+      error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+    };
+  }
+}
+
+export async function getFactoryWorkflowRun(
+  runId: string,
+  opts: FactoryClientOptions = {},
+): Promise<FactoryResult<WorkflowRunDetail>> {
+  const fallback = null as unknown as WorkflowRunDetail;
+  try {
+    if (!isValidId(runId)) return invalidId(fallback);
+    const { port, fetchFn, timeoutMs } = await prepare(opts, FACTORY_WORKFLOWS_TIMEOUT_MS);
+    if (port === null || fetchFn === null) return unavailable(fallback);
+    const url = factoryUrl(port, `/factory/workflows/runs/${encodeURIComponent(runId)}`);
+    if (!url) return unavailable(fallback);
+    const label = "GET /factory/workflows/runs/:id";
+    const raw = await requestRaw(url, { method: "GET" }, fetchFn, timeoutMs, label);
+    if (raw.transportError !== null) return transportFail(fallback, raw.transportError);
+    if (!isHttpOk(raw.status)) return httpFail(raw.status as unknown as number, fallback, raw.json, label);
+    const record = asRecord(raw.json);
+    const run = parseRunInfo(record?.run);
+    if (!record || !run) return badShape(raw.status as unknown as number, fallback, label);
+    return {
+      ok: true,
+      status: raw.status,
+      data: { run, pending: parsePendingGate(record.pending) },
+    };
+  } catch (e) {
+    return {
+      ok: false,
+      status: null,
+      data: fallback,
+      error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+    };
+  }
+}
+
+export async function postFactoryWorkflowDecision(
+  runId: string,
+  decision: string,
+  text: string | undefined,
+  opts: FactoryClientOptions = {},
+): Promise<FactoryResult<{ ok: boolean }>> {
+  const fallback = { ok: false };
+  try {
+    if (!isValidId(runId)) return invalidId(fallback);
+    if (!/^[a-z][a-z0-9_-]*$/i.test(decision)) {
+      return { ok: false, status: null, data: fallback, error: "decisión inválida" };
+    }
+    const { port, fetchFn, timeoutMs } = await prepare(opts, FACTORY_WORKFLOW_DECISION_TIMEOUT_MS);
+    if (port === null || fetchFn === null) return unavailable(fallback);
+    const url = factoryUrl(
+      port,
+      `/factory/workflows/runs/${encodeURIComponent(runId)}/${decision}`,
+    );
+    if (!url) return unavailable(fallback);
+    const label = `POST /factory/workflows/runs/:id/${decision}`;
+    const init = postJsonInit({ ...(text !== undefined ? { text } : {}) });
+    const raw = await requestRaw(url, init, fetchFn, timeoutMs, label);
+    if (raw.transportError !== null) return transportFail(fallback, raw.transportError);
+    if (!isHttpOk(raw.status)) return httpFail(raw.status as unknown as number, fallback, raw.json, label);
+    return { ok: true, status: raw.status, data: { ok: true } };
+  } catch (e) {
+    return {
+      ok: false,
+      status: null,
+      data: fallback,
+      error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+    };
+  }
+}
+
+export async function postFactoryWorkflowCancel(
+  runId: string,
+  opts: FactoryClientOptions = {},
+): Promise<FactoryResult<{ ok: boolean }>> {
+  const fallback = { ok: false };
+  try {
+    if (!isValidId(runId)) return invalidId(fallback);
+    const { port, fetchFn, timeoutMs } = await prepare(opts, FACTORY_WORKFLOW_DECISION_TIMEOUT_MS);
+    if (port === null || fetchFn === null) return unavailable(fallback);
+    const url = factoryUrl(
+      port,
+      `/factory/workflows/runs/${encodeURIComponent(runId)}/cancel`,
+    );
+    if (!url) return unavailable(fallback);
+    const label = "POST /factory/workflows/runs/:id/cancel";
+    const raw = await requestRaw(url, postJsonInit({}), fetchFn, timeoutMs, label);
+    if (raw.transportError !== null) return transportFail(fallback, raw.transportError);
+    if (!isHttpOk(raw.status)) return httpFail(raw.status as unknown as number, fallback, raw.json, label);
+    return { ok: true, status: raw.status, data: { ok: true } };
+  } catch (e) {
+    return {
+      ok: false,
+      status: null,
+      data: fallback,
+      error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+    };
+  }
+}
