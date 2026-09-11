@@ -31,12 +31,14 @@ import {
   executeWait,
   type NodeRunContext,
 } from "./nodes/deterministic";
+import { createOpencodeAiRunner, type AiNodeRunner } from "./nodes/ai";
 
 export interface LoadedWorkflow {
   def: WorkflowDefinition;
   sourcePath: string;
   source: string;
   digest: string;
+  dir: string;
 }
 
 export interface RunWorkflowOptions {
@@ -47,11 +49,11 @@ export interface RunWorkflowOptions {
   env?: NodeJS.ProcessEnv;
   onEvent?: (event: WorkflowEvent) => void;
   signal?: AbortSignal;
+  /** Runner IA inyectable (tests); default: OpenCode embebido. */
+  aiRunner?: AiNodeRunner;
 }
 
 const PHASE_BY_BODY: Record<string, string> = {
-  prompt: "Fase 1",
-  command: "Fase 1",
   approval: "Fase 3",
   loop: "Fase 3",
   loop_group: "Fase 3",
@@ -92,6 +94,20 @@ function resolveInputs(
     }
   }
   return inputs;
+}
+
+/** Lee un command Markdown del workflow (<dir>/commands/<name>.md) sin frontmatter. */
+function readCommandFile(loaded: LoadedWorkflow, name: string): string {
+  const filePath = path.join(loaded.dir, "commands", `${name}.md`);
+  if (!fs.existsSync(filePath)) {
+    throw new WorkflowValidationError(
+      `command "${name}" no existe: ${filePath}`,
+    );
+  }
+  const text = fs.readFileSync(filePath, "utf-8");
+  if (!text.startsWith("---")) return text;
+  const end = text.indexOf("\n---", 3);
+  return end === -1 ? text : text.slice(end + 4).replace(/^\r?\n/, "");
 }
 
 export async function runWorkflow(
@@ -139,6 +155,57 @@ export async function runWorkflow(
   emit("run_started", undefined, { nodes: def.nodes.length, args: run.args });
 
   const baseEnv: NodeJS.ProcessEnv = { ...process.env, ...(opts.env ?? {}) };
+  const aiRunner = opts.aiRunner ?? createOpencodeAiRunner();
+
+  const resolveNodeSession = (node: WorkflowNode): string | null => {
+    const context = node.context;
+    if (context === "shared") {
+      const deps = graph.directDeps.get(node.id) ?? [];
+      if (deps.length !== 1) {
+        throw new NodeExecutionError(
+          node.id,
+          "context: shared requiere exactamente una dependencia",
+        );
+      }
+      const sessionId = run.nodes[deps[0]]?.sessionId;
+      if (!sessionId) {
+        throw new NodeExecutionError(
+          node.id,
+          `context: shared: "${deps[0]}" no tiene sesión`,
+        );
+      }
+      return sessionId;
+    }
+    if (context && typeof context === "object" && "resume" in context) {
+      const sessionId = run.nodes[context.resume]?.sessionId;
+      if (!sessionId) {
+        throw new NodeExecutionError(
+          node.id,
+          `context.resume: "${context.resume}" no tiene sesión`,
+        );
+      }
+      return sessionId;
+    }
+    return null;
+  };
+
+  const runAiNode = (
+    node: WorkflowNode,
+    prompt: string,
+  ): Promise<NodeExecutionResult> =>
+    aiRunner({
+      runId: run.id,
+      nodeId: node.id,
+      cwd: opts.cwd,
+      prompt,
+      model: node.model ?? def.model,
+      effort: node.effort ?? def.effort,
+      systemPrompt: node.systemPrompt,
+      outputFormat: node.output_format,
+      timeoutMs: node.timeout,
+      signal: opts.signal,
+      sessionId: resolveNodeSession(node),
+    });
 
   const buildVarCtx = (): VarContext => ({
     args: run.args,
@@ -173,6 +240,13 @@ export async function runWorkflow(
       artifactsDir: artifacts.artifactsDir,
       stateDir: artifacts.stateDir,
     };
+    if (node.prompt !== undefined) {
+      return runAiNode(node, resolveTemplate(node.prompt, varCtx));
+    }
+    if (node.command !== undefined) {
+      const commandText = readCommandFile(loaded, node.command);
+      return runAiNode(node, resolveTemplate(commandText, varCtx));
+    }
     if (node.bash !== undefined) {
       return executeBash(resolveTemplate(node.bash, varCtx), nodeCtx);
     }
@@ -281,12 +355,17 @@ export async function runWorkflow(
         if (state.outputJson !== undefined) {
           artifacts.writeNodeStructured(node.id, state.outputJson);
         }
+        if (result.sessionId) state.sessionId = result.sessionId;
+        if (result.usage) state.usage = result.usage;
+        if (typeof result.costUsd === "number") state.costUsd = result.costUsd;
         if (node.output_type) {
           artifacts.writeNodeSidecar(node.id, node.output_type, result.output);
         }
         emit("node_completed", node.id, {
           attempts: attempt,
           outputPreview: redactSecrets(result.output.slice(0, 4_000)),
+          sessionId: result.sessionId,
+          costUsd: result.costUsd,
         });
         store.save(run);
         return;

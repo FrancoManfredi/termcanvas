@@ -23,6 +23,7 @@ function loaded(yaml: string, tmp: string): LoadedWorkflow {
     source: yaml,
     sourcePath,
     digest: crypto.createHash("sha256").update(yaml).digest("hex"),
+    dir: tmp,
   };
 }
 

@@ -143,6 +143,7 @@ export function loadWorkflow(
     source: found.source,
     sourcePath: found.filePath,
     digest,
+    dir: path.dirname(found.filePath),
     scope: found.scope,
   };
 }

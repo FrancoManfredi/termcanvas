@@ -31,6 +31,15 @@ export interface NodeState {
   error?: string;
   /** Motivo por el que el nodo fue salteado por `when` o trigger_rule. */
   skipReason?: string;
+  /** Sesión OpenCode del nodo, reutilizable por context: shared/resume. */
+  sessionId?: string;
+  costUsd?: number;
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+  };
 }
 
 export interface RunResult {
@@ -86,6 +95,16 @@ export interface NodeExecutionResult {
   output: string;
   /** Salida estructurada opcional. */
   outputJson?: unknown;
+  /** Sesión OpenCode asociada (nodos IA). */
+  sessionId?: string;
+  /** Uso real reportado por el servidor (nodos IA). */
+  usage?: {
+    inputTokens?: number;
+    outputTokens?: number;
+    cacheReadTokens?: number;
+    cacheWriteTokens?: number;
+  };
+  costUsd?: number;
 }
 
 export const TERMINAL_NODE_STATUSES: NodeStatus[] = [
