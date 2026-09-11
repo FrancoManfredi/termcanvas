@@ -441,6 +441,168 @@ async function main() {
           "Usage: termcanvas telemetry <get|events> [--terminal <id> | --workflow <id> --repo <path>]",
         );
       }
+    } else if (group === "workflow") {
+      const factoryFetch = async (
+        method: string,
+        urlPath: string,
+        body?: unknown,
+      ): Promise<any> => {
+        let lastError = "factory daemon no disponible (puertos 17680-17690)";
+        for (let port = 17680; port <= 17690; port++) {
+          try {
+            const health = await fetch(
+              `http://127.0.0.1:${port}/factory/health`,
+              { signal: AbortSignal.timeout(700) },
+            );
+            if (!health.ok) continue;
+            const response = await fetch(
+              `http://127.0.0.1:${port}${urlPath}`,
+              {
+                method,
+                headers: body
+                  ? { "Content-Type": "application/json" }
+                  : undefined,
+                body: body ? JSON.stringify(body) : undefined,
+              },
+            );
+            const text = await response.text();
+            const payload = text ? JSON.parse(text) : {};
+            if (!response.ok) {
+              throw new Error(
+                typeof payload?.error === "string"
+                  ? payload.error
+                  : `HTTP ${response.status}`,
+              );
+            }
+            return payload;
+          } catch (error) {
+            if (
+              error instanceof Error &&
+              !/fetch failed|timeout|ECONN|aborted|The operation was aborted/i.test(
+                error.message,
+              )
+            ) {
+              lastError = error.message;
+              break;
+            }
+            lastError = error instanceof Error ? error.message : String(error);
+          }
+        }
+        throw new Error(lastError);
+      };
+      const workflowFlag = (flag: string): string | undefined => {
+        const idx = rest.indexOf(flag);
+        return idx >= 0 && idx + 1 < rest.length ? rest[idx + 1] : undefined;
+      };
+      const workflowInputs = (): Record<string, string> | undefined => {
+        const inputs: Record<string, string> = {};
+        for (let i = 0; i < rest.length; i++) {
+          if (rest[i] === "--input" && i + 1 < rest.length) {
+            const [key, ...valueParts] = rest[i + 1].split("=");
+            if (key) inputs[key] = valueParts.join("=");
+            i += 1;
+          }
+        }
+        return Object.keys(inputs).length > 0 ? inputs : undefined;
+      };
+
+      if (command === "list") {
+        const payload = await factoryFetch("GET", "/factory/workflows");
+        if (jsonFlag) {
+          console.log(JSON.stringify(payload, null, 2));
+        } else {
+          for (const wf of payload.workflows ?? []) {
+            console.log(`${wf.name}\t[${wf.scope}]\t${wf.description ?? ""}`);
+          }
+        }
+      } else if (command === "run" && rest[0]) {
+        const payload = await factoryFetch("POST", "/factory/workflows/run", {
+          name: rest[0],
+          args: workflowFlag("--args"),
+          inputs: workflowInputs(),
+        });
+        if (jsonFlag) {
+          console.log(JSON.stringify(payload, null, 2));
+        } else {
+          console.log(
+            `run ${payload.run.id} (${payload.run.status}) — workflow ${payload.run.workflow}`,
+          );
+        }
+      } else if (command === "status" && rest[0]) {
+        const payload = await factoryFetch(
+          "GET",
+          `/factory/workflows/runs/${encodeURIComponent(rest[0])}`,
+        );
+        if (jsonFlag) {
+          console.log(JSON.stringify(payload, null, 2));
+        } else {
+          const run = payload.run;
+          console.log(
+            `${run.id} ${run.workflow} → ${run.status}${run.error ? ` (${run.error})` : ""}`,
+          );
+          for (const [id, state] of Object.entries<any>(run.nodes)) {
+            console.log(
+              `  ${id}\t${state.status}\t${String(state.output ?? "").slice(0, 80)}`,
+            );
+          }
+          if (payload.pending) {
+            console.log(
+              `GATE pendiente (${payload.pending.nodeId}): ${payload.pending.message}`,
+            );
+          }
+        }
+      } else if (command === "watch" && rest[0]) {
+        const runId = rest[0];
+        for (;;) {
+          const payload = await factoryFetch(
+            "GET",
+            `/factory/workflows/runs/${encodeURIComponent(runId)}`,
+          );
+          const run = payload.run;
+          if (jsonFlag) {
+            console.log(
+              JSON.stringify({
+                status: run.status,
+                nodes: run.nodes,
+                pending: payload.pending ?? null,
+              }),
+            );
+          } else {
+            process.stdout.write(`... ${run.status}\n`);
+          }
+          if (["completed", "failed", "cancelled"].includes(run.status)) {
+            process.exit(run.status === "completed" ? 0 : 1);
+          }
+          if (payload.pending) {
+            console.log(
+              `GATE pendiente (${payload.pending.nodeId}): ${payload.pending.message}`,
+            );
+            console.log(
+              `Resolver: termcanvas workflow approve ${runId} --text "..."`,
+            );
+            process.exit(3);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+        }
+      } else if ((command === "approve" || command === "reject") && rest[0]) {
+        await factoryFetch(
+          "POST",
+          `/factory/workflows/runs/${encodeURIComponent(rest[0])}/${command}`,
+          { text: workflowFlag("--text") },
+        );
+        console.log(`${command} enviado a ${rest[0]}`);
+      } else if (command === "cancel" && rest[0]) {
+        await factoryFetch(
+          "POST",
+          `/factory/workflows/runs/${encodeURIComponent(rest[0])}/cancel`,
+          {},
+        );
+        console.log(`cancel enviado a ${rest[0]}`);
+      } else {
+        console.log(
+          "Usage: termcanvas workflow <list|run|status|watch|approve|reject|cancel> [args]",
+        );
+      }
     } else if (group === "diff" && command) {
       const worktreePath = command;
       const summary = rest.includes("--summary");
@@ -696,7 +858,7 @@ async function main() {
       console.log(JSON.stringify(state, null, 2));
     } else {
       console.log(
-        "Usage: termcanvas <project|worktree|terminal|telemetry|pin|context|diff|state> <command> [args]",
+        "Usage: termcanvas <project|worktree|terminal|telemetry|pin|context|workflow|diff|state> <command> [args]",
       );
       console.log("");
       console.log("Commands:");
@@ -743,6 +905,24 @@ async function main() {
       );
       console.log(
         "  telemetry events --terminal <id>            List terminal telemetry events",
+      );
+      console.log(
+        "  workflow list                               List workflows",
+      );
+      console.log(
+        "  workflow run <name> [--args <t>] [--input k=v]   Run a workflow",
+      );
+      console.log(
+        "  workflow status <runId>                     Run detail",
+      );
+      console.log(
+        "  workflow watch <runId>                      Follow a run (exit 3 en gate)",
+      );
+      console.log(
+        "  workflow approve|reject <runId> [--text <t>]     Resolve a gate",
+      );
+      console.log(
+        "  workflow cancel <runId>                     Cancel a run",
       );
       console.log("  diff <worktree-path> [--summary]            Get git diff");
       console.log(

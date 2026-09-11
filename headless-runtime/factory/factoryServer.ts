@@ -198,6 +198,9 @@ import {
 // con retorno temprano); este cascarón hace UN match + switch por dominio.
 // Cero ramas por método+path fuera del switch; formas y handlers intactos.
 import { matchRoute } from "./routing/routeTable";
+import { createWorkflowRouteHandler } from "../workflows/workflowRoutes";
+import { WorkflowRuntime } from "../workflows/runtime";
+import { defaultRunsDir } from "../workflows/artifacts";
 import { createAgentFile, deleteAgentFile, listAgents, parseAgentFilePath, readAgentFull, writeAgentBody, writeAgentFull } from "./agents/agentFileRoutes";
 import { handleAutomationsListRoute, handleAutomationsTickRoute } from "./automations/automationRoutes";
 import { handleIntegrationsStatusRoute, handleIntegrationsTestPostRoute, handleIntegrationsWebhookInRoute, handleIntegrationsPostBackRoute } from "./integrations/integrationRoutes";
@@ -2542,6 +2545,25 @@ function runVerifyWithServerEffectsT2(jid: string): Promise<void> {
   });
 }
 
+// ── Workflows engine (Fase 4b): runtime en background + rutas pre-tabla ──
+let workflowRuntime: WorkflowRuntime | null = null;
+const workflowRepoRoot = (): string =>
+  process.env.TERMCANVAS_WORKFLOWS_ROOT ?? process.cwd();
+function getWorkflowRuntime(): WorkflowRuntime {
+  if (!workflowRuntime) {
+    workflowRuntime = new WorkflowRuntime({
+      repoRoot: workflowRepoRoot(),
+      cwd: process.cwd(),
+      runsDir: defaultRunsDir(),
+    });
+  }
+  return workflowRuntime;
+}
+const tryHandleWorkflowRoute = createWorkflowRouteHandler(
+  getWorkflowRuntime,
+  workflowRepoRoot,
+);
+
 // ── Main request handler ──
 async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
   setCors(res);
@@ -2563,6 +2585,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     // delgada al dominio `agents/agentFileRoutes`). GET devuelve solo el body,
     // PUT escribe solo el body preservando el frontmatter byte por byte.
     if (await tryHandleAgentFileRoute(req, res, pathname)) return;
+    // ── Workflows engine (pre-tabla): lista, run, gates y cancel ──
+    if (await tryHandleWorkflowRoute(req, res, pathname)) return;
     // ── TANDA C — Dispatch por tabla (C8): UN match + switch por dominio ──
     // El loop vive en `matchRoute` (routing/routeTable, acotado a 36 filas,
     // nunca lanza, null = no-ruta). Acá: match → dominio → respuesta.
