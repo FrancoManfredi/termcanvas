@@ -21,6 +21,7 @@
     "sync:agents:global": "tsx scripts/sync-factory-agents.ts --global",
     "sync:agents:check": "tsx scripts/sync-factory-agents.ts --check",
     "smoke:workflows-live": "tsx scripts/wf-live-smoke.ts",
+    "smoke:factory": "tsx scripts/wf-daemon-smoke.ts",
     "typecheck": "tsc --noEmit",
     "typecheck:headless": "tsc --noEmit -p tsconfig.headless.json",
     "build:headless": "tsc -p tsconfig.headless.build.json",

@@ -9,6 +9,12 @@ El engine declarativo ejecuta pipelines de agentes definidos en YAML, con runs
 en background, gates humanos, loops y fan-out. Toda la interacción es por CLI
 contra el daemon local.
 
+**Pipeline oficial**: la factory corre `factory-default`
+(`triage → spec → aprobación → implement → verify → review`) como workflow.
+Todo job del panel (Resolve Issue, automations) se ejecuta con ese workflow y
+se espeja en el panel. `TERMCANVAS_FACTORY_ENGINE=legacy` vuelve al pipeline
+viejo.
+
 ## Cuándo usarla
 
 - El usuario pide "workflow", "pipeline", "plan -> implement -> review", o
