@@ -60,6 +60,7 @@ import {
   type FactoryNotification,
   type NotificationEmitMeta,
 } from "../../notify/notifications";
+import { dispatchCreatedJob } from "../engineBridge";
 import {
   AUTOMATION_TICK_DEFAULT_MS,
   AutomationsSectionSchema,
@@ -659,6 +660,13 @@ function defaultCreateJob(deps: AutomationDeps, input: AutomationJobInput): Auto
       });
     } catch {
       // evidence best-effort; the job itself already exists
+    }
+    // F8e: con el engine oficial, el job de automation se despacha como run
+    // de factory-default (no-op en legacy o sin runtime registrado).
+    try {
+      dispatchCreatedJob(item.id);
+    } catch {
+      // best-effort: el job queda en Intake para resume manual
     }
     return { ok: true, jobId: item.id };
   } catch (e) {

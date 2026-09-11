@@ -17,6 +17,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { workItemStore } from "../workItem/workItemStore";
 import { defaultRunsDir } from "../workflows/artifacts";
+import { notify } from "../notify/notifications";
 import type { WorkflowRuntime } from "../workflows/runtime";
 import type { WorkflowEvent } from "../workflows/types";
 import type { ApprovalRequest } from "../workflows/executor";
@@ -29,6 +30,29 @@ export function isWorkflowEngineEnabled(): boolean {
     return true;
   } catch {
     return true;
+  }
+}
+
+/** El daemon registra acá su runtime para que automatizaciones puedan disparar jobs. */
+let runtimeProvider: (() => WorkflowRuntime) | null = null;
+
+export function setWorkflowRuntimeProvider(provider: () => WorkflowRuntime): void {
+  runtimeProvider = provider;
+}
+
+/**
+ * Dispara el workflow oficial para un job recién creado (automations,
+ * benchmarks u otro intake interno). No-op si el engine está en legacy o el
+ * runtime aún no fue registrado.
+ */
+export function dispatchCreatedJob(itemId: string): void {
+  if (!isWorkflowEngineEnabled()) return;
+  const provider = runtimeProvider;
+  if (!provider) return;
+  try {
+    void runWorkflowJob(itemId, provider());
+  } catch {
+    // best-effort: el job queda en Intake para resume manual
   }
 }
 
@@ -201,6 +225,20 @@ export function handleGate(request: ApprovalRequest): void {
       );
     } catch {
       // best-effort
+    }
+    try {
+      notify({
+        kind:
+          request.nodeId.includes("spec") || request.nodeId.includes("approve")
+            ? "spec-approval"
+            : "ask_human",
+        workItemId: itemId,
+        title: `Gate pendiente: ${request.nodeId}`,
+        body: request.message.slice(0, 400),
+        dedupeKey: `gate:${request.runId}:${request.nodeId}:${request.attempt}`,
+      });
+    } catch {
+      // best-effort: la campana también ve el estado por polling
     }
   } catch {
     // best-effort

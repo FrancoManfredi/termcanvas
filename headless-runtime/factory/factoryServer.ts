@@ -206,6 +206,7 @@ import {
   handleRunEvent,
   isWorkflowEngineEnabled,
   runWorkflowJob,
+  setWorkflowRuntimeProvider,
   tryHandleWorkflowAction,
   WORKFLOW_ACTION_DOMAINS,
 } from "./engineBridge";
@@ -2609,6 +2610,7 @@ const tryHandleWorkflowRoute = createWorkflowRouteHandler(
   getWorkflowRuntime,
   workflowRepoRoot,
 );
+setWorkflowRuntimeProvider(getWorkflowRuntime);
 
 // ── Main request handler ──
 async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
