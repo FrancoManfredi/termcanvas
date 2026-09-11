@@ -100,12 +100,9 @@ function resolveRootPath(
       if (!nodeId) {
         throw new VariablesError(`${expression}: $LOOP_PREV requiere un nodo`);
       }
-      if (!ctx.loopPrev || !(nodeId in ctx.loopPrev)) {
-        throw new VariablesError(
-          `${expression}: $LOOP_PREV.${nodeId} no disponible en esta iteración`,
-        );
-      }
-      return walkFieldPath(ctx.loopPrev[nodeId], rest, expression);
+      const source = ctx.loopPrev?.[nodeId];
+      if (source === undefined) return "";
+      return walkFieldPath(source, rest, expression);
     }
     default: {
       const state = ctx.nodes[root];

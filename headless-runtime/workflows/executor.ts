@@ -75,9 +75,7 @@ export interface RunWorkflowOptions {
   depth?: number;
 }
 
-const PHASE_BY_BODY: Record<string, string> = {
-  loop_group: "Fase 3",
-};
+const PHASE_BY_BODY: Record<string, string> = {};
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -412,6 +410,197 @@ export async function runWorkflow(
     }
   };
 
+  const executeLoopGroup = async (
+    groupNode: WorkflowNode,
+    varCtx: VarContext,
+  ): Promise<NodeExecutionResult> => {
+    const group = groupNode.loop_group;
+    if (!group) {
+      throw new NodeExecutionError(groupNode.id, "nodo loop_group sin body");
+    }
+    const groupGraph = buildLayers(group.nodes);
+    let prevStates: Record<string, NodeState> = {};
+    let lastResult: NodeExecutionResult = { output: "" };
+    let cancelSignal: NodeCancelSignal | null = null;
+
+    for (let iteration = 1; iteration <= group.max_iterations; iteration += 1) {
+      const iterationStates: Record<string, NodeState> = {};
+      const loopPrev: Record<string, unknown> = {};
+      for (const [id, state] of Object.entries(prevStates)) {
+        loopPrev[id] = { output: state.output, outputJson: state.outputJson };
+      }
+      const groupVarCtx = (): VarContext => ({
+        ...buildVarCtx(groupNode.id),
+        nodes: { ...run.nodes, ...iterationStates },
+        loopPrev,
+      });
+
+      for (const layer of groupGraph.layers) {
+        await Promise.all(
+          layer.map(async (subId) => {
+            const subNode = groupGraph.byId.get(subId);
+            if (!subNode) return;
+            if (subNode.when) {
+              let whenTrue = false;
+              try {
+                whenTrue = evaluateWhen(subNode.when, {
+                  resolveExpression: (expr) => resolveValue(expr, groupVarCtx()),
+                });
+              } catch {
+                whenTrue = false;
+              }
+              if (!whenTrue) {
+                iterationStates[subId] = {
+                  id: subId,
+                  status: "skipped",
+                  attempts: 0,
+                  skipReason: `when: ${subNode.when}`,
+                };
+                return;
+              }
+            }
+            const trigger = evaluateTriggerRule(
+              subNode.trigger_rule,
+              groupGraph.directDeps.get(subId) ?? [],
+              iterationStates,
+            );
+            if (!trigger.run) {
+              iterationStates[subId] = {
+                id: subId,
+                status: "skipped",
+                attempts: 0,
+                skipReason: trigger.skipReason,
+              };
+              return;
+            }
+            const maxAttempts = subNode.retry?.max_attempts ?? 1;
+            const retryDelay = subNode.retry?.delay_ms ?? 1_000;
+            const retryMode = subNode.retry?.on_error ?? "transient";
+            const state: NodeState = {
+              id: subId,
+              status: "running",
+              attempts: 0,
+              startedAt: nowIso(),
+            };
+            iterationStates[subId] = state;
+            for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+              state.attempts = attempt;
+              try {
+                const result = await executeBody(subNode, groupVarCtx());
+                state.status = "completed";
+                state.finishedAt = nowIso();
+                state.output = result.output;
+                if (result.outputJson !== undefined) {
+                  state.outputJson = result.outputJson;
+                }
+                if (result.sessionId) state.sessionId = result.sessionId;
+                return;
+              } catch (error) {
+                if (error instanceof NodeCancelSignal) {
+                  state.status = "cancelled";
+                  state.finishedAt = nowIso();
+                  state.error = error.message;
+                  cancelSignal = cancelSignal ?? error;
+                  return;
+                }
+                const message =
+                  error instanceof Error ? error.message : String(error);
+                const canRetry =
+                  attempt < maxAttempts &&
+                  (retryMode === "all" || isTransient(message));
+                if (canRetry) {
+                  await new Promise((resolve) => setTimeout(resolve, retryDelay));
+                  continue;
+                }
+                state.status = "failed";
+                state.finishedAt = nowIso();
+                state.error = message;
+                return;
+              }
+            }
+          }),
+        );
+        if (cancelSignal) break;
+      }
+
+      for (const [subId, state] of Object.entries(iterationStates)) {
+        run.nodes[`${groupNode.id}.${subId}`] = {
+          ...state,
+          id: `${groupNode.id}.${subId}`,
+        };
+      }
+      prevStates = iterationStates;
+      store.save(run);
+
+      const sinks = groupGraph.nodes.filter(
+        (inner) => (groupGraph.dependents.get(inner.id) ?? []).length === 0,
+      );
+      const completedSinks = sinks
+        .map((inner) => iterationStates[inner.id])
+        .filter((state) => state && state.status === "completed");
+      if (sinks.length === 1 && completedSinks[0]) {
+        lastResult = { output: completedSinks[0].output ?? "" };
+        if (completedSinks[0].outputJson !== undefined) {
+          lastResult.outputJson = completedSinks[0].outputJson;
+        }
+      } else {
+        const aggregate: Record<string, unknown> = {};
+        for (const sink of sinks) {
+          const state = iterationStates[sink.id];
+          if (state?.status === "completed") {
+            aggregate[sink.id] = state.outputJson ?? state.output;
+          }
+        }
+        lastResult = { output: JSON.stringify(aggregate), outputJson: aggregate };
+      }
+
+      if (cancelSignal) break;
+      const failed = Object.values(iterationStates).find(
+        (state) => state.status === "failed",
+      );
+      if (failed) {
+        throw new NodeExecutionError(
+          groupNode.id,
+          `loop_group: nodo "${failed.id}" falló: ${(failed.error ?? "").slice(0, 300)}`,
+        );
+      }
+
+      const untilVars: VarContext = {
+        ...buildVarCtx(groupNode.id),
+        nodes: { ...run.nodes, ...iterationStates },
+        loopPrev,
+      };
+      if (group.until) {
+        try {
+          const done = evaluateWhen(group.until, {
+            resolveExpression: (expr) => resolveValue(expr, untilVars),
+          });
+          if (done) break;
+        } catch {
+          // condición inválida: no termina por esta vía
+        }
+      }
+      if (group.until_bash) {
+        const command = resolveTemplate(group.until_bash, untilVars);
+        const shellResult = await runShellCommand(command, {
+          cwd: opts.cwd,
+          env: {
+            ...baseEnv,
+            ARTIFACTS_DIR: artifacts.artifactsDir,
+            STATE_DIR: artifacts.stateDir,
+            LOOP_PREV_OUTPUT: lastResult.output,
+          },
+          timeoutMs: 60_000,
+          signal: opts.signal,
+        });
+        if (shellResult.exitCode === 0) break;
+      }
+    }
+
+    if (cancelSignal) throw cancelSignal;
+    return lastResult;
+  };
+
   const runBounded = async <T>(
     items: unknown[],
     limit: number,
@@ -591,6 +780,9 @@ export async function runWorkflow(
     }
     if (node.workflow !== undefined) {
       return executeWorkflowNode(node, varCtx);
+    }
+    if (node.loop_group !== undefined) {
+      return executeLoopGroup(node, varCtx);
     }
     if (node.bash !== undefined) {
       return executeBash(resolveTemplate(node.bash, varCtx), nodeCtx);
