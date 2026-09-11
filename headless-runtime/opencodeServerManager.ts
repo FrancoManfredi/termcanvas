@@ -27,6 +27,8 @@ const SERVER_START_RETRIES = 3;
 interface ServerHandle {
   url: string;
   close: () => void;
+  /** PID del proceso lanzado (wrapper). Útil para cleanup externo. */
+  pid?: number;
 }
 
 let runningServer: ServerHandle | null = null;
@@ -259,6 +261,7 @@ export function spawnOpencodeServer(opts: {
           finish(() => {
             resolve({
               url,
+              pid: proc?.pid,
               close: () => {
                 try {
                   killTree();

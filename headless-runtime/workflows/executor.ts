@@ -51,6 +51,8 @@ export interface RunWorkflowOptions {
   signal?: AbortSignal;
   /** Runner IA inyectable (tests); default: OpenCode embebido. */
   aiRunner?: AiNodeRunner;
+  /** Raíz del proyecto para resolver skills (default: cwd). */
+  repoRoot?: string;
 }
 
 const PHASE_BY_BODY: Record<string, string> = {
@@ -205,6 +207,13 @@ export async function runWorkflow(
       timeoutMs: node.timeout,
       signal: opts.signal,
       sessionId: resolveNodeSession(node),
+      skills: node.skills,
+      mcp: node.mcp,
+      allowedTools: node.allowed_tools,
+      deniedTools: node.denied_tools,
+      repoRoot: opts.repoRoot ?? opts.cwd,
+      workflowDir: loaded.dir,
+      scopeDir: path.join(artifacts.artifactsDir, "scopes", node.id),
     });
 
   const buildVarCtx = (): VarContext => ({

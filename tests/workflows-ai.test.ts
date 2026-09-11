@@ -214,3 +214,32 @@ nodes:
   assert.equal(run.status, "failed");
   assert.match(run.nodes.boom.error ?? "", /modelo caído/);
 });
+
+test("reenvía capacidades y scope del nodo al runner", async () => {
+  const { tmp, runsDir } = sandbox();
+  const log: AiNodeRequest[] = [];
+  const yaml = `name: ai-caps
+description: capacidades
+nodes:
+  - id: capped
+    prompt: "hola"
+    skills: [code-review]
+    mcp: mcp.json
+    allowed_tools: [read, grep]
+    denied_tools: [bash]
+`;
+  const run = await runWorkflow(loaded(yaml, tmp), {
+    cwd: tmp,
+    runsDir,
+    aiRunner: stubRunner(log),
+  });
+  assert.equal(run.status, "completed");
+  const req = log[0];
+  assert.deepEqual(req.skills, ["code-review"]);
+  assert.equal(req.mcp, "mcp.json");
+  assert.deepEqual(req.allowedTools, ["read", "grep"]);
+  assert.deepEqual(req.deniedTools, ["bash"]);
+  assert.equal(req.workflowDir, tmp);
+  assert.equal(req.repoRoot, tmp);
+  assert.ok(req.scopeDir.includes("scopes"));
+});
