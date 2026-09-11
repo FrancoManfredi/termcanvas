@@ -33,6 +33,8 @@ import {
 } from "./nodes/deterministic";
 import { createOpencodeAiRunner, type AiNodeRunner } from "./nodes/ai";
 import { runShellCommand } from "./nodes/shell";
+import { loadWorkflow } from "./loader";
+import { expandIncludes } from "./expand";
 
 export interface LoadedWorkflow {
   def: WorkflowDefinition;
@@ -69,12 +71,12 @@ export interface RunWorkflowOptions {
   repoRoot?: string;
   /** Handler de gates humanos. Sin handler, un gate falla el nodo. */
   onApproval?: (request: ApprovalRequest) => Promise<ApprovalResponse>;
+  /** Profundidad de anidamiento de child workflows (máx 3). */
+  depth?: number;
 }
 
 const PHASE_BY_BODY: Record<string, string> = {
   loop_group: "Fase 3",
-  include: "Fase 3",
-  workflow: "Fase 3",
 };
 
 function nowIso(): string {
@@ -130,9 +132,17 @@ export async function runWorkflow(
   loaded: LoadedWorkflow,
   opts: RunWorkflowOptions,
 ): Promise<WorkflowRun> {
+  if ((opts.depth ?? 0) > 3) {
+    throw new WorkflowValidationError(
+      "workflow anidado: profundidad máxima 3 excedida",
+    );
+  }
   const def = loaded.def;
-  validateWorkflow(def);
   const inputs = resolveInputs(def, opts.inputs);
+  const expanded = expandIncludes(def, (name) =>
+    loadWorkflow(name, { repoRoot: opts.repoRoot ?? opts.cwd }),
+  );
+  validateWorkflow(expanded.def);
   const store = new WorkflowRunStore(opts.runsDir);
   const run = store.create({
     workflow: def.name,
@@ -164,11 +174,14 @@ export async function runWorkflow(
     opts.onEvent?.(event);
   };
 
-  const graph = buildLayers(def.nodes);
+  const graph = buildLayers(expanded.def.nodes);
   let cancelledReason: string | null = null;
   run.status = "running";
   store.save(run);
-  emit("run_started", undefined, { nodes: def.nodes.length, args: run.args });
+  emit("run_started", undefined, {
+    nodes: expanded.def.nodes.length,
+    args: run.args,
+  });
 
   const baseEnv: NodeJS.ProcessEnv = { ...process.env, ...(opts.env ?? {}) };
   const aiRunner = opts.aiRunner ?? createOpencodeAiRunner();
@@ -295,9 +308,32 @@ export async function runWorkflow(
     return lastResult;
   };
 
-  const buildVarCtx = (): VarContext => ({
+  const resolveOverrides = (nodeId?: string): Record<string, unknown> => {
+    const raw = nodeId ? expanded.inputOverrides[nodeId] : undefined;
+    if (!raw) return inputs;
+    const base: VarContext = {
+      args: run.args,
+      inputs,
+      nodes: run.nodes,
+      artifactsDir: artifacts.artifactsDir,
+      stateDir: artifacts.stateDir,
+      workflowName: def.name,
+      runId: run.id,
+    };
+    const resolved: Record<string, unknown> = { ...inputs };
+    for (const [key, value] of Object.entries(raw)) {
+      try {
+        resolved[key] = resolveValue(value, base);
+      } catch {
+        resolved[key] = value;
+      }
+    }
+    return resolved;
+  };
+
+  const buildVarCtx = (nodeId?: string): VarContext => ({
     args: run.args,
-    inputs,
+    inputs: resolveOverrides(nodeId),
     nodes: run.nodes,
     artifactsDir: artifacts.artifactsDir,
     stateDir: artifacts.stateDir,
@@ -305,9 +341,9 @@ export async function runWorkflow(
     runId: run.id,
   });
 
-  const evalCtx = {
-    resolveExpression: (expr: string) => resolveValue(expr, buildVarCtx()),
-  };
+  const evalCtxFor = (nodeId: string) => ({
+    resolveExpression: (expr: string) => resolveValue(expr, buildVarCtx(nodeId)),
+  });
 
   const executeApproval = async (
     node: WorkflowNode,
@@ -376,6 +412,151 @@ export async function runWorkflow(
     }
   };
 
+  const runBounded = async <T>(
+    items: unknown[],
+    limit: number,
+    fn: (item: unknown, index: number) => Promise<T>,
+  ): Promise<T[]> => {
+    const results: T[] = new Array(items.length);
+    let cursor = 0;
+    const width = Math.max(1, Math.min(limit, items.length));
+    await Promise.all(
+      Array.from({ length: width }, async () => {
+        for (;;) {
+          const index = cursor;
+          cursor += 1;
+          if (index >= items.length) return;
+          results[index] = await fn(items[index], index);
+        }
+      }),
+    );
+    return results;
+  };
+
+  const runChildWorkflow = async (
+    parentNode: WorkflowNode,
+    childName: string,
+    childInputs: Record<string, unknown>,
+  ): Promise<NodeExecutionResult> => {
+    let childLoaded: LoadedWorkflow;
+    try {
+      childLoaded = loadWorkflow(childName, {
+        repoRoot: opts.repoRoot ?? opts.cwd,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new NodeExecutionError(
+        parentNode.id,
+        `workflow hijo "${childName}": ${message.slice(0, 300)}`,
+      );
+    }
+    const childRun = await runWorkflow(childLoaded, {
+      cwd: opts.cwd,
+      runsDir: opts.runsDir,
+      inputs: childInputs,
+      args: run.args,
+      env: opts.env,
+      repoRoot: opts.repoRoot,
+      aiRunner: opts.aiRunner,
+      onApproval: opts.onApproval,
+      signal: opts.signal,
+      depth: (opts.depth ?? 0) + 1,
+    });
+    if (childRun.status === "failed") {
+      throw new NodeExecutionError(
+        parentNode.id,
+        `workflow hijo "${childName}" falló: ${(childRun.error ?? "").slice(0, 300)}`,
+      );
+    }
+    if (childRun.status === "cancelled") {
+      throw new NodeCancelSignal(
+        parentNode.id,
+        `workflow hijo "${childName}" cancelado: ${childRun.error ?? ""}`,
+      );
+    }
+    let output = childRun.result?.output;
+    let outputJson = childRun.result?.outputJson;
+    if (output === undefined) {
+      const completed = Object.values(childRun.nodes).filter(
+        (state) => state.status === "completed",
+      );
+      const last = completed[completed.length - 1];
+      output = last?.output ?? "";
+      outputJson = last?.outputJson;
+    }
+    const result: NodeExecutionResult = { output };
+    if (outputJson !== undefined) result.outputJson = outputJson;
+    return result;
+  };
+
+  const executeWorkflowNode = async (
+    node: WorkflowNode,
+    varCtx: VarContext,
+  ): Promise<NodeExecutionResult> => {
+    const childName = node.workflow;
+    if (!childName) {
+      throw new NodeExecutionError(node.id, "nodo workflow sin nombre");
+    }
+    const baseInputs = node.with
+      ? (resolveValue(node.with, varCtx) as Record<string, unknown>)
+      : {};
+    if (!node.fan_out) {
+      return runChildWorkflow(node, childName, baseInputs);
+    }
+    const fanOut = node.fan_out;
+    const itemsRaw = resolveValue(fanOut.items, varCtx);
+    let items: unknown[] = [];
+    if (Array.isArray(itemsRaw)) {
+      items = itemsRaw;
+    } else {
+      try {
+        const parsed = JSON.parse(String(itemsRaw));
+        if (Array.isArray(parsed)) items = parsed;
+      } catch {
+        items = [];
+      }
+    }
+    if (items.length === 0) {
+      throw new NodeExecutionError(
+        node.id,
+        "fan_out.items no resolvió a un array no vacío",
+      );
+    }
+    const outcomes = await runBounded(
+      items,
+      fanOut.max_parallel,
+      async (item) => {
+        try {
+          const child = await runChildWorkflow(node, childName, {
+            ...baseInputs,
+            [fanOut.as]: item,
+          });
+          return { ok: true as const, value: child.outputJson ?? child.output };
+        } catch (error) {
+          return {
+            ok: false as const,
+            error: error instanceof Error ? error.message : String(error),
+          };
+        }
+      },
+    );
+    if (fanOut.join === "all_success") {
+      const failure = outcomes.find((outcome) => !outcome.ok);
+      if (failure && !failure.ok) {
+        throw new NodeExecutionError(
+          node.id,
+          `fan_out con hijo fallido: ${failure.error.slice(0, 300)}`,
+        );
+      }
+    }
+    const values = outcomes.map((outcome) =>
+      outcome.ok
+        ? outcome.value
+        : { archon_failed: true, error: outcome.error },
+    );
+    return { output: JSON.stringify(values), outputJson: values };
+  };
+
   const executeBody = (
     node: WorkflowNode,
     varCtx: VarContext,
@@ -407,6 +588,9 @@ export async function runWorkflow(
     }
     if (node.approval !== undefined) {
       return executeApproval(node, varCtx);
+    }
+    if (node.workflow !== undefined) {
+      return executeWorkflowNode(node, varCtx);
     }
     if (node.bash !== undefined) {
       return executeBash(resolveTemplate(node.bash, varCtx), nodeCtx);
@@ -448,7 +632,7 @@ export async function runWorkflow(
       const original = states[node.id];
       let whenTrue = false;
       try {
-        whenTrue = evaluateWhen(node.when, evalCtx);
+        whenTrue = evaluateWhen(node.when, evalCtxFor(node.id));
       } catch {
         whenTrue = false;
       }
@@ -496,7 +680,7 @@ export async function runWorkflow(
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       state.attempts = attempt;
       try {
-        const result = await executeBody(node, buildVarCtx());
+        const result = await executeBody(node, buildVarCtx(node.id));
         state.status = "completed";
         state.finishedAt = nowIso();
         state.output = result.output;
