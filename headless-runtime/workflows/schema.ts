@@ -215,6 +215,32 @@ const NodeBodySchema = NodeBaseSchema.extend({
       message: "fan_out requiere un nodo workflow: o include:",
     });
   }
+  if (node.loop) {
+    const hasPrompt = node.loop.prompt !== undefined;
+    const hasCommand = node.loop.command !== undefined;
+    if (hasPrompt === hasCommand) {
+      ctx.addIssue({
+        code: "custom",
+        message: "loop requiere exactamente uno de prompt|command",
+      });
+    }
+    const hasUntil =
+      node.loop.until !== undefined ||
+      node.loop.until_bash !== undefined ||
+      node.loop.until_field !== undefined;
+    if (!hasUntil) {
+      ctx.addIssue({
+        code: "custom",
+        message: "loop requiere al menos uno de until|until_bash|until_field",
+      });
+    }
+    if (node.loop.until_field !== undefined && node.output_format === undefined) {
+      ctx.addIssue({
+        code: "custom",
+        message: "until_field requiere que el nodo declare output_format",
+      });
+    }
+  }
 });
 
 export const NodeSchema: z.ZodType<WorkflowNode> = NodeBodySchema;

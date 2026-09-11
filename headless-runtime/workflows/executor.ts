@@ -32,6 +32,7 @@ import {
   type NodeRunContext,
 } from "./nodes/deterministic";
 import { createOpencodeAiRunner, type AiNodeRunner } from "./nodes/ai";
+import { runShellCommand } from "./nodes/shell";
 
 export interface LoadedWorkflow {
   def: WorkflowDefinition;
@@ -57,7 +58,6 @@ export interface RunWorkflowOptions {
 
 const PHASE_BY_BODY: Record<string, string> = {
   approval: "Fase 3",
-  loop: "Fase 3",
   loop_group: "Fase 3",
   include: "Fase 3",
   workflow: "Fase 3",
@@ -194,6 +194,7 @@ export async function runWorkflow(
   const runAiNode = (
     node: WorkflowNode,
     prompt: string,
+    sessionOverride?: string | null,
   ): Promise<NodeExecutionResult> =>
     aiRunner({
       runId: run.id,
@@ -206,7 +207,10 @@ export async function runWorkflow(
       outputFormat: node.output_format,
       timeoutMs: node.timeout,
       signal: opts.signal,
-      sessionId: resolveNodeSession(node),
+      sessionId:
+        sessionOverride !== undefined
+          ? sessionOverride
+          : resolveNodeSession(node),
       skills: node.skills,
       mcp: node.mcp,
       allowedTools: node.allowed_tools,
@@ -215,6 +219,67 @@ export async function runWorkflow(
       workflowDir: loaded.dir,
       scopeDir: path.join(artifacts.artifactsDir, "scopes", node.id),
     });
+
+  const executeLoop = async (
+    node: WorkflowNode,
+    varCtx: VarContext,
+  ): Promise<NodeExecutionResult> => {
+    const loop = node.loop;
+    if (!loop) throw new NodeExecutionError(node.id, "nodo loop sin body");
+    let prevOutput = "";
+    let sessionId = resolveNodeSession(node);
+    let lastResult: NodeExecutionResult = { output: "" };
+    for (let iteration = 1; iteration <= loop.max_iterations; iteration += 1) {
+      const iterationVars: VarContext = { ...varCtx, loopPrevOutput: prevOutput };
+      const promptSource =
+        loop.prompt !== undefined
+          ? loop.prompt
+          : readCommandFile(loaded, loop.command ?? "");
+      const prompt = resolveTemplate(promptSource, iterationVars);
+      const result = await runAiNode(
+        node,
+        prompt,
+        loop.fresh_context ? null : sessionId,
+      );
+      lastResult = result;
+      if (!loop.fresh_context && result.sessionId) sessionId = result.sessionId;
+      let outputJson = result.outputJson;
+      if (outputJson === undefined && node.output_format) {
+        try {
+          outputJson = JSON.parse(result.output);
+        } catch {
+          outputJson = undefined;
+        }
+      }
+      if (outputJson !== undefined) lastResult.outputJson = outputJson;
+      prevOutput = result.output;
+
+      const untilHit = loop.until ? result.output.includes(loop.until) : false;
+      let fieldHit = false;
+      if (loop.until_field) {
+        const record = outputJson as Record<string, unknown> | undefined;
+        fieldHit = record?.[loop.until_field] === true;
+      }
+      let bashHit = false;
+      if (loop.until_bash) {
+        const command = resolveTemplate(loop.until_bash, iterationVars);
+        const shellResult = await runShellCommand(command, {
+          cwd: opts.cwd,
+          env: {
+            ...baseEnv,
+            ARTIFACTS_DIR: artifacts.artifactsDir,
+            STATE_DIR: artifacts.stateDir,
+            LOOP_PREV_OUTPUT: result.output,
+          },
+          timeoutMs: 60_000,
+          signal: opts.signal,
+        });
+        bashHit = shellResult.exitCode === 0;
+      }
+      if (untilHit || fieldHit || bashHit) break;
+    }
+    return lastResult;
+  };
 
   const buildVarCtx = (): VarContext => ({
     args: run.args,
@@ -255,6 +320,9 @@ export async function runWorkflow(
     if (node.command !== undefined) {
       const commandText = readCommandFile(loaded, node.command);
       return runAiNode(node, resolveTemplate(commandText, varCtx));
+    }
+    if (node.loop !== undefined) {
+      return executeLoop(node, varCtx);
     }
     if (node.bash !== undefined) {
       return executeBash(resolveTemplate(node.bash, varCtx), nodeCtx);

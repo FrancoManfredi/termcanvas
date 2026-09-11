@@ -16,6 +16,8 @@ export interface VarContext {
   runId: string;
   rejectionReason?: string;
   loopPrev?: Record<string, unknown>;
+  /** Salida textual de la iteración anterior de un `loop` escalar. */
+  loopPrevOutput?: string;
 }
 
 const VAR_PATTERN = /\$([A-Za-z_][A-Za-z0-9_]*)((?:\.[A-Za-z0-9_-]+)*)/g;
@@ -78,6 +80,11 @@ function resolveRootPath(
       return ctx.runId;
     case "REJECTION_REASON":
       return ctx.rejectionReason ?? "";
+    case "LOOP_PREV_OUTPUT":
+      if (segments.length > 0) {
+        throw new VariablesError(`${expression}: $LOOP_PREV_OUTPUT no tiene campos`);
+      }
+      return ctx.loopPrevOutput ?? "";
     case "INPUTS": {
       const [name, ...rest] = segments;
       if (!name) {
