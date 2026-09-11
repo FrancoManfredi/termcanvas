@@ -1,0 +1,30 @@
+# Smoke test del engine: cadena determinística bash -> wait -> bash.
+# Se usa en los tests de Fase 0 y como demo del formato.
+name: smoke
+description: Smoke test del workflow engine con nodos determinísticos
+tags:
+  - smoke
+nodes:
+  - id: plan
+    bash: |
+      node -e "process.stdout.write('plan')"
+
+  - id: implement
+    depends_on: [plan]
+    bash: |
+      node -e "process.stdout.write('impl:' + '$plan.output')"
+
+  - id: verify
+    depends_on: [implement]
+    bash: |
+      node -e "const out = '$implement.output'; if (out.includes('impl:')) process.stdout.write('verified'); else { console.error('salida inesperada: ' + out); process.exit(1); }"
+
+  - id: settle
+    depends_on: [verify]
+    wait:
+      duration_ms: 5
+
+  - id: done
+    depends_on: [settle]
+    bash: |
+      node -e "process.stdout.write('done:' + '$settle.output')"
