@@ -71,6 +71,8 @@ export interface RunWorkflowOptions {
   repoRoot?: string;
   /** Handler de gates humanos. Sin handler, un gate falla el nodo. */
   onApproval?: (request: ApprovalRequest) => Promise<ApprovalResponse>;
+  /** Callback inmediato con el run recién creado (para runtimes en background). */
+  onRunCreated?: (run: WorkflowRun) => void;
   /** Profundidad de anidamiento de child workflows (máx 3). */
   depth?: number;
 }
@@ -151,6 +153,7 @@ export async function runWorkflow(
     sourcePath: loaded.sourcePath,
   });
   const artifacts: RunArtifacts = store.artifactsFor(run.id);
+  opts.onRunCreated?.(run);
   const frozenDir = path.join(artifacts.runDir, "workflow-source");
   fs.mkdirSync(frozenDir, { recursive: true });
   if (fs.existsSync(loaded.sourcePath)) {
@@ -913,6 +916,15 @@ export async function runWorkflow(
           state.error = error.message;
           cancelledReason = error.message;
           emit("node_failed", node.id, { cancelled: true, reason: error.message });
+          store.save(run);
+          return;
+        }
+        if (opts.signal?.aborted) {
+          state.status = "cancelled";
+          state.finishedAt = nowIso();
+          state.error = "cancelado";
+          cancelledReason = "cancelado";
+          emit("node_failed", node.id, { cancelled: true, reason: "cancelado" });
           store.save(run);
           return;
         }
