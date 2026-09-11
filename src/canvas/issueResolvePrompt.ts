@@ -1,5 +1,6 @@
 import { buildRepoContextSection, buildRequirementsSection, buildArchitectureDecisionsSection } from "../utils/repoContext";
 import { specializedSkillName } from "../skills/registry";
+import { TAG_CANVAS_RESOLVE, withPhaseTag } from "../../headless-runtime/llm/phaseTags";
 
 export type IssueResolvePromptMode = "new" | "resume";
 
@@ -113,5 +114,10 @@ export function buildIssueResolvePrompt(
     ...buildCategorySkillSection(input.category),
     ...buildSharedSuffix(input),
   ];
-  return sections.join("\n");
+  // Etiqueta humana de fase (primera línea): new vs resume visibles en la sesión.
+  const tag =
+    mode === "resume"
+      ? "[FASE: CANVAS resolver (retomar) — Continuación del trabajo sobre el issue]"
+      : TAG_CANVAS_RESOLVE;
+  return withPhaseTag(sections.join("\n"), tag);
 }

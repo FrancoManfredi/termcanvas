@@ -1,4 +1,5 @@
 import { buildRepoContextSection, buildRequirementsSection, buildArchitectureDecisionsSection } from "../utils/repoContext";
+import { TAG_CANVAS_FIX, withPhaseTag } from "../../headless-runtime/llm/phaseTags";
 
 export interface IssueFixPromptInput {
   issueNumber: number;
@@ -49,7 +50,7 @@ export function buildIssueFixPrompt(input: IssueFixPromptInput): string {
         `no corras gh para obtener estos datos, ya te los doy: ${input.reviewContext}`,
       ]
     : [];
-  return [
+  const body = [
     `# Implementar fix — issue #${input.issueNumber} — ${input.title}`,
     "",
     `El reviewer pidió cambios en tu solución. Tu trabajo: aplicar los fixes pedidos y actualizar ESE MISMO PR.`,
@@ -95,4 +96,6 @@ export function buildIssueFixPrompt(input: IssueFixPromptInput): string {
     `- Prefijá cada paso relevante con [fix-${input.issueNumber}] para poder filtrar tu trazabilidad.`,
     `- Si no hay nada que corregir porque la reseña quedó desactualizada, avisá con gh pr comment en vez de inventar cambios.`,
   ].join("\n");
+  // Etiqueta humana de fase (primera línea): fix pedido por el reviewer.
+  return withPhaseTag(body, TAG_CANVAS_FIX);
 }

@@ -1,0 +1,15 @@
+{
+  "id": "F13",
+  "version": "1.0.0",
+  "title": "Prompt con JSON escaping, backslashes y emoji",
+  "wave": "Ola 13 — Prompt con JSON escaping, backslashes y emoji (PowerShell robustez)",
+  "blockedBy": ["F02"],
+  "timeoutMs": 2000,
+  "criterio": "Valida que Factory maneja correctamente prompt con caracteres que rompen JSON si no se escapan: comillas dobles, backslashes Windows, saltos de línea y emoji. Gap: nunca probamos prompt con \" y \\ y 😀, que es el caso real de `curl.exe -d \"{\\\"prompt\\\":\\\"...\\\"}\"` mal escapado. POST /factory/jobs con {prompt: like(\"He said \\\"hola\\\" y path C:\\\\tmp\\\\a\\\\b\\nlínea con emoji 😀 y →\"), worktree: like(\"C:\\\\tmp\\\\playground-F13-escape\"), phase: like(\"diagnosisLlm\")} → 201 {id: regex ^job-, path: regex Windows, job:{state:\"queued\", prompt: regex \"He said\"}} (headers plain, Given \"factory is healthy\") + GET /factory/jobs/job-f13-escape01 → 200 {id: regex ^job-f13-escape01$, prompt: regex \"He said.*hola.*😀\" (persistencia idéntica sin mojibake ni truncamiento, contiene \" y \\ y 😀 y \\n), worktree: regex \"playground-F13-escape\", phase: type, state: regex ^(queued|running|done|error)$, logs: type} (Given \"a job with escaped prompt exists\" con id job-f13-escape01). PactV3 MatchersV3, Windows only. factoryServer debe almacenar prompt tal cual via JSON.parse y devolverlo via JSON.stringify sin perder escaping.",
+  "pact": "software-testing-playground-v2/pacts/playground-F13-FactoryProvider.json",
+  "verifier": {
+    "kind": "pact",
+    "provider": "FactoryProvider",
+    "consumer": "playground-F13"
+  }
+}

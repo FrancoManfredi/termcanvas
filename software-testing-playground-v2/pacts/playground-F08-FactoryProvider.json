@@ -1,0 +1,268 @@
+{
+  "consumer": {
+    "name": "playground-F08"
+  },
+  "interactions": [
+    {
+      "description": "a request to list multiple factory jobs (concurrency)",
+      "providerStates": [
+        {
+          "name": "multiple jobs exist"
+        }
+      ],
+      "request": {
+        "headers": {
+          "Accept": "application/json"
+        },
+        "method": "GET",
+        "path": "/factory/jobs"
+      },
+      "response": {
+        "body": {
+          "jobs": [
+            {
+              "createdAt": "2026-05-13T14:22:10.123Z",
+              "dir": "C:\\tmp\\playground-F08-abc\\.agents\\factory\\job-f08-a1b2c3d4",
+              "id": "job-f08-a1b2c3d4",
+              "logsCount": 1,
+              "phase": "diagnosisLlm",
+              "prompt": "playground-F08-prompt",
+              "state": "queued",
+              "updatedAt": "2026-05-13T14:22:10.123Z",
+              "worktree": "C:\\tmp\\playground-F08-abc"
+            },
+            {
+              "createdAt": "2026-05-13T14:22:10.123Z",
+              "dir": "C:\\tmp\\playground-F08-abc\\.agents\\factory\\job-f08-a1b2c3d4",
+              "id": "job-f08-a1b2c3d4",
+              "logsCount": 1,
+              "phase": "diagnosisLlm",
+              "prompt": "playground-F08-prompt",
+              "state": "queued",
+              "updatedAt": "2026-05-13T14:22:10.123Z",
+              "worktree": "C:\\tmp\\playground-F08-abc"
+            }
+          ]
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.jobs": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 2
+                }
+              ]
+            },
+            "$.jobs[*].createdAt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^\\d{4}-\\d{2}-\\d{2}T.*Z$"
+                },
+                {
+                  "match": "regex",
+                  "regex": "^\\d{4}-\\d{2}-\\d{2}T.*Z$"
+                }
+              ]
+            },
+            "$.jobs[*].dir": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^[A-Z]:\\\\.*\\.agents\\\\factory\\\\job-.*"
+                },
+                {
+                  "match": "regex",
+                  "regex": "^[A-Z]:\\\\.*\\.agents\\\\factory\\\\job-.*"
+                }
+              ]
+            },
+            "$.jobs[*].id": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^job-[a-z0-9\\-]+$"
+                },
+                {
+                  "match": "regex",
+                  "regex": "^job-[a-z0-9\\-]+$"
+                }
+              ]
+            },
+            "$.jobs[*].logsCount": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                },
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.jobs[*].phase": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                },
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.jobs[*].prompt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                },
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.jobs[*].state": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^(queued|running|done|error)$"
+                },
+                {
+                  "match": "regex",
+                  "regex": "^(queued|running|done|error)$"
+                }
+              ]
+            },
+            "$.jobs[*].updatedAt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^\\d{4}-\\d{2}-\\d{2}T.*Z$"
+                },
+                {
+                  "match": "regex",
+                  "regex": "^\\d{4}-\\d{2}-\\d{2}T.*Z$"
+                }
+              ]
+            },
+            "$.jobs[*].worktree": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^[A-Z]:\\\\.*"
+                },
+                {
+                  "match": "regex",
+                  "regex": "^[A-Z]:\\\\.*"
+                }
+              ]
+            }
+          }
+        },
+        "status": 200
+      }
+    },
+    {
+      "description": "a request for health after jobs exist",
+      "providerStates": [
+        {
+          "name": "factory is healthy after jobs"
+        }
+      ],
+      "request": {
+        "headers": {
+          "Accept": "application/json"
+        },
+        "method": "GET",
+        "path": "/factory/health"
+      },
+      "response": {
+        "body": {
+          "queue": {
+            "pending": 1,
+            "running": 0
+          },
+          "ts": "2026-05-13T14:22:10.123Z",
+          "uptime": 12345,
+          "version": "local"
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.queue.pending": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$.queue.running": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$.ts": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$"
+                }
+              ]
+            },
+            "$.uptime": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "integer"
+                }
+              ]
+            },
+            "$.version": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        },
+        "status": 200
+      }
+    }
+  ],
+  "metadata": {
+    "pact-js": {
+      "version": "14.0.0"
+    },
+    "pactRust": {
+      "ffi": "0.4.28",
+      "models": "1.3.5"
+    },
+    "pactSpecification": {
+      "version": "3.0.0"
+    }
+  },
+  "provider": {
+    "name": "FactoryProvider"
+  }
+}

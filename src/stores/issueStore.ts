@@ -10,6 +10,22 @@ export interface IssueNodeData {
   body: string;
   url: string;
   labels: { name: string; color?: string }[];
+  /**
+   * Raw GitHub issue `state` (`OPEN` / `CLOSED`) from the fetchIssues
+   * GraphQL query. Additive and optional: nodes persisted before this
+   * field existed simply omit it (treated as unknown, never inferred).
+   * Flows in automatically via the `{ ...raw }` spread in
+   * XyFlowCanvas syncIssuesToCanvas / handleRefreshIssues — no hydration
+   * code change needed, this only types what was already carried.
+   */
+  state?: string;
+  /**
+   * Raw GitHub issue author from the fetchIssues GraphQL query: either a
+   * login string or the `{ login, avatarUrl }` object straight from the
+   * spread. Additive and optional: legacy nodes omit it (honest "" in
+   * the warpPanel adapter, never fabricated).
+   */
+  author?: string | { login?: string; avatarUrl?: string } | null;
   x: number;
   y: number;
   [key: string]: unknown;
@@ -34,6 +50,13 @@ interface IssueStore {
   hasIssue: (issueNumber: number) => boolean;
   getAllIssues: () => IssueNodeData[];
   getIssue: (issueNumber: number) => IssueNodeData | undefined;
+  /**
+   * Removes every card whose number is absent from a COMPLETE GitHub fetch.
+   * Only call with a fully-paginated result (`complete !== false`): on a
+   * partial fetch it would delete valid cards. Returns the removed count.
+   * All canvas cards originate from the sync, so absence means stale.
+   */
+  pruneIssuesToNumbers: (keep: readonly number[]) => number;
   updateIssuePosition: (issueNumber: number, x: number, y: number) => void;
   applyPackedLayout: (positions: Map<number, { x: number; y: number }>) => void;
   clearIssues: () => void;
@@ -74,6 +97,35 @@ export const useIssueStore = create<IssueStore>((set, get) => ({
 
   hasIssue: (issueNumber) => {
     return get().issues.has(issueNumber);
+  },
+
+  pruneIssuesToNumbers: (keep) => {
+    const { issues, issueVersion } = get();
+    // Junk (no-array) = no-op: nunca borrar ante entrada ilegible.
+    if (!Array.isArray(keep)) return 0;
+    let wanted: Set<number>;
+    try {
+      wanted = new Set(
+        keep.filter(
+          (n): n is number => typeof n === "number" && Number.isInteger(n) && n > 0,
+        ),
+      );
+    } catch {
+      return 0;
+    }
+    const next = new Map(issues);
+    let removed = 0;
+    for (const num of next.keys()) {
+      if (!wanted.has(num)) {
+        next.delete(num);
+        removed++;
+      }
+    }
+    if (removed > 0) {
+      set({ issues: next, issueVersion: issueVersion + 1 });
+      markDirty();
+    }
+    return removed;
   },
 
   getAllIssues: () => {

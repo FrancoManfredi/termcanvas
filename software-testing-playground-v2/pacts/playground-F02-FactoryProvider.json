@@ -1,0 +1,164 @@
+{
+  "consumer": {
+    "name": "playground-F02"
+  },
+  "interactions": [
+    {
+      "description": "a request to create a job",
+      "providerStates": [
+        {
+          "name": "a valid playground worktree",
+          "params": {
+            "worktree": "C:\\Users\\ESTUDI~1\\AppData\\Local\\Temp\\playground-F02-c26f9e9e"
+          }
+        }
+      ],
+      "request": {
+        "body": {
+          "phase": "diagnosisLlm",
+          "prompt": "playground-F02-c26f9e9e",
+          "worktree": "C:\\Users\\ESTUDI~1\\AppData\\Local\\Temp\\playground-F02-c26f9e9e"
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.phase": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.prompt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.worktree": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        },
+        "method": "POST",
+        "path": "/factory/jobs"
+      },
+      "response": {
+        "body": {
+          "id": "job-m4n5o6p7-q8r9",
+          "job": {
+            "createdAt": "2026-05-13T14:22:10.123Z",
+            "id": "job-m4n5o6p7-q8r9",
+            "phase": "diagnosisLlm",
+            "prompt": "playground-F02-c26f9e9e",
+            "state": "queued",
+            "worktree": "C:\\Users\\ESTUDI~1\\AppData\\Local\\Temp\\playground-F02-c26f9e9e"
+          },
+          "path": "C:\\tmp\\playground-F02-abc123\\.agents\\factory\\job-m4n5o6p7"
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.id": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^job-[a-z0-9\\-]+$"
+                }
+              ]
+            },
+            "$.job.createdAt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^\\d{4}-\\d{2}-\\d{2}T.*Z$"
+                }
+              ]
+            },
+            "$.job.id": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^job-[a-z0-9\\-]+$"
+                }
+              ]
+            },
+            "$.job.phase": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.job.prompt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.job.state": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^queued$"
+                }
+              ]
+            },
+            "$.job.worktree": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.path": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^[A-Z]:\\\\.*\\.agents\\\\factory\\\\job-.*"
+                }
+              ]
+            }
+          }
+        },
+        "status": 201
+      }
+    }
+  ],
+  "metadata": {
+    "pact-js": {
+      "version": "14.0.0"
+    },
+    "pactRust": {
+      "ffi": "0.4.28",
+      "models": "1.3.5"
+    },
+    "pactSpecification": {
+      "version": "3.0.0"
+    }
+  },
+  "provider": {
+    "name": "FactoryProvider"
+  }
+}

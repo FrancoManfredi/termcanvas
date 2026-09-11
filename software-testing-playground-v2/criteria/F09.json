@@ -1,0 +1,15 @@
+{
+  "id": "F09",
+  "version": "1.0.0",
+  "title": "Body malformado y hint DX",
+  "wave": "Ola 9 — Robustez: body malformado y hint DX",
+  "blockedBy": ["F02", "F07"],
+  "timeoutMs": 2000,
+  "criterio": "Robustez: POST /factory/jobs con body malformado (no JSON, ej \"not-json\" crudo) con Content-Type text/plain → 400 {error: 'body must be valid JSON', hint: string, received: string} (DX útil — cubre error curl sin .exe que envía JSON malformado) + GET /factory/jobs/job-zzz-invalid99 → 404 {error: 'job not found'}. Pact con 2 interactions (factory is healthy + no job exists), usa factoryServer real (readBody parseError → 400), sin PTY. Cierra gap F07 que cubría prompt missing pero no JSON inválido.",
+  "pact": "software-testing-playground-v2/pacts/playground-F09-FactoryProvider.json",
+  "verifier": {
+    "kind": "pact",
+    "provider": "FactoryProvider",
+    "consumer": "playground-F09"
+  }
+}

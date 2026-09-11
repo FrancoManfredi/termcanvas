@@ -19,6 +19,7 @@ export class FakePtyManager {
     terminalType: string;
   }> = [];
   readonly writes: Array<{ ptyId: number; text: string }> = [];
+  readonly resizes: Array<{ ptyId: number; cols: number; rows: number }> = [];
   private readonly dataListeners = new Map<number, PtyDataListener[]>();
   private readonly exitListeners = new Map<number, PtyExitListener[]>();
   private readonly outputs = new Map<number, string[]>();
@@ -74,6 +75,10 @@ export class FakePtyManager {
 
   write(ptyId: number, text: string): void {
     this.writes.push({ ptyId, text });
+  }
+
+  resize(ptyId: number, cols: number, rows: number): void {
+    this.resizes.push({ ptyId, cols, rows });
   }
 
   destroy(ptyId: number): void {
@@ -214,6 +219,7 @@ export async function startHeadlessServer(options: {
   serverVersion?: string;
   rateLimit?: number;
   corsOrigins?: string[];
+  ghExec?: import("../headless-runtime/github-lookups.ts").GhExecFn;
 }): Promise<{
   server: HeadlessApiServer;
   port: number;
@@ -244,6 +250,7 @@ export async function startHeadlessServer(options: {
     rateLimit: options.rateLimit,
     corsOrigins: options.corsOrigins,
     serverVersion: options.serverVersion,
+    ghExec: options.ghExec,
   });
 
   const port = await server.start(0, "127.0.0.1");

@@ -332,7 +332,7 @@ export class ApiServer {
     execFileSync(
       "git",
       buildGitWorktreeAddArgs(branch, resolvedWorktree, base),
-      { cwd: repo, encoding: "utf-8" },
+      { windowsHide: true, cwd: repo, encoding: "utf-8" },
     );
 
     const worktrees = await this.syncRepoWorktrees(repo);
@@ -365,7 +365,7 @@ export class ApiServer {
     const args = force
       ? buildGitWorktreeRemoveArgs(resolvedWorktree)
       : ["worktree", "remove", resolvedWorktree];
-    execFileSync("git", args, { cwd: repo, encoding: "utf-8" });
+    execFileSync("git", args, { windowsHide: true, cwd: repo, encoding: "utf-8" });
 
     const worktrees = await this.syncRepoWorktrees(repo);
     return { ok: true, path: resolvedWorktree, worktrees };
@@ -373,7 +373,7 @@ export class ApiServer {
 
   private getCurrentBranch(repoPath: string): string {
     try {
-      return execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+      return execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], { windowsHide: true,
         cwd: repoPath,
         encoding: "utf-8",
         stdio: ["ignore", "pipe", "ignore"],

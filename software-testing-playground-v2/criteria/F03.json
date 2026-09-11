@@ -1,0 +1,16 @@
+{
+  "id": "F03",
+  "version": "1.0.0",
+  "title": "Worker + logs vivos (SSE)",
+  "wave": "Ola 3 — Worker + logs vivos + SSE (hybrid)",
+  "blockedBy": ["F02"],
+  "timeoutMs": 6500,
+  "criterio": "Tras POST /factory/jobs, con worker real, el job debe pasar queued→running→done con logs.ndjson creciendo en vivo, result.json parseable, .done vacío, y SSE GET /factory/jobs/:id/events streammeando data: { line, ts }. Pact híbrido: Pact cubre polling GET /jobs/:id + handshake SSE, helper fuera de Pact cubre stream vivo (ver sseHelper.ts).",
+  "pact": "software-testing-playground-v2/pacts/playground-F03-FactoryProvider.json",
+  "verifier": {
+    "kind": "pact-hybrid",
+    "provider": "FactoryProvider",
+    "consumer": "playground-F03",
+    "hybridNote": "Pact valida handshake SSE (status 200 + Content-Type text/event-stream), no stream vivo. Stream se valida con collectSse() fuera de Pact."
+  }
+}

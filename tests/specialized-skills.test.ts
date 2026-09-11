@@ -77,6 +77,21 @@ test("categoryIdFromLabels: lee cat:<id>, ignora inválidas y ausentes", () => {
   assert.equal(categoryIdFromLabels(undefined), null);
 });
 
+test("categoryIdFromLabels: never throws on legacy persisted shapes", () => {
+  // Regression: `(labels ?? []) is not iterable` crashed on non-array
+  // persisted payloads (`??` only guards null/undefined). Non-arrays
+  // normalize to null; junk entries are skipped, never dereferenced.
+  assert.equal(categoryIdFromLabels("cat:seguridad"), null);
+  assert.equal(categoryIdFromLabels({ nodes: [{ name: "cat:seguridad" }] }), null);
+  assert.equal(categoryIdFromLabels(42), null);
+  assert.equal(categoryIdFromLabels(null), null);
+  assert.equal(
+    categoryIdFromLabels([null, 42, { name: 7 }, { name: "cat:seguridad" }]),
+    "seguridad",
+  );
+  assert.equal(categoryIdFromLabels([null, "bug", {}]), null);
+});
+
 test("renderSkillMd: frontmatter válido con name + description", () => {
   const skill = skillForCategory("seguridad")!;
   const md = renderSkillMd(skill);

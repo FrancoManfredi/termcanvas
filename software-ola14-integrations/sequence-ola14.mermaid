@@ -1,0 +1,41 @@
+sequenceDiagram
+    autonumber
+    participant Ticker as AutomationTicker<br/>(1× setInterval tickMs=30s)
+    participant Svc as AutomationService<br/>(tickOnce)
+    participant Eng as TriggerEngine<br/>(pure, no I/O)
+    participant Store as AutomationStore<br/>(factory/.automations.json, cap 200)
+    participant Jobs as jobs/jobCreate<br/>(single writer jobs)
+    participant Notif as notify/notifications<br/>(single writer .notifications.json)
+    participant Integ as IntegrationService<br/>+ MockAdapter
+    participant UI as Automations/IntegrationsPanel<br/>(reuse polls 2.5/5/30s)
+
+    Ticker->>Svc: tickOnce(now)
+    Svc->>Svc: automations.enabled? tickMs==0? → skip (Regla 8)
+    Svc->>Eng: evaluateDue(triggers, states, now)
+    Eng->>Eng: per trigger: enabled? quota (fires&lt;maxFires)? cooldown over? cron/interval due?
+    Eng-->>Svc: actions[] (0..N, ≤1 per trigger per tick)
+    loop each action
+        Svc->>Store: appendFire({triggerName, at, result: pending…})
+        alt action = create-job
+            Svc->>Jobs: create({prompt from promptRef, triggerRef:{triggerName, firedAt}})
+            Jobs-->>Svc: jobId (pact-id → refused by pact gate, recorded skipped-quota)
+            Svc->>Notif: notify({kind: trigger-fired, workItemId: jobId})
+        else action = notify-integration
+            Svc->>Integ: postNotification({provider:linear, jobId?, title, body})
+            Integ->>Integ: integrations.enabled? mode==mock-local? else refused+issue
+            Integ-->>Svc: MockPostRecord{id}
+            Svc->>Notif: notify({kind: integration-post, body: mock id})
+        end
+        Svc->>Store: appendFire({…result: created|notified, jobId}) + update state (fires++, lastFireAt)
+    end
+    Svc-->>Ticker: TickReport{fired, skipped[]}
+
+    Note over UI: operator sees row → link jobId (2.5s jobs poll)
+
+    rect rgb(240,248,240)
+    Note over Integ,UI: ACK PATH (reuses notification ack; mock reconciles)
+    UI->>Integ: POST /factory/integrations/test-post (manual) → MockPostRecord
+    UI->>Notif: POST /factory/notifications/:id/ack (existing route, untouched)
+    Notif-->>Integ: reconcile (ackNotification(mockId) best-effort, never throws)
+    Integ->>Store: ackAt set + timeline event integration-acked
+    end

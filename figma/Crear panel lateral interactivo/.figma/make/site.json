@@ -1,0 +1,10 @@
+{
+  "description": "Streamline your software development workflow with a web app that offers an infinite canvas for managing Git projects, issues, and terminal sessions.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

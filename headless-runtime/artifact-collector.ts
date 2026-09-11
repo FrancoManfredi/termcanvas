@@ -69,7 +69,8 @@ export class ArtifactCollector {
   ) {
     this.config = config;
     this.s3Client = s3Client ?? null;
-    this.exec = exec ?? ((file, args, opts) => execFileAsync(file, args, opts));
+    // Windows: sin windowsHide cada hijo abre una consola (PowerShell).
+    this.exec = exec ?? ((file, args, opts) => execFileAsync(file, args, { ...opts, windowsHide: true }));
   }
 
   async collectArtifacts(

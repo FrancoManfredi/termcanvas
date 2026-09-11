@@ -1,0 +1,15 @@
+{
+  "id": "F07",
+  "version": "1.0.0",
+  "title": "Manejo de errores 400/404",
+  "wave": "Ola 7 — Manejo de errores 400/404 (DX)",
+  "blockedBy": ["F02"],
+  "timeoutMs": 2000,
+  "criterio": "Contrato de manejo de errores — cubre paths de error críticos para DX que no tenían pact: POST /factory/jobs sin prompt → 400 {error: 'prompt is required', hint: string, received: string} (DX útil en PowerShell) + GET /factory/jobs/:id inexistente → 404 {error: 'job not found'}. Pact con 2 interactions (factory is healthy + no job exists), usa factoryServer real (valida prompt required y 404), sin PTY.",
+  "pact": "software-testing-playground-v2/pacts/playground-F07-FactoryProvider.json",
+  "verifier": {
+    "kind": "pact",
+    "provider": "FactoryProvider",
+    "consumer": "playground-F07"
+  }
+}

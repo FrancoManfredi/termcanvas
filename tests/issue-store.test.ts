@@ -153,3 +153,39 @@ test("useIssueStore hydrateIssues replaces all", async () => {
 
   useIssueStore.getState().clearIssues();
 });
+
+test("useIssueStore pruneIssuesToNumbers removes only absent cards", async () => {
+  const { useIssueStore } = await import("../src/stores/issueStore.ts");
+
+  useIssueStore.getState().clearIssues();
+  const mk = (n: number) => ({
+    issueId: `test-${n}`,
+    projectId: "p1",
+    worktreeId: "w1",
+    issueNumber: n,
+    title: `Issue ${n}`,
+    body: "",
+    url: `https://github.com/test/test/issues/${n}`,
+    labels: [],
+    x: 0,
+    y: 0,
+  });
+  useIssueStore.getState().addIssue(mk(1));
+  useIssueStore.getState().addIssue(mk(2));
+  useIssueStore.getState().addIssue(mk(3));
+
+  assert.equal(useIssueStore.getState().pruneIssuesToNumbers([1, 3]), 1);
+  assert.equal(useIssueStore.getState().hasIssue(2), false);
+  assert.equal(useIssueStore.getState().hasIssue(1), true);
+  assert.equal(useIssueStore.getState().hasIssue(3), true);
+
+  // No-op cuando nada sobra; junk no borra nada.
+  assert.equal(useIssueStore.getState().pruneIssuesToNumbers([1, 3]), 0);
+  assert.equal(
+    useIssueStore.getState().pruneIssuesToNumbers(null as never),
+    0,
+  );
+  assert.equal(useIssueStore.getState().getAllIssues().length, 2);
+
+  useIssueStore.getState().clearIssues();
+});

@@ -1,0 +1,57 @@
+{
+  "id": "0MTIYQ87JD7BF924D60",
+  "featureId": "F05",
+  "pactFile": "software-testing-playground-v2/pacts/playground-F05-FactoryProvider.json",
+  "pactFileAbsolute": "C:\\Users\\Estudiante UCU\\OneDrive\\Escritorio\\termcanvas\\software-testing-playground-v2\\pacts\\playground-F05-FactoryProvider.json",
+  "providerBaseUrl": "http://127.0.0.1:17680",
+  "consumerResult": {
+    "passed": true,
+    "pactFileExists": true,
+    "pactFileMtime": "2026-09-01T17:36:05.046Z"
+  },
+  "providerResult": {
+    "status": "pass",
+    "rawOutput": "=== HUMAN EVIDENCE (tu declaración) ===\nInvoke-RestMethod POST valid 201 + invalid 400 alternativas 3 en C:\\\\tmp\\\\playground-F05 tildes ó í →\n\n=== AUTO REAL OUTPUT (sistema, --auto) ===\nGET /factory/health → 200 {\"queue\":{\"pending\":0,\"running\":0},\"uptime\":4391171,\"version\":\"local\",\"ts\":\"2026-09-01T17:50:19.602Z\"}\nPOST /factory/jobs gpt-4o → 201 {\"id\":\"job-mtiyq86t-pkv8\",\"path\":\"C:\\\\tmp\\\\playground-auto-f05-valid\\\\.agents\\\\factory\\\\job-mtiyq86t-pkv8\",\"job\":{\"id\":\"job-mtiyq86t-pkv8\",\"prompt\":\"auto-1788285019623\",\"phase\":\"diagnosisLlm\",\"state\":\"queued\",\"worktree\":\"C:\\\\tmp\\\\playground-auto-f05-valid\",\"createdAt\":\"2026-09-01T17:50:19.637Z\"}}\nPOST /factory/jobs gpt-99 → 400 {\"error\":\"model not in catalog\",\"alternatives\":[\"gpt-4o\",\"claude-sonnet-4\",\"gemini-2.5-pro\"],\"receivedModelID\":\"gpt-99\",\"hint\":\"El modelo no existe en el catálogo — usa alternatives. En PowerShell valida con validatePhaseAgainstCatalog antes de POST. Windows: Invoke-RestMethod -UseBasicParsing\"}\n\n=== AUTO success: true ==="
+  },
+  "rawOutput": {
+    "humanChecklist": [
+      "gate valid→201",
+      "gate gpt-99→400",
+      "cero PTY"
+    ],
+    "evidence": "Invoke-RestMethod POST valid 201 + invalid 400 alternativas 3 en C:\\\\tmp\\\\playground-F05 tildes ó í →",
+    "notes": "",
+    "criterionSnapshot": {
+      "id": "F05",
+      "version": "1.1.0",
+      "title": "Planning/Tools vía Factory — gate de modelo (pact gate)",
+      "wave": "Ola 5 — Planning/Tools gate + encolado (pact gate 201 vs 400)",
+      "blockedBy": [
+        "F04"
+      ],
+      "timeoutMs": 3000,
+      "criterio": "Gate POST /factory/jobs valida modelRef antes de encolar: modelo válido (ej gpt-4o con providerID openai) → 201 {id, path, job:{state:'queued'}}; modelo inexistente (ej gpt-99) → 400 {error:'model not in catalog', alternatives:[...]} fail fast sin gastar tokens. Requiere daemon real y validación server-side de modelRef + cli opcional. Cero PTYs y cero localStorage en flujo.",
+      "pact": "software-testing-playground-v2/pacts/playground-F05-FactoryProvider.json",
+      "verifier": {
+        "kind": "pact",
+        "provider": "FactoryProvider",
+        "consumer": "playground-F05"
+      }
+    },
+    "codeHash": "dirty-15fece3e",
+    "providerBaseUrl": "http://127.0.0.1:17680",
+    "providerRealOutput": "GET /factory/health → 200 {\"queue\":{\"pending\":0,\"running\":0},\"uptime\":4391171,\"version\":\"local\",\"ts\":\"2026-09-01T17:50:19.602Z\"}\nPOST /factory/jobs gpt-4o → 201 {\"id\":\"job-mtiyq86t-pkv8\",\"path\":\"C:\\\\tmp\\\\playground-auto-f05-valid\\\\.agents\\\\factory\\\\job-mtiyq86t-pkv8\",\"job\":{\"id\":\"job-mtiyq86t-pkv8\",\"prompt\":\"auto-1788285019623\",\"phase\":\"diagnosisLlm\",\"state\":\"queued\",\"worktree\":\"C:\\\\tmp\\\\playground-auto-f05-valid\",\"createdAt\":\"2026-09-01T17:50:19.637Z\"}}\nPOST /factory/jobs gpt-99 → 400 {\"error\":\"model not in catalog\",\"alternatives\":[\"gpt-4o\",\"claude-sonnet-4\",\"gemini-2.5-pro\"],\"receivedModelID\":\"gpt-99\",\"hint\":\"El modelo no existe en el catálogo — usa alternatives. En PowerShell valida con validatePhaseAgainstCatalog antes de POST. Windows: Invoke-RestMethod -UseBasicParsing\"}",
+    "autoSuccess": true,
+    "autoDetails": "auto_ok",
+    "reason": "human pass — checklist + evidencia OK (CLI)"
+  },
+  "conclusion": "pass",
+  "reason": "human pass — checklist + evidencia OK (CLI)",
+  "commitSha": "dirty-15fece3e",
+  "commitDirty": true,
+  "actor": "humano",
+  "actorDetail": "human:cli:auto",
+  "startedAt": "2026-09-01T17:50:19.530Z",
+  "finishedAt": "2026-09-01T17:50:19.531Z",
+  "durationMs": 0
+}

@@ -416,3 +416,61 @@ test("setPrLabels / setPrConflict: per-PR cycle labels and conflict flags", () =
     "labels must not leak across issues",
   );
 });
+
+test("invalidateIssueReviewState: drops every derived slice for one issue only", () => {
+  resetStore();
+  const store = useIssueReviewStore.getState();
+  // Issue 42 carries the full settled state (the disarm case: PR cached as
+  // OPEN + approved verdict + labels). Issue 7 must stay untouched.
+  store.setPrStatus(42, openPr);
+  store.setOpenPrs(42, [openPr]);
+  store.setReviewVerdict(42, "APPROVED");
+  store.setPrVerdict(42, 99, "APPROVED");
+  store.setIssueLabels(42, ["review:aprobado"]);
+  store.setPrLabels(42, 99, ["review:aprobado"]);
+  store.setConflictStatus(42, true);
+  store.setPrConflict(42, 99, true);
+  store.setOptimisticReady(42);
+  store.setPrStatus(7, openPr);
+  store.setReviewVerdict(7, "CHANGES_REQUESTED");
+
+  useIssueReviewStore.getState().invalidateIssueReviewState(42);
+  const s = useIssueReviewStore.getState();
+
+  assert.equal(s.prsByIssue[42], undefined);
+  assert.equal(s.openPrsByIssue[42], undefined);
+  assert.equal(s.verdictByIssue[42], undefined);
+  assert.equal(s.verdictByPr[42], undefined);
+  assert.equal(s.labelsByIssue[42], undefined);
+  assert.equal(s.labelsByPr[42], undefined);
+  assert.equal(s.conflictByIssue[42], undefined);
+  assert.equal(s.conflictByPr[42], undefined);
+  assert.equal(s.optimisticReadyByIssue[42], undefined);
+  // Neighbors untouched.
+  assert.equal(s.prsByIssue[7], openPr);
+  assert.equal(s.verdictByIssue[7], "CHANGES_REQUESTED");
+});
+
+test("invalidateIssueReviewState: invalid ids are a no-op", () => {
+  resetStore();
+  useIssueReviewStore.getState().setPrStatus(42, openPr);
+  useIssueReviewStore.getState().invalidateIssueReviewState(0);
+  useIssueReviewStore.getState().invalidateIssueReviewState(Number.NaN);
+  assert.equal(useIssueReviewStore.getState().prsByIssue[42], openPr);
+});
+
+test("invalidateIssueReviewState: unlocks a forced lookup for the same issue", () => {
+  resetStore();
+  const calls: Array<[number, string | undefined, boolean | undefined]> = [];
+  useIssueReviewStore
+    .getState()
+    .registerPrLookupHandler((n, p, force) => calls.push([n, p, force]));
+  useIssueReviewStore.getState().setPrStatus(42, openPr);
+
+  // Without invalidation the cached PR suppresses even the forced lookup
+  // only when loading — a forced lookup always re-reads, but the discard
+  // flow also needs the cache gone so an UNFORCED lookup re-checks.
+  useIssueReviewStore.getState().invalidateIssueReviewState(42);
+  useIssueReviewStore.getState().requestPrLookup(42, "/repo");
+  assert.deepEqual(calls[0], [42, "/repo", undefined]);
+});

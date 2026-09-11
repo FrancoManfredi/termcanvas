@@ -1,0 +1,15 @@
+{
+  "id": "F11",
+  "version": "1.0.0",
+  "title": "Unicode y espacio en worktree/prompt",
+  "wave": "Ola 11 — Unicode y espacio en worktree/prompt (Windows robustez)",
+  "blockedBy": ["F02"],
+  "timeoutMs": 2000,
+  "criterio": "Valida que Factory maneja correctamente paths con espacio y caracteres unicode (tildes, ñ, →) sin mojibake, cerrando gap de encoding visto en submitHuman. POST /factory/jobs con prompt \"línea1\\nlínea2 con ñ y → y tildes ó í\" (like unicode + \\n) + worktree \"C:\\\\tmp\\\\playground F11 ñ test\" (like con espacio y ñ) + phase diagnosisLlm → 201 {id regex ^job-, path regex Windows con espacio y \\.agents\\factory, job:{state:\"queued\", prompt regex \"línea1\", worktree regex \"playground F11\"}} + GET /factory/jobs/job-f11-unicode01 → 200 {id regex ^job-f11-unicode01$, prompt regex \"línea1.*ñ\" (persistencia idéntica, no Ã³), worktree regex \"playground F11 ñ\", phase type, state regex ^(queued|running|done|error)$, logs type}. PactV3 MatchersV3 headers plain, Windows only. factoryServer POST almacena prompt/worktree UTF-8 sin truncar ni escape mal (prompt.md utf-8).",
+  "pact": "software-testing-playground-v2/pacts/playground-F11-FactoryProvider.json",
+  "verifier": {
+    "kind": "pact",
+    "provider": "FactoryProvider",
+    "consumer": "playground-F11"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "id": "F10",
+  "version": "1.0.0",
+  "title": "Prompt largo y persistencia",
+  "wave": "Ola 10 — Prompt largo y persistencia en disco",
+  "blockedBy": ["F02"],
+  "timeoutMs": 2000,
+  "criterio": "Valida que Factory no trunca prompt grande (>1K) y que GET lo devuelve idéntico — gap real: nunca probamos prompt >1K. POST /factory/jobs con prompt a*1500 (regex ^a{1000,}$) + worktree C:\\tmp\\playground-F10-large + phase diagnosisLlm → 201 {id regex ^job-, path regex Windows, job:{state:\"queued\", prompt like large}} + GET /factory/jobs/job-f10-large01 → 200 {id regex ^job-f10-large01$, prompt regex ^a{1000,}$ o like large (persistencia idéntica), phase type, state regex ^(queued|running|done|error)$, logs type}. PactV3 MatchersV3 headers plain, Windows only. factoryServer POST acepta prompt sin límite <2MB, GET devuelve prompt completo (resultPreview sí trunca a 120 pero job.prompt completo).",
+  "pact": "software-testing-playground-v2/pacts/playground-F10-FactoryProvider.json",
+  "verifier": {
+    "kind": "pact",
+    "provider": "FactoryProvider",
+    "consumer": "playground-F10"
+  }
+}

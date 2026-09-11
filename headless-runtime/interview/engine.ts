@@ -61,6 +61,7 @@ import { getInterviewHarness as getHarness, closeAllHarnesses, __setTestHarness 
 import { opencodeHarness, setTestClient as setOpencodeTestClient, ensureClient as ensureOpencodeClient, closeInterviewServer as closeOpencodeServer } from "./harness/opencode.ts";
 import type { HarnessInterviewAdapter } from "../../shared/neutral/interview.ts";
 import type { CliCatalogSource } from "../../shared/modelCatalog.ts";
+import { tagInterviewPhase, withPhaseTag } from "../llm/phaseTags.ts";
 
 export { QUESTION_SCHEMA, GAP_CHECK_SCHEMA, ASR_REVIEW_SCHEMA, SYNTHESIS_SCHEMA, QuestionOutputSchema, GapCheckResultSchema, AsrReviewVerdictSchema, SynthesisSchema } from "./schema.ts";
 export type { QuestionOutput, GapCheckResult, GapRecord, AsrReviewVerdict, SynthesisResult } from "./schema.ts";
@@ -1074,11 +1075,13 @@ export async function promptStructuredInner<T>(
     for (let attempt = 0; attempt <= MAX_STRUCTURED_RETRIES; attempt++) {
       ensureNotCancelled();
       try {
+        const phaseTag = tagInterviewPhase(phaseId);
+        const taggedText = phaseTag.length > 0 ? withPhaseTag(text, phaseTag) : text;
         const result = await harness.promptStructuredRaw({
           sessionId: ledger.session_id,
           projectPath: ledger.project_path,
           model: { providerID, modelID, ...(variant ? { variant } : {}) },
-          text,
+          text: taggedText,
           schema,
           timeoutMs,
           signal: callSignal,

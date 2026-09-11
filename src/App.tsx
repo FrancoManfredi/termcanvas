@@ -35,6 +35,11 @@ import { usePinPreloader } from "./hooks/usePinPreloader";
 import { useT } from "./i18n/useT";
 import { loadAllDownloadedFonts } from "./terminal/fontLoader";
 import { startAutoSummaryWatcher } from "./terminal/summaryScheduler";
+import { FactoryLabPage } from "./features/factoryLab/FactoryLabPage";
+import { useFactoryLabStore } from "./stores/factoryLabStore";
+import { WarpPanelShell } from "./features/warpPanel/WarpPanelShell";
+import { HiddenCanvasBoundary } from "./features/warpPanel/HiddenCanvasBoundary";
+import { useWarpPanelStore } from "./features/warpPanel/warpPanelStore";
 import {
   shouldRunAutoSaveBackstop,
   useWorkspaceStore,
@@ -55,6 +60,9 @@ import { resolveTerminalWithRuntimeState } from "./stores/terminalRuntimeStateSt
 import { logSlowRendererPath } from "./utils/devPerf";
 import { selectAllTerminalRuntime } from "./terminal/terminalRuntimeStore";
 import { performContextualSelectAll } from "./utils/contextualSelectAll";
+import { hasHostBridge as hasHostBridgeFn } from "./terminal/ptyTransport";
+import { mirrorHeadlessState } from "./lib/headlessStateMirror";
+
 
 function isSkipRestoreSnapshot(
   snapshot: ReturnType<typeof readWorkspaceSnapshot>,
@@ -79,6 +87,9 @@ function selectFocusedTerminalBuffer(): boolean {
 
 function useWorktreeWatcher() {
   const projectCount = useProjectStore((s) => s.projects.length);
+  // B1: subscribed so the effect re-arms when the panel closes (the
+  // interval body reads the flag via getState — always fresh).
+  const warpPanelActive = useWarpPanelStore((s) => s.warpPanelActive);
 
   useEffect(() => {
     if (!window.termcanvas || projectCount === 0) return;
@@ -122,6 +133,15 @@ function useWorktreeWatcher() {
     };
 
     const rescanAll = () => {
+      // B1: while the Warp panel covers the canvas it owns the live view
+      // (its own 2.5s factory poll). Skip the 5s per-project fs rescan
+      // until the canvas is visible again — the effect re-runs (and
+      // rescans immediately) when the panel closes.
+      try {
+        if (useWarpPanelStore.getState().warpPanelActive) return;
+      } catch {
+        // store unavailable — fall through to the legacy always-scan
+      }
       const { projects } = useProjectStore.getState();
       for (const p of projects) {
         scheduleRescan(p.path);
@@ -138,7 +158,7 @@ function useWorktreeWatcher() {
       clearInterval(interval);
       window.removeEventListener("focus", rescanAll);
     };
-  }, [projectCount]);
+  }, [projectCount, warpPanelActive]);
 }
 
 function useStatePersistence() {
@@ -259,6 +279,16 @@ export function App() {
   useStatePersistence();
   useAutoSave();
   useWorkspaceOpen();
+  // Web-local (F4): sin bridge no hay state.load(); espejamos los
+  // proyectos del daemon headless una vez al arrancar (solo lectura).
+  useEffect(() => {
+    if (hasHostBridgeFn()) return;
+    void mirrorHeadlessState().then((result) => {
+      if (result.ok) {
+        console.info(`[web] mirrored ${result.projects} project(s) from headless`);
+      }
+    });
+  }, []);
   useKeyboardShortcuts();
   const t = useT();
   const composerEnabled = usePreferencesStore((s) => s.composerEnabled);
@@ -268,11 +298,18 @@ export function App() {
   const completionGlowEnabled = usePreferencesStore(
     (s) => s.completionGlowEnabled,
   );
+  // B1: single subscription, read by the background-loop gates below and
+  // the mount branch further down (one subscription, no duplicates).
+  const warpPanelActive = useWarpPanelStore((s) => s.warpPanelActive);
 
   useEffect(() => {
     if (!summaryEnabled) return;
+    // B1: the hidden canvas keeps no visible titles to summarize while the
+    // panel covers it — pause the auto-summary sweep until return (the
+    // effect re-arms on close; in-flight summaries finish, none start).
+    if (warpPanelActive) return;
     return startAutoSummaryWatcher();
-  }, [summaryEnabled]);
+  }, [summaryEnabled, warpPanelActive]);
 
   useEffect(() => initUpdaterListeners(), []);
   useEffect(() => {
@@ -464,13 +501,60 @@ export function App() {
     };
   }, []);
 
+  const factoryLabActive = useFactoryLabStore((s) => s.factoryLabActive);
+  // (warpPanelActive is subscribed once near the top — reused here.)
+  // The hidden canvas tree depends on the Electron host bridge. Without it
+  // (web renderer) its handlers would not exist anyway, so skip mounting it.
+  // In Electron the bridge exists and the tree stays mounted to keep handlers alive.
+  const hasHostBridge =
+    typeof window !== "undefined" &&
+    Boolean((window as unknown as { termcanvas?: unknown }).termcanvas);
+
   return (
     <div className="h-screen w-screen overflow-hidden bg-[var(--bg)] text-[var(--text-primary)]">
       <Toolbar />
-      <LeftPanel />
-      <RightPanel />
-      <CanvasRoot />
-      <BottomToolbar />
+      {factoryLabActive ? (
+        <div className="fixed left-0 right-0 bottom-0 top-11 z-20 flex flex-col bg-[var(--bg)] overflow-hidden" role="main" aria-label="Factory Lab">
+          <FactoryLabPage />
+        </div>
+      ) : warpPanelActive ? (
+        <>
+          {/*
+           * Keep the canvas tree mounted while the Warp panel is active.
+           * XyFlowCanvas registers the issue handlers (resolve/review/merge/
+           * fix/conflict) with cleanup on unmount that resets them to null,
+           * so unmounting here leaves the panel with dead buttons. Hiding
+           * with display:none preserves handlers and scene state. ReactFlow
+           * re-measures via ResizeObserver when visible again, and terminal
+           * positions live in the project store (source of truth), so the
+           * layout restores exactly on return.
+           *
+           * The hidden tree is isolated in HiddenCanvasBoundary (fallback null)
+           * so a host crash from the hidden canvas can never replace the Warp
+           * panel. It is only mounted when the Electron bridge exists.
+           */}
+          {hasHostBridge ? (
+            <HiddenCanvasBoundary>
+              <div style={{ display: "none" }} aria-hidden="true">
+                <LeftPanel />
+                <RightPanel />
+                <CanvasRoot />
+                <BottomToolbar />
+              </div>
+            </HiddenCanvasBoundary>
+          ) : null}
+          <div className="fixed left-0 right-0 bottom-0 top-11 z-20 flex flex-col bg-[var(--bg)] overflow-hidden" role="main" aria-label="Warp Panel">
+            <WarpPanelShell />
+          </div>
+        </>
+      ) : (
+        <>
+          <LeftPanel />
+          <RightPanel />
+          <CanvasRoot />
+          <BottomToolbar />
+        </>
+      )}
       {drawingEnabled && <DrawingPanel />}
       {completionGlowEnabled && <CompletionGlow />}
       <ShortcutHints />

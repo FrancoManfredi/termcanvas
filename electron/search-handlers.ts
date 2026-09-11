@@ -62,7 +62,7 @@ async function searchWithRipgrep(
   for (const d of EXCLUDE_DIRS) args.push("--glob", `!${d}/`);
   args.push("--", query);
 
-  const { stdout } = await execFileAsync("rg", args, {
+  const { stdout } = await execFileAsync("rg", args, { windowsHide: true,
     cwd,
     encoding: "utf-8",
     maxBuffer: 5 * 1024 * 1024,
@@ -86,7 +86,7 @@ async function searchWithGrep(
     "--", query, ".",
   ];
 
-  const { stdout } = await execFileAsync("grep", args, {
+  const { stdout } = await execFileAsync("grep", args, { windowsHide: true,
     cwd,
     encoding: "utf-8",
     maxBuffer: 5 * 1024 * 1024,
@@ -140,7 +140,7 @@ export async function searchSessionContents(
     const { stdout } = await execFileAsync(
       "grep",
       ["-rn", "-i", "-l", "-m", "1", ...excludeArgs, "--include", "*.jsonl", "--", query, claudeDir],
-      {
+      { windowsHide: true,
         encoding: "utf-8",
         maxBuffer: 5 * 1024 * 1024,
         timeout: SEARCH_TIMEOUT,

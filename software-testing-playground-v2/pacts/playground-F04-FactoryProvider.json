@@ -1,0 +1,220 @@
+{
+  "consumer": {
+    "name": "playground-F04"
+  },
+  "interactions": [
+    {
+      "description": "a request to list factory jobs for panel",
+      "providerStates": [
+        {
+          "name": "factory has jobs"
+        }
+      ],
+      "request": {
+        "headers": {
+          "Accept": "application/json"
+        },
+        "method": "GET",
+        "path": "/factory/jobs"
+      },
+      "response": {
+        "body": {
+          "jobs": [
+            {
+              "createdAt": "2026-05-13T14:22:10.123Z",
+              "dir": "C:\\tmp\\playground-F04-abc\\.agents\\factory\\job-f04-panel01",
+              "id": "job-f04-panel01",
+              "logsCount": 1,
+              "phase": "diagnosisLlm",
+              "prompt": "playground-F04-panel-test",
+              "state": "queued",
+              "updatedAt": "2026-05-13T14:22:10.123Z",
+              "worktree": "C:\\tmp\\playground-F04-abc"
+            }
+          ]
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.jobs": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$.jobs[*].createdAt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^\\d{4}-\\d{2}-\\d{2}T.*Z$"
+                }
+              ]
+            },
+            "$.jobs[*].dir": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^[A-Z]:\\\\.*\\.agents\\\\factory\\\\job-.*"
+                }
+              ]
+            },
+            "$.jobs[*].id": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^job-[a-z0-9\\-]+$"
+                }
+              ]
+            },
+            "$.jobs[*].logsCount": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.jobs[*].phase": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.jobs[*].prompt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.jobs[*].state": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^(queued|running|done|error)$"
+                }
+              ]
+            },
+            "$.jobs[*].updatedAt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^\\d{4}-\\d{2}-\\d{2}T.*Z$"
+                }
+              ]
+            },
+            "$.jobs[*].worktree": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^[A-Z]:\\\\.*"
+                }
+              ]
+            }
+          }
+        },
+        "status": 200
+      }
+    },
+    {
+      "description": "a request to cancel a job",
+      "providerStates": [
+        {
+          "name": "a cancellable job exists",
+          "params": {
+            "id": "job-f04-cancel01"
+          }
+        }
+      ],
+      "request": {
+        "body": {},
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "path": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "^\\/factory\\/jobs\\/job-[a-z0-9\\-]+\\/cancel$"
+              }
+            ]
+          }
+        },
+        "method": "POST",
+        "path": "/factory/jobs/job-f04-cancel01/cancel"
+      },
+      "response": {
+        "body": {
+          "id": "job-f04-cancel01",
+          "ok": true,
+          "state": "error"
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.id": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^job-[a-z0-9\\-]+$"
+                }
+              ]
+            },
+            "$.ok": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.state": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^error$"
+                }
+              ]
+            }
+          }
+        },
+        "status": 200
+      }
+    }
+  ],
+  "metadata": {
+    "pact-js": {
+      "version": "14.0.0"
+    },
+    "pactRust": {
+      "ffi": "0.4.28",
+      "models": "1.3.5"
+    },
+    "pactSpecification": {
+      "version": "3.0.0"
+    }
+  },
+  "provider": {
+    "name": "FactoryProvider"
+  }
+}

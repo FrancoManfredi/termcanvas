@@ -1,0 +1,161 @@
+classDiagram
+    class WorkItemStatus {
+        <<enumeration>>
+        Intake
+        Foreman
+        Triage
+        Building
+        Review
+        Complete
+        Cancelled
+    }
+
+    class ModelRef {
+        +string providerID
+        +string modelID
+        +string variant ?
+    }
+
+    class ReviewAxis {
+        <<enumeration>>
+        requirements
+        tests
+        security
+    }
+
+    class ReviewSeverity {
+        <<enumeration>>
+        info
+        minor
+        major
+        blocker
+    }
+
+    class ReviewVerdictKind {
+        <<enumeration>>
+        accept
+        revise
+        ask_human
+    }
+
+    class ReviewFinding {
+        +string id "F1..Fn"
+        +ReviewAxis axis
+        +ReviewSeverity severity
+        +string file ?
+        +number line ?
+        +string message
+        +string suggestion ?
+    }
+
+    class ReviewResult {
+        +string workItemId
+        +ModelRef reviewerModel
+        +ModelRef implementModel ?
+        +ReviewVerdictKind verdict
+        +float confidence
+        +string summary
+        +ReviewFinding[] findings
+        +number reviewAttempt "1..3"
+        +string reviewedAt ISO8601
+        +number durationMs
+    }
+
+    class ReviewInput {
+        +string id
+        +string prompt "original usuario"
+        +string worktreePath
+        +ModelRef implementModel ?
+        +string[] createdFiles
+        +VerificationReport verification
+    }
+
+    class ReviewModelSelector {
+        +selectReviewer(implementModel) ModelRef
+        +isSameModel(a, b) boolean
+        +REVIEW_PAIRS "tabla pares"
+    }
+
+    class ReviewPrompt {
+        +buildReviewPrompt(input) string
+        +parseReviewResponse(raw) ReviewResult
+        +reviewJsonSchema "json_schema strict"
+    }
+
+    class ReviewAgent {
+        +consume(input, reviewerModel) Promise~ReviewResult~
+        -withTimeout(p, ms) Promise~T~
+    }
+
+    class ReviewService {
+        -Set~string~ reviewLocks
+        +handleReview(workItem) Promise~WorkItem~
+        +decideTransition(result, reviewCount) "Complete"|"Building"|"StayReview"
+        +acquireReviewLock(id) boolean
+        +releaseReviewLock(id) void
+    }
+
+    class ImplementService {
+        +handleBuilding(workItem) Promise~WorkItem~
+        -triggerReviewIfPass(id) void
+    }
+
+    class VerificationReport {
+        +VerificationStep[] steps
+        +string overall "pass|fail"
+    }
+
+    class WorkItem {
+        +string id
+        +string prompt
+        +string worktree
+        +ModelRef modelRef "implement model"
+        +WorkItemStatus status
+        +number reviewCount "0..2"
+        +ReviewResult lastReview ?
+        +string dir
+        +string dotDonePath
+    }
+
+    class WorkItemStore {
+        +transition(id, to, actor, msg, meta) WorkItem
+        +transitionWithReview(id, to, result, msg) WorkItem
+        +appendEvent(id, actor, msg, meta) WorkItem
+        +acquireBuildingLock(id) boolean
+        +acquireReviewLock(id) boolean
+        +incrementReviewCount(id) number
+        +getReviewCount(id) number
+    }
+
+    class ResultWriter {
+        +write(dir, payload) ImplementResultJson
+    }
+
+    class ReviewDisk {
+        +writeReview(dir, result) ReviewResult
+        +readReview(dir) ReviewResult
+        +writeAtomic(path, content) void
+    }
+
+    ReviewResult *-- ReviewFinding
+    ReviewFinding *-- ReviewAxis
+    ReviewFinding *-- ReviewSeverity
+    ReviewResult *-- ReviewVerdictKind
+    ReviewInput *-- ModelRef
+    ReviewResult *-- ModelRef
+    WorkItem *-- WorkItemStatus
+    WorkItem *-- ModelRef
+    WorkItem ..> ReviewResult : lastReview
+    ReviewModelSelector ..> ModelRef : selects
+    ReviewPrompt ..> ReviewInput : builds from
+    ReviewPrompt ..> ReviewResult : parses to
+    ReviewAgent ..> ReviewPrompt : uses
+    ReviewAgent ..> ReviewModelSelector : uses
+    ReviewAgent ..> OpencodeServerManager : getClient() read-only
+    ReviewService ..> ReviewAgent : orchestrates
+    ReviewService ..> WorkItemStore : transitions
+    ReviewService ..> ReviewDisk : persists
+    ImplementService ..> ReviewService : triggers on pass
+    ImplementService ..> WorkItemStore : Building-to-Review
+    ReviewDisk ..> ReviewResult : validates
+    WorkItemStore "1" *-- "many" WorkItem : stores

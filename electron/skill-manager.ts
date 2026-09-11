@@ -913,7 +913,7 @@ function compareSemver(
 
 function detectCodexHooksFeatureFlag(): CodexHooksFeatureFlag {
   try {
-    const output = execFileSync("codex", ["features", "list"], {
+    const output = execFileSync("codex", ["features", "list"], { windowsHide: true,
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 2000,
@@ -921,7 +921,7 @@ function detectCodexHooksFeatureFlag(): CodexHooksFeatureFlag {
     return parseCodexHooksFeatureFlag(output) ?? CODEX_HOOKS_FEATURE_FLAG;
   } catch {
     try {
-      const output = execFileSync("codex", ["--version"], {
+      const output = execFileSync("codex", ["--version"], { windowsHide: true,
         encoding: "utf-8",
         stdio: ["ignore", "pipe", "ignore"],
         timeout: 2000,

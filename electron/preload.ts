@@ -1128,7 +1128,7 @@ contextBridge.exposeInMainWorld("termcanvas", {
   github: {
     fetchIssues: (cwd: string) =>
       ipcRenderer.invoke("github:fetch-issues", cwd) as Promise<
-        | { ok: true; issues: Array<Record<string, unknown>> }
+        | { ok: true; issues: Array<Record<string, unknown>>; complete?: boolean }
         | { ok: false; error: string; code: string }
       >,
     openUrl: (url: string) =>
@@ -1608,4 +1608,23 @@ contextBridge.exposeInMainWorld("termcanvas", {
       return () => ipcRenderer.removeListener("pin:event", listener);
     },
   },
+});
+
+// Playground Pact IPC — Ola 4-5 (architecture-pact-v2.md §2.1, §2.6)
+// Expone window.playground.getPacts(), getState(), verifyPact(Fxx), + factory + human verdict
+// La UI lee pacts/*.json como fuente de verdad, no hardcode.
+contextBridge.exposeInMainWorld("playground", {
+  getPacts: () => ipcRenderer.invoke("playground:getPacts") as Promise<unknown[]>,
+  getPact: (featureId: string) => ipcRenderer.invoke("playground:getPact", featureId) as Promise<unknown | null>,
+  getState: (featureId: string) => ipcRenderer.invoke("playground:getState", featureId) as Promise<unknown | null>,
+  getStates: () => ipcRenderer.invoke("playground:getStates") as Promise<Record<string, unknown>>,
+  getVerdicts: (featureId: string) => ipcRenderer.invoke("playground:getVerdicts", featureId) as Promise<unknown[]>,
+  getLatestVerdict: (featureId: string) => ipcRenderer.invoke("playground:getLatestVerdict", featureId) as Promise<unknown | null>,
+  getCriteria: (featureId: string) => ipcRenderer.invoke("playground:getCriteria", featureId) as Promise<unknown | null>,
+  listCriteria: () => ipcRenderer.invoke("playground:listCriteria") as Promise<unknown[]>,
+  verifyPact: (featureId: string) => ipcRenderer.invoke("playground:verifyPact", featureId) as Promise<unknown>,
+  getFactoryPort: () => ipcRenderer.invoke("playground:getFactoryPort") as Promise<number | null>,
+  getFactoryBaseUrl: () => ipcRenderer.invoke("playground:getFactoryBaseUrl") as Promise<string | null>,
+  submitHumanVerdict: (payload: { featureId: string; conclusion: "pass" | "fail"; humanChecklist?: string[]; evidence?: string; notes?: string; reason?: string }) =>
+    ipcRenderer.invoke("playground:submitHumanVerdict", payload) as Promise<{ verdict: unknown; state: unknown }>,
 });

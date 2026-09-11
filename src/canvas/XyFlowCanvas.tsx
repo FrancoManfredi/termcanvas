@@ -43,11 +43,32 @@ import {
   effectiveReviewLabel,
 } from "./reviewVerdict";
 import { overrideGateForIssue } from "./issueGate";
+import {
+  applyCycleLabel,
+  applyReviewLabel,
+  findOpenPrsForIssue,
+  findPrForIssue,
+  getConflictFiles,
+  getPrComments,
+  getPrReviewDecision,
+  syncIssueReviewLabel,
+} from "../lib/githubClient";
+import {
+  createReviewWorktree,
+  createWorktree,
+  removeWorktree,
+  restoreWorktree,
+} from "../lib/worktreeClient";
 import { buildIssueResolvePrompt } from "./issueResolvePrompt";
 import {
   categoryIdFromLabels,
   issueResolveAllowedSkills,
 } from "../skills/registry";
+import {
+  blockedByTitle,
+  mapRelationsFromNode,
+  resolveBlockedGate,
+} from "../features/warpPanel/adapters/liveIssues";
 import { prepareSkillScope } from "../skills/scopedSession";
 import { resolveRepoContextText, resolveRequirementsText, resolveArchitectureDecisionsText } from "../utils/repoContext";
 import { reuseTerminalForIssue } from "../actions/terminalSceneActions";
@@ -489,11 +510,20 @@ function XyFlowCanvasInner() {
       const path =
         projectPath ?? resolveContextMenuTarget()?.worktree.path;
       if (!path) return;
+      // Settled value to restore if the lookup itself fails (a transient gh
+      // error must never leave the row stuck on "loading").
+      const previous =
+        cached !== undefined && cached !== null && cached !== "loading"
+          ? cached
+          : null;
       reviewStore.setPrStatus(issueNumber, "loading");
-      void window.termcanvas.github
-        .findOpenPrsForIssue(path, issueNumber)
-        .then((result) => {
-          const prs = result.ok ? result.prs : [];
+      // Dual-path (F2 web-local): bridge in app, headless daemon in web.
+      void findOpenPrsForIssue(path, issueNumber).then((result) => {
+          if (!result.ok) {
+            useIssueReviewStore.getState().setPrStatus(issueNumber, previous);
+            return;
+          }
+          const prs = result.prs;
           // The card's primary PR stays the first open one (legacy contract
           // for the footer button and per-issue badges); the full list lives
           // in openPrsByIssue for per-PR actions.
@@ -501,15 +531,23 @@ function XyFlowCanvasInner() {
             .getState()
             .setPrStatus(issueNumber, prs[0] ?? null);
           useIssueReviewStore.getState().setOpenPrs(issueNumber, prs);
-          if (!result.ok || prs.length === 0) return;
+          if (prs.length === 0) {
+            // No open PR: the settled review state belonged to the PR that
+            // is now closed/merged. Clear it so the row can fall back to
+            // Pending/backlog instead of staying In Review / Awaiting from
+            // stale verdict and labels (e.g. right after a discard).
+            const store = useIssueReviewStore.getState();
+            store.setReviewVerdict(issueNumber, null);
+            store.setIssueLabels(issueNumber, []);
+            store.setConflictStatus(issueNumber, false);
+            return;
+          }
           for (const pr of prs) {
             // Narrowed copy: TS does not propagate param narrowing into
             // nested closures, and applyReviewLabel needs the PR number.
             const prNumber = pr.number;
             const prState = pr.state;
-            void window.termcanvas.github
-              .getPrReviewDecision(path, prNumber)
-              .then((decisionResult) => {
+            void getPrReviewDecision(path, prNumber).then((decisionResult) => {
                 if (!decisionResult.ok) return;
                 // Per-PR state — each reviewed PR keeps its own verdict and
                 // labels so the menu can fix/merge the exact PR that asked.
@@ -547,18 +585,16 @@ function XyFlowCanvasInner() {
                 // the app closes mid-review, and the bulk merge gates on
                 // the label. Idempotent — ensure+add/remove, safe to repeat.
                 if (decisionResult.reviewDecision) {
-                  void window.termcanvas.github
-                    .applyReviewLabel(
-                      path,
-                      prNumber,
-                      decisionResult.reviewDecision,
-                    )
-                    .catch((error) => {
-                      console.error(
-                        "[review] failed to apply review label:",
-                        error,
-                      );
-                    });
+                  void applyReviewLabel(
+                    path,
+                    prNumber,
+                    decisionResult.reviewDecision,
+                  ).catch((error) => {
+                    console.error(
+                      "[review] failed to apply review label:",
+                      error,
+                    );
+                  });
                 }
                 // Materialize the labels the review prompts never post —
                 // the prompts only run while their terminal is open, so a
@@ -584,19 +620,17 @@ function XyFlowCanvasInner() {
                   decisionResult.reviewDecision === "FIX_APPLIED" &&
                   fixAppliedTargets.includes(canonicalLabel)
                 ) {
-                  void window.termcanvas.github
-                    .applyCycleLabel(
-                      path,
-                      prNumber,
-                      issueNumber,
-                      REVIEW_LABEL_FIX_APPLIED,
-                    )
-                    .catch((error) => {
-                      console.error(
-                        "[review] failed to apply fix-applied label:",
-                        error,
-                      );
-                    });
+                  void applyCycleLabel(
+                    path,
+                    prNumber,
+                    issueNumber,
+                    REVIEW_LABEL_FIX_APPLIED,
+                  ).catch((error) => {
+                    console.error(
+                      "[review] failed to apply fix-applied label:",
+                      error,
+                    );
+                  });
                 }
                 const pendingDecision =
                   decisionResult.reviewDecision === null ||
@@ -606,43 +640,36 @@ function XyFlowCanvasInner() {
                   pendingDecision &&
                   prState === "OPEN"
                 ) {
-                  void window.termcanvas.github
-                    .applyCycleLabel(
-                      path,
-                      prNumber,
-                      issueNumber,
-                      REVIEW_LABEL_PENDING,
-                    )
-                    .catch((error) => {
-                      console.error(
-                        "[review] failed to apply pending label:",
-                        error,
-                      );
-                    });
+                  void applyCycleLabel(
+                    path,
+                    prNumber,
+                    issueNumber,
+                    REVIEW_LABEL_PENDING,
+                  ).catch((error) => {
+                    console.error(
+                      "[review] failed to apply pending label:",
+                      error,
+                    );
+                  });
                 }
                 // Mirror the PR's canonical review-cycle label onto the
                 // associated issue (best-effort, idempotent): the issue must
                 // reflect the PR state in EVERY state — approved, changes,
                 // conflict, fix applied, pending. The canonical derivation
                 // self-corrects stale label combinations on each refresh.
-                void window.termcanvas.github
-                  .syncIssueReviewLabel(
-                    path,
-                    issueNumber,
-                    decisionResult.labels,
-                  )
-                  .catch((error) => {
-                    console.error(
-                      "[review] failed to sync issue label:",
-                      error,
-                    );
-                  });
+                void syncIssueReviewLabel(
+                  path,
+                  issueNumber,
+                  decisionResult.labels,
+                ).catch((error) => {
+                  console.error("[review] failed to sync issue label:", error);
+                });
               })
               .catch(() => {});
           }
         })
         .catch(() => {
-          useIssueReviewStore.getState().setPrStatus(issueNumber, null);
+          useIssueReviewStore.getState().setPrStatus(issueNumber, previous);
         });
     },
     [resolveContextMenuTarget],
@@ -708,6 +735,17 @@ function XyFlowCanvasInner() {
 
   const syncIssuesToCanvas = useCallback(
     async (basePos: { x: number; y: number }) => {
+      // Traer issues es app-only (paginado GraphQL sin equivalente en el
+      // daemon F4): aviso honesto en vez del TypeError crudo.
+      if (!window.termcanvas?.github) {
+        useNotificationStore
+          .getState()
+          .notify(
+            "warn",
+            "Traer issues de GitHub requiere la app Electron — en web aún no tiene equivalente.",
+          );
+        return;
+      }
       const target = resolveContextMenuTarget();
       if (!target) {
         console.warn("[gh-issues] resolveContextMenuTarget returned null");
@@ -782,6 +820,27 @@ function XyFlowCanvasInner() {
             .getState()
             .notify("info", `Synced ${addedCount} issue${addedCount !== 1 ? "s" : ""} from GitHub.`);
         }
+
+        // Reconcile: drop cards absent from GitHub, but ONLY on a complete
+        // (fully-paginated) fetch — never on a partial one. All canvas
+        // cards originate from this sync, so absence means stale.
+        if ((result as { complete?: boolean }).complete !== false) {
+          try {
+            const fetched = new Set(
+              result.issues
+                .map((r) => r.number)
+                .filter((n): n is number => typeof n === "number" && Number.isInteger(n) && n > 0),
+            );
+            const pruned = issueStore.pruneIssuesToNumbers([...fetched]);
+            if (pruned > 0) {
+              useNotificationStore
+                .getState()
+                .notify("info", `Removed ${pruned} stale card${pruned !== 1 ? "s" : ""} no longer on GitHub.`);
+            }
+          } catch {
+            // best-effort: prune never breaks the sync
+          }
+        }
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         useNotificationStore
@@ -819,6 +878,15 @@ function XyFlowCanvasInner() {
   }, [handleFetchIssuesFromPanel]);
 
   const handleRefreshIssues = useCallback(async () => {
+    if (!window.termcanvas?.github) {
+      useNotificationStore
+        .getState()
+        .notify(
+          "warn",
+          "Actualizar issues de GitHub requiere la app Electron — en web aún no tiene equivalente.",
+        );
+      return;
+    }
     const target = resolveContextMenuTarget();
     if (!target) return;
 
@@ -878,6 +946,27 @@ function XyFlowCanvasInner() {
             `Updated ${updatedCount} issue${updatedCount !== 1 ? "s" : ""} from GitHub.`,
           );
       }
+
+      // Same reconcile as the full sync: drop cards absent from GitHub,
+      // only on a complete (fully-paginated) fetch.
+      if ((result as { complete?: boolean }).complete !== false) {
+        try {
+          const fetched = new Set(
+            result.issues
+              .map((r) => r.number)
+              .filter((n): n is number => typeof n === "number" && Number.isInteger(n) && n > 0),
+          );
+          const issueStore2 = useIssueStore.getState();
+          const pruned = issueStore2.pruneIssuesToNumbers([...fetched]);
+          if (pruned > 0) {
+            useNotificationStore
+              .getState()
+              .notify("info", `Removed ${pruned} stale card${pruned !== 1 ? "s" : ""} no longer on GitHub.`);
+          }
+        } catch {
+          // best-effort: prune never breaks the refresh
+        }
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       useNotificationStore
@@ -896,6 +985,17 @@ function XyFlowCanvasInner() {
       const issueStore = useIssueStore.getState();
       const issue = issueStore.getIssue(issueNumber);
       if (!issue) return;
+      // Blocked-by gate (shared rule with the Activity panel — real
+      // relations only, never invented): an issue blocked by another OPEN
+      // issue cannot resolve until the blocker is done/closed.
+      const resolveGate = resolveBlockedGate(mapRelationsFromNode(issue));
+      if (resolveGate.blocked) {
+        useNotificationStore.getState().notify(
+          "info",
+          blockedByTitle(resolveGate.blockers),
+        );
+        return;
+      }
       // Measure the actual issue card DOM rect and convert to flow coords
       const issueNodeId = `issue-${issue.issueNumber}`;
       const issueEl = document.querySelector(`[data-id="${issueNodeId}"]`);
@@ -949,12 +1049,12 @@ function XyFlowCanvasInner() {
           useIssueReviewStore.getState().verdictByIssue[issue.issueNumber];
         if (verdict !== "CHANGES_REQUESTED") return;
         try {
-          const prResult = await window.termcanvas.github.findPrForIssue(
+          const prResult = await findPrForIssue(
             target.worktree.path,
             issue.issueNumber,
           );
           if (!prResult.ok || !prResult.pr) return;
-          const feedback = await window.termcanvas.github.getPrComments(
+          const feedback = await getPrComments(
             target.worktree.path,
             prResult.pr.number,
           );
@@ -997,7 +1097,7 @@ function XyFlowCanvasInner() {
         issue,
         target,
         createWorktree: (repoPath, branch) =>
-          window.termcanvas.project.createWorktree(repoPath, branch),
+          createWorktree(repoPath, branch),
         getProject: (projectId) =>
           useProjectStore
             .getState()
@@ -1102,23 +1202,24 @@ function XyFlowCanvasInner() {
         syncWorktrees: (projectPath, worktrees) =>
           useProjectStore.getState().syncWorktrees(projectPath, worktrees),
         createReviewWorktree: (repoPath, baseName, branch) =>
-          window.termcanvas.project.createReviewWorktree(
-            repoPath,
-            baseName,
-            branch,
-          ),
+          createReviewWorktree(repoPath, baseName, branch),
         removeWorktree: (repoPath, worktreePath, force) =>
-          window.termcanvas.project.removeWorktree(
-            repoPath,
-            worktreePath,
-            force,
-          ),
+          removeWorktree(repoPath, worktreePath, force),
         isReviewWorktreeInUse: (worktreeId) =>
           hasLiveReviewOnWorktree(worktreeId),
         findOpenPrsForIssue: (cwd, number) =>
-          window.termcanvas.github.findOpenPrsForIssue(cwd, number),
-        getReviewContext: (cwd, number, targetDir) =>
-          window.termcanvas.github.getReviewContext(cwd, number, targetDir),
+          findOpenPrsForIssue(cwd, number),
+        // Captured const: TS/runtime narrowing does NOT survive into the
+        // arrow closure if re-read from window (termcanvas is undefined
+        // in web and the type lies non-nullable) — this crashed the
+        // canvas on load. undefined = honest skip (the flow guards it).
+        getReviewContext: (() => {
+          const bridge = window.termcanvas?.github;
+          return bridge
+            ? (cwd: string, prNumber: number, targetDir: string) =>
+              bridge.getReviewContext(cwd, prNumber, targetDir)
+            : undefined;
+        })(),
         createTerminal: createTerminalInScene,
         notify: (type, message) =>
           useNotificationStore.getState().notify(type, message),
@@ -1222,11 +1323,21 @@ function XyFlowCanvasInner() {
             .getState()
             .projects.find((p) => p.id === projectId),
         restoreWorktree: (repoPath, branch) =>
-          window.termcanvas.project.restoreWorktree(repoPath, branch),
+          restoreWorktree(repoPath, branch),
         syncWorktrees: (projectPath, worktrees) =>
           useProjectStore.getState().syncWorktrees(projectPath, worktrees),
-        getReviewContext: (cwd, number, targetDir) =>
-          window.termcanvas.github.getReviewContext(cwd, number, targetDir),
+        // Optional prefetch (fixIssueWorktree guards it): the review
+        // context route lands only if the web panel needs it — the fix
+        // agent runs gh itself inside its server-side pty. Captured
+        // const (same TDZ/closure crash as the review wiring) —
+        // undefined = honest skip.
+        getReviewContext: (() => {
+          const bridge = window.termcanvas?.github;
+          return bridge
+            ? (cwd: string, prNumber: number, targetDir: string) =>
+              bridge.getReviewContext(cwd, prNumber, targetDir)
+            : undefined;
+        })(),
         createTerminal: createTerminalInScene,
         notify: (type, message) =>
           useNotificationStore.getState().notify(type, message),
@@ -1327,11 +1438,11 @@ function XyFlowCanvasInner() {
             .getState()
             .projects.find((p) => p.id === projectId),
         restoreWorktree: (repoPath, branch) =>
-          window.termcanvas.project.restoreWorktree(repoPath, branch),
+          restoreWorktree(repoPath, branch),
         syncWorktrees: (projectPath, worktrees) =>
           useProjectStore.getState().syncWorktrees(projectPath, worktrees),
         getConflict: (repoPath, branch, prNumber) =>
-          window.termcanvas.github.getConflictFiles(repoPath, branch, prNumber),
+          getConflictFiles(repoPath, branch, prNumber),
         createTerminal: createTerminalInScene,
         notify: (type, message) =>
           useNotificationStore.getState().notify(type, message),
@@ -1554,7 +1665,9 @@ function XyFlowCanvasInner() {
 
   // Forward the bulk-merge progress stream (github:merge-approved-prs) into
   // the issue review store, which drives the MergeProgressPanel.
+  // Bridge-only (merge is human doctrine, no daemon equivalent): skip in web.
   useEffect(() => {
+    if (!window.termcanvas?.github) return;
     const unsubscribe = window.termcanvas.github.onMergeProgress((event) => {
       applyMergeProgressEvent(useIssueReviewStore.getState(), event);
     });

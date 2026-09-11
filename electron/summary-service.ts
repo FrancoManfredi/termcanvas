@@ -57,7 +57,7 @@ async function invokeSummaryCli(
         ];
 
   return new Promise<string>((resolve, reject) => {
-    const child = spawn(spec.file, [...spec.args, ...cliArgs], {
+    const child = spawn(spec.file, [...spec.args, ...cliArgs], { windowsHide: true,
       cwd: spec.cwd,
       env: spec.env,
       stdio: ["pipe", "pipe", "pipe"],

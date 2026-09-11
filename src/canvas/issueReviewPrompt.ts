@@ -1,4 +1,5 @@
 import { buildRepoContextSection, buildRequirementsSection, buildArchitectureDecisionsSection } from "../utils/repoContext";
+import { TAG_CANVAS_REVIEW, withPhaseTag } from "../../headless-runtime/llm/phaseTags";
 
 export interface IssueReviewPromptInput {
   issueNumber: number;
@@ -105,7 +106,7 @@ export function buildIssueReviewPrompt(
         `La app ya dejó ${input.reviewTemplateFilePath} en el worktree con la estructura correcta (commit_id ya cargado, event: COMMENT, comments con line/side). Completá body y comments del JSON y subilo con gh api repos/{owner}/{repo}/pulls/${input.prNumber}/reviews --method POST --input ${input.reviewTemplateFilePath}. NO changes el event ni la estructura.`,
       ]
     : [];
-  return [
+  const body = [
     `# Review de la solución — issue #${input.issueNumber} — ${input.title}`,
     "",
     ...buildRepoContextSection(input.repoContextText),
@@ -162,4 +163,6 @@ export function buildIssueReviewPrompt(
   ]
     .filter((line) => line !== null && line !== undefined)
     .join("\n");
+  // Etiqueta humana de fase (primera línea).
+  return withPhaseTag(body, TAG_CANVAS_REVIEW);
 }

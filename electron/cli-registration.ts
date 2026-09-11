@@ -93,7 +93,7 @@ function readWindowsUserPathFromRegistry(): WindowsRegistryPathValue | null {
     const output = execFileSync(
       "reg",
       ["query", WINDOWS_PATH_KEY, "/v", WINDOWS_PATH_VALUE],
-      { encoding: "utf-8" },
+      { windowsHide: true, encoding: "utf-8" },
     );
     return parseWindowsRegistryPathValue(output);
   } catch {
@@ -115,7 +115,7 @@ function writeWindowsUserPathToRegistry(value: string, type: string): void {
       value,
       "/f",
     ],
-    { stdio: "ignore" },
+    { windowsHide: true, stdio: "ignore" },
   );
 }
 
@@ -123,7 +123,7 @@ function deleteWindowsUserPathFromRegistry(): void {
   execFileSync(
     "reg",
     ["delete", WINDOWS_PATH_KEY, "/v", WINDOWS_PATH_VALUE, "/f"],
-    { stdio: "ignore" },
+    { windowsHide: true, stdio: "ignore" },
   );
 }
 
@@ -161,7 +161,7 @@ function broadcastWindowsEnvironmentChange(): void {
     execFileSync(
       "powershell.exe",
       ["-NoProfile", "-NonInteractive", "-Command", script],
-      { stdio: "ignore" },
+      { windowsHide: true, stdio: "ignore" },
     );
   } catch {
   }

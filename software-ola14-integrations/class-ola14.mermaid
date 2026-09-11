@@ -1,0 +1,79 @@
+classDiagram
+    class AutomationsSection {
+      +boolean enabled
+      +int tickMs
+      +Trigger[] triggers
+    }
+    class Trigger {
+      <<union>>
+      +string name
+      +string kind
+      +boolean enabled
+      +int maxFires
+      +int cooldownMs
+    }
+    class ScheduleTrigger {
+      +int intervalMs
+      +string cron
+      +string promptRef
+    }
+    class EventTrigger {
+      +string on
+      +string action
+      +string promptRef
+    }
+    class TriggerEngine {
+      +evaluateDue(triggers, states, now) Action[]
+      +evaluateEvent(trigger, states, event) Action[]
+      +isQuotaLeft(state, trigger) bool
+      +isCooldownOver(state, trigger, now) bool
+    }
+    class AutomationStore {
+      +readFires() FireRecord[]
+      +appendFire(record) void
+      +getState(name) TriggerRuntimeState
+    }
+    class AutomationService {
+      +tickOnce(now) TickReport
+      +fireEvent(event) FireReport
+      +startTicker() stop()
+    }
+    class IntegrationsSection {
+      +boolean enabled
+      +string mode
+      +string provider
+    }
+    class IntegrationAdapter {
+      <<interface>>
+      +post(input) MockPostRecord
+      +ack(id) bool
+      +list(limit) MockPostRecord[]
+    }
+    class MockAdapter {
+      +post(input) MockPostRecord
+      +ack(id) bool
+    }
+    class IntegrationService {
+      +postNotification(input) MockPostRecord
+      +ackNotification(id) bool
+      +getStatus() Status
+    }
+    class AutomationRoutes {
+      +isAutomationsRoute() bool
+      +buildListResponse() payload
+    }
+    class IntegrationRoutes {
+      +isIntegrationsRoute() bool
+      +buildStatusResponse() payload
+    }
+    AutomationsSection *-- Trigger
+    Trigger <|-- ScheduleTrigger
+    Trigger <|-- EventTrigger
+    AutomationService ..> TriggerEngine : uses pure
+    AutomationService ..> AutomationStore : appends
+    AutomationService ..> IntegrationService : notify-integration
+    AutomationService ..> JobCreate : create-job
+    IntegrationAdapter <|.. MockAdapter
+    IntegrationService ..> IntegrationAdapter : programs to port
+    AutomationRoutes ..> AutomationService : reads
+    IntegrationRoutes ..> IntegrationService : reads

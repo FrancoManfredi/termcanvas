@@ -1,0 +1,25 @@
+{
+  "id": "0MTJM41BLDE2E8E1F77",
+  "featureId": "F11",
+  "pactFile": "software-testing-playground-v2/pacts/playground-F11-FactoryProvider.json",
+  "pactFileAbsolute": "C:\\Users\\Estudiante UCU\\OneDrive\\Escritorio\\termcanvas\\software-testing-playground-v2\\pacts\\playground-F11-FactoryProvider.json",
+  "providerBaseUrl": "http://127.0.0.1:17680",
+  "consumerResult": {
+    "passed": true,
+    "pactFileExists": true,
+    "pactFileMtime": "2026-09-01T19:55:54.464Z"
+  },
+  "providerResult": {
+    "status": "pass",
+    "rawOutput": "finished: 0"
+  },
+  "rawOutput": "finished: 0",
+  "conclusion": "pass",
+  "commitSha": "dirty-15fece3e",
+  "commitDirty": true,
+  "actor": "script",
+  "actorDetail": "software-testing-playground-v2/pact/provider/verify.ts — F11",
+  "startedAt": "2026-09-02T04:44:47.335Z",
+  "finishedAt": "2026-09-02T04:44:50.139Z",
+  "durationMs": 200
+}

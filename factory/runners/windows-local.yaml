@@ -1,0 +1,24 @@
+# FUENTE ÚNICA (refactor E2 ③): este yaml MANDA para windows-local.
+# Coherencia con linux-build: misma forma, `isolation: "none"` honesto
+# (NUNCA docker, ni siquiera el probe). Sin clave de imagen: no hay imagen
+# porque no hay contenedor (ausencia honesta, el schema solo la exige
+# cuando isolation es "docker"). Cambiar el comportamiento = cambiar
+# este archivo + test, nunca editar TS a ciegas.
+# factory/runners/windows-local.yaml — Ola 15 Runners honestos.
+# Runner honesto por defecto (factory.yaml → runners.default): el daemon corre
+# en Windows, sin aislamiento. Sin clave de imagen: no hay imagen porque no hay
+# contenedor (el schema solo la exige cuando isolation es "docker").
+#
+# isolation: "none" = NUNCA intenta docker, ni siquiera el probe (interruptor,
+# regla 8). Todo step que corre acá lleva isolation: "none" en su evidence.
+description: "Windows local runner (sin aislamiento: el daemon corre en Windows)"
+setupCommands:
+  - "corepack enable"
+# instanceShape es DOCUMENTAL en local: perfil declarado, no hardware reservado.
+instanceShape:
+  vcpus: 4
+  memoryGb: 8
+isolation: "none"
+platform:
+  os: "windows"
+  arch: "x64"

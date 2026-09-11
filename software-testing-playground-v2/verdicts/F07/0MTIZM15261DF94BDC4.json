@@ -1,0 +1,26 @@
+{
+  "id": "0MTIZM15261DF94BDC4",
+  "featureId": "F07",
+  "pactFile": "software-testing-playground-v2/pacts/playground-F07-FactoryProvider.json",
+  "pactFileAbsolute": "C:\\Users\\Estudiante UCU\\OneDrive\\Escritorio\\termcanvas\\software-testing-playground-v2\\pacts\\playground-F07-FactoryProvider.json",
+  "providerBaseUrl": "http://127.0.0.1:17681",
+  "consumerResult": {
+    "passed": true,
+    "pactFileExists": true,
+    "pactFileMtime": "2026-09-01T18:13:06.595Z"
+  },
+  "providerResult": {
+    "status": "fail",
+    "rawOutput": "Verfication failed"
+  },
+  "rawOutput": "Verfication failed",
+  "conclusion": "fail",
+  "reason": "Provider verification failed — Verfication failed",
+  "commitSha": "dirty-15fece3e",
+  "commitDirty": true,
+  "actor": "script",
+  "actorDetail": "software-testing-playground-v2/pact/provider/verify.ts — F07 (FAILED)",
+  "startedAt": "2026-09-01T18:14:56.194Z",
+  "finishedAt": "2026-09-01T18:15:00.623Z",
+  "durationMs": 403
+}

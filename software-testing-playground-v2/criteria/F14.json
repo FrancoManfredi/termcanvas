@@ -1,0 +1,15 @@
+{
+  "id": "F14",
+  "version": "1.0.0",
+  "title": "Prompt markdown con code fence y backticks",
+  "wave": "Ola 14 — Prompt markdown con code fence y backticks",
+  "blockedBy": ["F02"],
+  "timeoutMs": 2000,
+  "criterio": "Valida que Factory maneja correctamente prompt markdown con bloques ```js ... ``` que contienen backticks, comillas, saltos de línea y →. Gap: nunca probamos markdown con triple backtick (caso real TermCanvas diagnóstico/planning). POST /factory/jobs con {prompt: like(\"```js\\nconsole.log(\\\"hola\\\")\\n```\\nMarkdown con `code` y →\"), worktree: like(\"C:\\\\tmp\\\\playground-F14-markdown\"), phase: like(\"diagnosisLlm\")} → 201 {id: regex ^job-, path: regex Windows, job:{state:\"queued\", prompt: regex \"```js\"}} (headers plain, Given \"factory is healthy\") + GET /factory/jobs/job-f14-md01 → 200 {id: regex ^job-f14-md01$, prompt: regex \"```js.*console\\.log.*```\" con s flag via [\\s\\S]* (persistencia idéntica sin truncamiento ni escaping roto, contiene ```js y `code` y → y \\n), worktree: regex \"playground-F14-markdown\", phase: type, state: regex ^(queued|running|done|error)$, logs: type} (Given \"a job with markdown prompt exists\" con id job-f14-md01). PactV3 MatchersV3, Windows only. factoryServer debe almacenar prompt tal cual via JSON.parse y devolverlo via JSON.stringify sin truncar salvo preview.",
+  "pact": "software-testing-playground-v2/pacts/playground-F14-FactoryProvider.json",
+  "verifier": {
+    "kind": "pact",
+    "provider": "FactoryProvider",
+    "consumer": "playground-F14"
+  }
+}

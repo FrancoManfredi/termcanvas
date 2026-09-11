@@ -1,0 +1,15 @@
+{
+  "id": "F01",
+  "version": "1.0.0",
+  "title": "Servidor único + health",
+  "wave": "Ola 1 — Servidor único + health (backend)",
+  "blockedBy": [],
+  "timeoutMs": 500,
+  "criterio": "GET /factory/health debe responder HTTP 200 con JSON { queue: { pending: number, running: number } } en <500 ms",
+  "pact": "software-testing-playground-v2/pacts/playground-F01-FactoryProvider.json",
+  "verifier": {
+    "kind": "pact",
+    "provider": "FactoryProvider",
+    "consumer": "playground-F01"
+  }
+}

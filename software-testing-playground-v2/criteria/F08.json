@@ -1,0 +1,15 @@
+{
+  "id": "F08",
+  "version": "1.0.0",
+  "title": "Cola y concurrencia (múltiples jobs)",
+  "wave": "Ola 8 — Cola y concurrencia básica",
+  "blockedBy": ["F02", "F04"],
+  "timeoutMs": 2500,
+  "criterio": "Valida que múltiples POST /factory/jobs incrementan la lista y que health refleja queue coherente — GET /factory/jobs → 200 {jobs: eachLike min:2 con id regex, phase type, state queued|running|done|error, dir regex Windows} + GET /factory/health → 200 {queue:{pending:integer, running:integer}, uptime:integer, version like \"local\", ts regex ISO8601}. Cierra gap de concurrencia F02/F04 (solo 1 job).",
+  "pact": "software-testing-playground-v2/pacts/playground-F08-FactoryProvider.json",
+  "verifier": {
+    "kind": "pact",
+    "provider": "FactoryProvider",
+    "consumer": "playground-F08"
+  }
+}

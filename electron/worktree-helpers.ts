@@ -17,7 +17,7 @@ import path from "node:path";
  */
 export function resolveMainRepoRoot(repoPath: string): string {
   try {
-    const commonDir = execFileSync("git", ["rev-parse", "--git-common-dir"], {
+    const commonDir = execFileSync("git", ["rev-parse", "--git-common-dir"], { windowsHide: true,
       cwd: repoPath,
       encoding: "utf-8",
       stdio: ["ignore", "pipe", "ignore"],

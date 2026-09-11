@@ -1,0 +1,129 @@
+{
+  "consumer": {
+    "name": "playground-F09"
+  },
+  "interactions": [
+    {
+      "description": "a request with malformed JSON body (robustez 400)",
+      "providerStates": [
+        {
+          "name": "factory is healthy"
+        }
+      ],
+      "request": {
+        "body": "not-json",
+        "headers": {
+          "Content-Type": "text/plain"
+        },
+        "method": "POST",
+        "path": "/factory/jobs"
+      },
+      "response": {
+        "body": {
+          "error": "body must be valid JSON",
+          "hint": "En PowerShell usa Invoke-RestMethod o curl.exe con -d '{\"prompt\":...}' — curl sin .exe es alias a Invoke-WebRequest",
+          "received": "not-json"
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.error": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": ".*body must be valid JSON.*"
+                }
+              ]
+            },
+            "$.hint": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.received": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        },
+        "status": 400
+      }
+    },
+    {
+      "description": "a request for nonexistent job job-zzz-invalid99 (robustez 404)",
+      "providerStates": [
+        {
+          "name": "no job exists",
+          "params": {
+            "id": "job-zzz-invalid99"
+          }
+        }
+      ],
+      "request": {
+        "headers": {
+          "Accept": "application/json"
+        },
+        "matchingRules": {
+          "path": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "^\\/factory\\/jobs\\/job-zzz-invalid99$"
+              }
+            ]
+          }
+        },
+        "method": "GET",
+        "path": "/factory/jobs/job-zzz-invalid99"
+      },
+      "response": {
+        "body": {
+          "error": "job not found: job-zzz-invalid99"
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.error": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": ".*job not found.*"
+                }
+              ]
+            }
+          }
+        },
+        "status": 404
+      }
+    }
+  ],
+  "metadata": {
+    "pact-js": {
+      "version": "14.0.0"
+    },
+    "pactRust": {
+      "ffi": "0.4.28",
+      "models": "1.3.5"
+    },
+    "pactSpecification": {
+      "version": "3.0.0"
+    }
+  },
+  "provider": {
+    "name": "FactoryProvider"
+  }
+}

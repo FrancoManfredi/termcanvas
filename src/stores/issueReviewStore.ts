@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { MergeProgressEvent, MergePhase } from "../types";
+import type { ReviewVerdict } from "../../shared/review-verdict.ts";
 
 // Shape of the PR linked to an issue, as returned by the
 // `github:find-pr-for-issue` IPC (GitHub GraphQL `development.pulls`).
@@ -15,6 +16,19 @@ export interface LinkedPr {
 // Per-issue lookup state: "loading" while the async lookup runs, null when
 // the issue has no linked PR, otherwise the PR record itself.
 type PrStatus = LinkedPr | "loading" | null;
+
+/** TTL for the optimistic ready flag (factory Complete → Ready to Merge). */
+export const OPTIMISTIC_READY_TTL_MS = 5 * 60 * 1000;
+
+/** True when the optimistic timestamp is fresh (never throws). */
+export function isOptimisticReadyFresh(at: unknown): boolean {
+  try {
+    if (typeof at !== "number" || !Number.isFinite(at) || at <= 0) return false;
+    return Date.now() - at < OPTIMISTIC_READY_TTL_MS;
+  } catch {
+    return false;
+  }
+}
 
 // Extract the reviewable PR from an issue card's raw GitHub data. Prefers an
 // OPEN PR over a merged/closed one, falling back to the first node. Returns
@@ -39,20 +53,9 @@ export function pickLinkedPrFromIssueData(
   };
 }
 
-// Result of the aggregated review on a PR, as reported by GitHub's
-// reviewDecision. Persisted right before the review terminal removes its
-// worktree so the issue card can show whether the reviewer approved or
-// requested changes. "COMMENTED" is derived: a human review that only left
-// comments leaves reviewDecision empty, but the PR was still reviewed.
-// "FIX_APPLIED" is client-side only: set when the implementer launches the
-// fix flow for a review that asked for changes, until the next review
-// re-reads GitHub's authoritative decision.
-export type ReviewVerdict =
-  | "APPROVED"
-  | "CHANGES_REQUESTED"
-  | "REVIEW_REQUIRED"
-  | "COMMENTED"
-  | "FIX_APPLIED";
+// ReviewVerdict lives in shared/review-verdict.ts (F2 web-local) so the
+// daemon can use the verdict contract without importing this store.
+export type { ReviewVerdict };
 
 // A review opens the fix flow only when it actually asked for changes:
 // inline comments without a verdict (COMMENTED) or an explicit
@@ -214,6 +217,18 @@ interface IssueReviewStore {
   setMergingApprovedPrs: (merging: boolean) => void;
   setResolvingConflictIssueNumber: (issueNumber: number | null) => void;
   requestPrLookup: (issueNumber: number, projectPath?: string, force?: boolean) => void;
+  /**
+   * Drops ALL derived review state for one issue, for the explicit
+   * "the work no longer exists" transition (human discard: job/PR/branch
+   * removed). Without it, a cached OPEN PR plus stale verdict/labels keep
+   * the row in Ready to Merge / In Review forever (`requestPrLookup` with
+   * force=false early-returns on the cache). Callers force a fresh lookup
+   * right after, so GitHub (zero open PRs) lands the row in Pending.
+   */
+  invalidateIssueReviewState: (issueNumber: number) => void;
+  optimisticReadyByIssue: Record<number, number>;
+  setOptimisticReady: (issueNumber: number) => void;
+  clearOptimisticReady: (issueNumber: number) => void;
   mergeProgress: MergeProgressState | null;
   beginMergeProgress: (prNumbers: number[]) => void;
   appendMergeProgressLog: (prNumber: number | null, message: string) => void;
@@ -321,6 +336,65 @@ export const useIssueReviewStore = create<IssueReviewStore>((set, get) => ({
     if (!force && cached !== undefined && cached !== null) return;
     state.prLookupHandler?.(issueNumber, projectPath, force);
   },
+  invalidateIssueReviewState: (issueNumber) => {
+    if (
+      typeof issueNumber !== "number" ||
+      !Number.isInteger(issueNumber) ||
+      issueNumber <= 0
+    ) {
+      return;
+    }
+    const dropKey = <T>(map: Record<number, T> | undefined): Record<number, T> => {
+      if (map === undefined || !(issueNumber in map)) return map as Record<number, T>;
+      const next = { ...map };
+      delete next[issueNumber];
+      return next;
+    };
+    set((s) => {
+      try {
+        const optimistic =
+          s.optimisticReadyByIssue !== undefined &&
+          issueNumber in s.optimisticReadyByIssue
+            ? { ...s.optimisticReadyByIssue }
+            : s.optimisticReadyByIssue;
+        if (optimistic !== s.optimisticReadyByIssue) delete optimistic[issueNumber];
+        return {
+          prsByIssue: dropKey(s.prsByIssue),
+          openPrsByIssue: dropKey(s.openPrsByIssue),
+          verdictByIssue: dropKey(s.verdictByIssue),
+          verdictByPr: dropKey(s.verdictByPr),
+          labelsByPr: dropKey(s.labelsByPr),
+          labelsByIssue: dropKey(s.labelsByIssue),
+          conflictByPr: dropKey(s.conflictByPr),
+          conflictByIssue: dropKey(s.conflictByIssue),
+          optimisticReadyByIssue: optimistic,
+        };
+      } catch {
+        return {};
+      }
+    });
+  },
+  optimisticReadyByIssue: {},
+  setOptimisticReady: (issueNumber) =>
+    set((s) => {
+      try {
+        if (typeof issueNumber !== "number" || !Number.isInteger(issueNumber) || issueNumber <= 0) return {};
+        return { optimisticReadyByIssue: { ...s.optimisticReadyByIssue, [issueNumber]: Date.now() } };
+      } catch {
+        return {};
+      }
+    }),
+  clearOptimisticReady: (issueNumber) =>
+    set((s) => {
+      try {
+        if (!(issueNumber in s.optimisticReadyByIssue)) return {};
+        const next = { ...s.optimisticReadyByIssue };
+        delete next[issueNumber];
+        return { optimisticReadyByIssue: next };
+      } catch {
+        return {};
+      }
+    }),
   mergeProgress: null,
   beginMergeProgress: (prNumbers) =>
     set({

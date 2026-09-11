@@ -72,6 +72,7 @@ import {
   WORKTREE_ACTIVITY_THROTTLE_MS,
 } from "../../shared/lifecycleThresholds";
 import { onTerminalTurnCompleted } from "./summaryScheduler";
+import { getPtyTransport, hasHostBridge } from "./ptyTransport";
 import { watchIssuePrLabels } from "../canvas/issueLabelWatcher";
 import {
   clampPreviewAnsi,
@@ -465,7 +466,7 @@ async function pollSessionId(
 
   let cachedPid: number | null = detectedCliPid ?? null;
   if (!cachedPid && cliType === "claude") {
-    cachedPid = (await window.termcanvas.terminal.getPid(ptyId)) ?? null;
+    cachedPid = (await getPtyTransport()?.getPid(ptyId)) ?? null;
   }
 
   let codexBaseline: string | null = null;
@@ -500,7 +501,7 @@ async function pollSessionId(
       }
     } else if (cliType === "claude") {
       const pid =
-        cachedPid ?? (await window.termcanvas.terminal.getPid(ptyId)) ?? null;
+        cachedPid ?? (await getPtyTransport()?.getPid(ptyId)) ?? null;
       if (!cachedPid && pid) {
         cachedPid = pid;
       }
@@ -679,18 +680,20 @@ function clearWatchedSession(runtime: ManagedTerminalRuntime) {
   const sessionId = runtime.watchedSessionId;
   runtime.watchedSessionId = null;
   if (isSessionTelemetryProvider(runtime.meta.terminal.type)) {
-    void window.termcanvas.telemetry
-      .detachSession(runtime.meta.terminal.id)
-      .catch((error) => {
+    void window.termcanvas?.telemetry
+      ?.detachSession(runtime.meta.terminal.id)
+      ?.catch((error) => {
         console.error(
           "[terminalRuntime] failed to detach telemetry session:",
           error,
         );
       });
   }
-  void window.termcanvas.session.unwatch(sessionId).catch((error) => {
-    console.error("[terminalRuntime] failed to unwatch session:", error);
-  });
+  void window.termcanvas?.session
+    ?.unwatch(sessionId)
+    ?.catch((error) => {
+      console.error("[terminalRuntime] failed to unwatch session:", error);
+    });
 }
 
 function watchSession(
@@ -709,21 +712,21 @@ function watchSession(
 
   runtime.watchedSessionId = sessionId;
   if (isSessionTelemetryProvider(type)) {
-    void window.termcanvas.telemetry
-      .attachSession({
+    void window.termcanvas?.telemetry
+      ?.attachSession({
         terminalId: runtime.meta.terminal.id,
         provider: type,
         sessionId,
         cwd: runtime.meta.worktreePath,
         confidence: confidence ?? (type === "claude" ? "strong" : "medium"),
       })
-      .catch((error: unknown) => {
+      ?.catch((error: unknown) => {
         console.error("[terminalRuntime] telemetry attach failed:", error);
       });
   }
-  void window.termcanvas.session
-    .watch(type, sessionId, runtime.meta.worktreePath)
-    .then((result) => {
+  void window.termcanvas?.session
+    ?.watch(type, sessionId, runtime.meta.worktreePath)
+    ?.then((result) => {
       if (runtime.disposed || runtime.watchedSessionId !== sessionId) {
         return;
       }
@@ -732,7 +735,7 @@ function watchSession(
         notify("warn", `Session watch failed: ${result?.reason ?? "unknown"}`);
       }
     })
-    .catch((error: unknown) => {
+    ?.catch((error: unknown) => {
       if (runtime.disposed || runtime.watchedSessionId !== sessionId) {
         return;
       }
@@ -1142,7 +1145,7 @@ function wireInteractiveBindings(runtime: ManagedTerminalRuntime) {
   if (!runtime.meta.terminal.headlessRun) {
     runtime.inputDisposable = runtime.xterm.onData((data: string) => {
       if (runtime.ptyId !== null) {
-        window.termcanvas.terminal.input(runtime.ptyId, data);
+        getPtyTransport()?.input(runtime.ptyId, data);
       }
     });
   }
@@ -1150,7 +1153,7 @@ function wireInteractiveBindings(runtime: ManagedTerminalRuntime) {
   runtime.resizeDisposable = runtime.xterm.onResize(
     ({ cols, rows }: { cols: number; rows: number }) => {
       if (runtime.ptyId !== null) {
-        window.termcanvas.terminal.resize(runtime.ptyId, cols, rows);
+        getPtyTransport()?.resize(runtime.ptyId, cols, rows);
       }
     },
   );
@@ -1167,7 +1170,7 @@ function syncAttachedTerminalGeometry(runtime: ManagedTerminalRuntime) {
   }
 
   runtime.fitAddon.fit();
-  window.termcanvas.terminal.resize(
+  getPtyTransport()?.resize(
     runtime.ptyId,
     runtime.xterm.cols,
     runtime.xterm.rows,
@@ -1327,7 +1330,7 @@ function createTerminalRenderer(
 
     if (event.type === "keydown" && event.metaKey) {
       if (event.key === "Backspace" && runtime.ptyId !== null) {
-        window.termcanvas.terminal.input(runtime.ptyId, "\x15");
+        getPtyTransport()?.input(runtime.ptyId, "\x15");
       }
       return false;
     }
@@ -1392,7 +1395,7 @@ function setupRuntimeSubscriptions(runtime: ManagedTerminalRuntime) {
     }
 
     if (runtime.ptyId !== null) {
-      window.termcanvas.terminal.notifyThemeChanged(runtime.ptyId);
+      getPtyTransport()?.notifyThemeChanged(runtime.ptyId);
     }
   });
 
@@ -1478,6 +1481,10 @@ function scheduleSessionCapture(
   cliType: TerminalType,
   detectedCliPid?: number | null,
 ) {
+  // No session discovery without the host bridge (honest no-op in web).
+  if (!window.termcanvas?.session) {
+    return;
+  }
   runtime.sessionCancel?.();
   let cancelled = false;
   runtime.sessionCancel = () => {
@@ -1514,6 +1521,10 @@ function triggerDetection(runtime: ManagedTerminalRuntime) {
   if (runtime.meta.terminal.type !== "shell" || runtime.ptyId === null) {
     return;
   }
+  // Web has no CLI visibility (detectCli degrades to null) — skip polling.
+  if (!hasHostBridge()) {
+    return;
+  }
 
   if (runtime.detectAttempts >= CLI_DETECTION_MAX_ATTEMPTS) return;
 
@@ -1528,7 +1539,7 @@ function triggerDetection(runtime: ManagedTerminalRuntime) {
     }
 
     runtime.detectAttempts++;
-    void window.termcanvas.terminal.detectCli(runtime.ptyId).then((result) => {
+    void (getPtyTransport()?.detectCli(runtime.ptyId) ?? Promise.resolve(null)).then((result) => {
       const nextType = (result?.cliType ?? null) as TerminalType | null;
       if (!nextType || nextType === runtime.meta.terminal.type) {
         // Still undetected — reschedule
@@ -1823,9 +1834,15 @@ async function spawnPty(
   }
 
   try {
-    const ptyId = await window.termcanvas.terminal.create(options);
+    const transport = getPtyTransport();
+    if (!transport) {
+      throw new Error(
+        "No PTY transport available (no host bridge, no headless WS)",
+      );
+    }
+    const ptyId = await transport.create(options);
     if (runtime.disposed) {
-      await window.termcanvas.terminal.destroy(ptyId);
+      await transport.destroy(ptyId);
       return;
     }
 
@@ -1925,7 +1942,7 @@ function startTerminalRuntime(runtime: ManagedTerminalRuntime) {
   installRenderDiagnosticsListeners();
   installRenderRecoveryListeners();
 
-  if (runtime.started || runtime.disposed || !window.termcanvas) {
+  if (runtime.started || runtime.disposed || !getPtyTransport()) {
     return;
   }
 
@@ -1947,7 +1964,7 @@ function startTerminalRuntime(runtime: ManagedTerminalRuntime) {
   runtime.telemetryTimer = setInterval(telemetryTick, TELEMETRY_POLL_SLOW_MS);
 
   // Push-based telemetry: immediate updates from hook events
-  if (window.termcanvas.telemetry?.onSnapshotChanged) {
+  if (window.termcanvas?.telemetry?.onSnapshotChanged) {
     let prevTurnState: string | undefined;
     const removePush = window.termcanvas.telemetry.onSnapshotChanged(
       (payload) => {
@@ -1973,17 +1990,19 @@ function startTerminalRuntime(runtime: ManagedTerminalRuntime) {
     runtime.globalDisposers.push(removePush);
   }
 
-  runtime.outputUnsubscribe = window.termcanvas.terminal.onOutput(
-    (ptyId, data) => {
-      if (ptyId !== runtime.ptyId) {
-        return;
-      }
+  const ptyTransport = getPtyTransport();
+  runtime.outputUnsubscribe = ptyTransport
+    ? ptyTransport.onOutput((ptyId, data) => {
+        if (ptyId !== runtime.ptyId) {
+          return;
+        }
 
-      handleRuntimeOutput(runtime, data);
-    },
-  );
+        handleRuntimeOutput(runtime, data);
+      })
+    : () => {};
 
-  const exitUnsubscribe = window.termcanvas.terminal.onExit(
+  const exitUnsubscribe = ptyTransport
+    ? ptyTransport.onExit(
     (ptyId, exitCode) => {
       if (ptyId !== runtime.ptyId) {
         return;
@@ -2002,10 +2021,10 @@ function startTerminalRuntime(runtime: ManagedTerminalRuntime) {
         // branch is still pushed, so gh can read it from the repo root.
         const reviewIssueNumber = runtime.meta.terminal.reviewIssueNumber;
         const reviewPrNumber = runtime.meta.terminal.reviewPrNumber;
-          if (reviewPrNumber !== undefined) {
+          if (reviewPrNumber !== undefined && window.termcanvas?.github) {
             void window.termcanvas.github
               .getPrReviewDecision(projectPath, reviewPrNumber)
-              .then((result) => {
+              ?.then((result) => {
                 if (result.ok && result.reviewDecision) {
                   useIssueReviewStore
                     .getState()
@@ -2022,13 +2041,13 @@ function startTerminalRuntime(runtime: ManagedTerminalRuntime) {
                   // Flip the real PR label to match the verdict line the review
                   // body is required to carry, so the card shows review/merge
                   // state even after a reload.
-                  void window.termcanvas.github
-                    .applyReviewLabel(
+                  void window.termcanvas?.github
+                    ?.applyReviewLabel(
                       projectPath,
                       reviewPrNumber,
                       result.reviewDecision,
                     )
-                    .then(() => {
+                    ?.then(() => {
                       // Force a re-read of the PR after the label flip: the
                       // card's badge and menu gates derive from the persisted
                       // cycle labels, which the session cache would otherwise
@@ -2037,7 +2056,7 @@ function startTerminalRuntime(runtime: ManagedTerminalRuntime) {
                         .getState()
                         .requestPrLookup(reviewIssueNumber, projectPath, true);
                     })
-                    .catch((error) => {
+                    ?.catch((error) => {
                       console.error(
                         "[review] failed to apply review label:",
                         error,
@@ -2045,23 +2064,23 @@ function startTerminalRuntime(runtime: ManagedTerminalRuntime) {
                     });
                 }
               })
-            .catch((error) => {
+            ?.catch((error) => {
               console.error(
                 "[review] failed to fetch review decision:",
                 error,
               );
             });
         }
-        void window.termcanvas.project
-          .removeWorktree(projectPath, worktreePath, true)
-          .then((result) => {
+        void window.termcanvas?.project
+          ?.removeWorktree(projectPath, worktreePath, true)
+          ?.then((result) => {
             if (result.ok) {
               useProjectStore
                 .getState()
                 .syncWorktrees(projectPath, result.worktrees);
             }
           })
-          .catch((error) => {
+          ?.catch((error) => {
             console.error("[review] failed to remove review worktree:", error);
           });
         destroyTerminalRuntime(terminal.id, {
@@ -2159,7 +2178,8 @@ function startTerminalRuntime(runtime: ManagedTerminalRuntime) {
         ),
       );
     },
-  );
+  )
+  : () => {};
 
   const handleTurnComplete = () => {
     const now = Date.now();
@@ -2174,14 +2194,14 @@ function startTerminalRuntime(runtime: ManagedTerminalRuntime) {
     refreshLinkedPrAfterAgentTurn(runtime);
   };
 
-  runtime.removeTurnComplete = window.termcanvas.session.onTurnComplete(
-    (sessionId) => {
-      const terminal = lookupCurrentTerminal(runtime);
-      if (terminal?.sessionId === sessionId) {
-        handleTurnComplete();
-      }
-    },
-  );
+  runtime.removeTurnComplete = window.termcanvas?.session?.onTurnComplete
+    ? window.termcanvas.session.onTurnComplete((sessionId) => {
+        const terminal = lookupCurrentTerminal(runtime);
+        if (terminal?.sessionId === sessionId) {
+          handleTurnComplete();
+        }
+      })
+    : null;
 
   if (window.termcanvas?.hooks) {
     runtime.removeHookTurnComplete = window.termcanvas.hooks.onTurnComplete(
@@ -2230,7 +2250,8 @@ function startTerminalRuntime(runtime: ManagedTerminalRuntime) {
   if (
     runtime.meta.terminal.type === "opencode" &&
     runtime.meta.terminal.issueNumber !== undefined &&
-    runtime.meta.terminal.reviewPrNumber === undefined
+    runtime.meta.terminal.reviewPrNumber === undefined &&
+    window.termcanvas?.github
   ) {
     const { projectId, worktreePath } = runtime.meta;
     const project = useProjectStore
@@ -2433,7 +2454,7 @@ export function fitTerminalRuntime(terminalId: string) {
   }
 
   runtime.fitAddon.fit();
-  window.termcanvas.terminal.resize(
+  getPtyTransport()?.resize(
     runtime.ptyId,
     runtime.xterm.cols,
     runtime.xterm.rows,
@@ -2575,7 +2596,7 @@ export function destroyTerminalRuntime(
   if (runtime.ptyId !== null) {
     const ptyId = runtime.ptyId;
     setPtyId(runtime, null);
-    void window.termcanvas.terminal.destroy(ptyId).catch((error) => {
+    void getPtyTransport()?.destroy(ptyId)?.catch((error) => {
       console.error(`[terminalRuntime] failed to destroy PTY ${ptyId}:`, error);
     });
   }
@@ -2655,6 +2676,9 @@ export function hasLiveReviewOnWorktree(worktreeId: string): boolean {
  */
 export async function refreshClaudeSessionStates(): Promise<void> {
   const tasks: Promise<void>[] = [];
+  if (!window.termcanvas?.session) {
+    return;
+  }
 
   for (const runtime of runtimeRegistry.values()) {
     if (
@@ -2667,11 +2691,11 @@ export async function refreshClaudeSessionStates(): Promise<void> {
 
     tasks.push(
       (async () => {
-        const pid = await window.termcanvas.terminal.getPid(runtime.ptyId!);
+        const pid = await getPtyTransport()?.getPid(runtime.ptyId!);
         if (!pid || runtime.disposed) return;
 
         const latestSessionId =
-          await window.termcanvas.session.getClaudeByPid(pid);
+          await window.termcanvas?.session?.getClaudeByPid(pid);
         if (runtime.disposed) return;
 
         if (

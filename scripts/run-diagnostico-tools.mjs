@@ -39,7 +39,7 @@ function argValue(name, fallback) {
 }
 
 const REPO = path.resolve(
-  argValue("--repo", "C:\\Users\\Estudiante UCU\\OneDrive\\Escritorio\\education-games"),
+  argValue("--repo", process.cwd()),
 );
 const OUT_DIR = path.resolve(
   argValue("--out", path.join(__dirname, "salidas")),

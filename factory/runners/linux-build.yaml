@@ -1,0 +1,30 @@
+# FUENTE ÚNICA (refactor E2 ③ "solo el runner escribe"): este yaml MANDA.
+# La imagen, los setupCommands y el shape se leen del yaml vía el loader
+# (headless-runtime/factory/agentLoader.ts); el TS nunca hardcodea nombres
+# de imagen. Cambiar el comportamiento = cambiar este archivo + test.
+# factory/runners/linux-build.yaml — Ola 15 Runners honestos.
+# H-009 (2026-09-04): imagen con node. La imagen previa no trae node ni
+# corepack y el setup `corepack enable` moría con exit 127 DENTRO de docker
+# (jobs job-mtmdu116-9u37, job-mtme2xav-tlhl, E2E-12 FAIL). `node:22-bookworm`
+# trae node+corepack (misma familia Debian que la previa para los pasos
+# de build). Cambiar el comportamiento = cambiar este archivo + test, nunca
+# editar TS a ciegas. Rollback = git revert.
+#
+# isolation: "docker" = el runner INTENTA docker SOLO si hay daemon disponible
+# (probe `docker info`, timeout 5s, cache 60s). Ante CUALQUIER error de docker
+# hace fail-open a ejecución local y lo registra en el evidence del step
+# (isolationFallback). Sin docker instalado no es error: es el modo local
+# declarado. isolation: "none" NUNCA intenta docker (interruptor, regla 8).
+description: "Linux build runner (docker cuando hay daemon, local declarado si no)"
+setupCommands:
+  - "corepack enable"
+# instanceShape es DOCUMENTAL en local (el daemon no provisiona VMs): describe
+# el perfil que este runner declara, no hardware reservado.
+instanceShape:
+  vcpus: 4
+  memoryGb: 8
+isolation: "docker"
+platform:
+  os: "linux"
+  arch: "x86_64"
+  dockerImage: "node:22-bookworm"

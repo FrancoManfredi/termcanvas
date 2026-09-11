@@ -205,7 +205,7 @@ export class GitFileWatcher {
 
   private resolveGitDir(worktreePath: string): string | null {
     try {
-      let gitDir = execSync("git rev-parse --git-dir", {
+      let gitDir = execSync("git rev-parse --git-dir", { windowsHide: true,
         cwd: worktreePath,
         encoding: "utf-8",
         stdio: ["pipe", "pipe", "pipe"],

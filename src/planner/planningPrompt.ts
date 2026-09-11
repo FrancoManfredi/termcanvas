@@ -3,6 +3,7 @@ import type { DiagnosisCategoryId } from "../types/diagnosisCategories.ts";
 import { getDiagnosisCategory, diagnosisFileName, legacyDiagnosisFileName } from "../types/diagnosisCategories.ts";
 import { skillForCategory } from "../skills/registry";
 import { buildRepoContextSection, buildRequirementsSection, buildArchitectureDecisionsSection } from "../utils/repoContext";
+import { TAG_PLANNING, withPhaseTag } from "../../headless-runtime/llm/phaseTags";
 
 export interface PlanningPromptInput {
   mode: PlannerMode;
@@ -317,7 +318,7 @@ export function buildPlanningPrompt(input: PlanningPromptInput): string {
         ]
       : [];
 
-  return [
+  const body = [
     ...contextSection,
     ...buildRequirementsSection(input.requirementsText),
     ...buildArchitectureDecisionsSection(input.decisionsText),
@@ -373,6 +374,8 @@ export function buildPlanningPrompt(input: PlanningPromptInput): string {
     `- Formato de trabajo: sección por sección, y MIRÁ el repo real antes de proponer (no inventes código que no existe).`,
     `- Prefijá cada paso relevante con [planning-${mode}].`,
   ].join("\n");
+  // Etiqueta humana de fase (primera línea).
+  return withPhaseTag(body, TAG_PLANNING);
 }
 
 export function planningOutputPath(

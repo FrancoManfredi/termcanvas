@@ -7,7 +7,9 @@
  * y pasa a depender de la interfaz neutra HarnessInterviewAdapter.
  */
 
-import { createOpencodeClient, createOpencodeServer, type OpencodeClient } from "@opencode-ai/sdk/v2";
+import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk/v2";
+import { spawnOpencodeServer } from "../../opencodeServerManager";
+import { toolsetFor } from "../../runner/toolPolicy";
 import { encontrarPuertoServidor } from "../puerto-libre.ts";
 import type { ModelRef } from "../../../shared/phaseModels.ts";
 import type { HarnessInterviewAdapter, HarnessPromptResult } from "../../../shared/neutral/interview.ts";
@@ -37,10 +39,12 @@ export async function ensureClient(): Promise<OpencodeClient> {
     for (let attempt = 0; attempt < SERVER_START_RETRIES; attempt++) {
       try {
         const port = await encontrarPuertoServidor(20000, 45000);
-        const server = await createOpencodeServer({
+        // Spawner propio con windowsHide (el del SDK abre consolas en Win).
+        const server = await spawnOpencodeServer({
           hostname: "127.0.0.1",
           port,
           timeout: SERVER_START_TIMEOUT_MS,
+          config: {},
         });
         runningServer = server;
         runningClient = createOpencodeClient({ baseUrl: server.url });
@@ -111,7 +115,7 @@ export const opencodeHarness: HarnessInterviewAdapter = {
         sessionID: opts.sessionId,
         model: { providerID: opts.model.providerID, modelID: opts.model.modelID },
         ...(opts.model.variant ? { variant: opts.model.variant } : {}),
-        tools: {},
+        tools: toolsetFor("interview"),
         parts: [{ type: "text", text: opts.text }],
         format: { type: "json_schema", schema: opts.schema },
       },

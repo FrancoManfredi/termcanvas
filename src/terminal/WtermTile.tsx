@@ -17,6 +17,7 @@ import { getTerminalRuntimePreviewAnsi } from "./terminalRuntimeStore";
 import { usePreferencesStore } from "../stores/preferencesStore";
 import { useThemeStore, XTERM_THEMES } from "../stores/themeStore";
 import { buildFontFamily } from "./fontRegistry";
+import { getPtyTransport } from "./ptyTransport";
 import type { CSSProperties } from "react";
 
 const TERMINAL_LINE_HEIGHT = 1.4;
@@ -108,10 +109,12 @@ export function WtermTile({ terminal }: Props) {
       replayedRef.current = true;
     }
 
-    return window.termcanvas.terminal.onOutput((id, data) => {
-      if (id !== ptyId) return;
-      handleRef.current?.write(data);
-    });
+    return (
+      getPtyTransport()?.onOutput((id, data) => {
+        if (id !== ptyId) return;
+        handleRef.current?.write(data);
+      }) ?? (() => {})
+    );
   }, [core, ptyId, terminal.id]);
 
   useEffect(() => {
@@ -123,7 +126,7 @@ export function WtermTile({ terminal }: Props) {
   const handleData = useCallback(
     (data: string) => {
       if (ptyId === null) return;
-      window.termcanvas.terminal.input(ptyId, data);
+      getPtyTransport()?.input(ptyId, data);
     },
     [ptyId],
   );
@@ -131,7 +134,7 @@ export function WtermTile({ terminal }: Props) {
   const handleResize = useCallback(
     (cols: number, rows: number) => {
       if (ptyId === null) return;
-      window.termcanvas.terminal.resize(ptyId, cols, rows);
+      getPtyTransport()?.resize(ptyId, cols, rows);
     },
     [ptyId],
   );

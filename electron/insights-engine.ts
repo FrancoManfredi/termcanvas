@@ -989,7 +989,7 @@ async function invokeCli(
   const invocation = buildCliInvocationArgs(spec.args, cliTool, prompt);
 
   return new Promise<string>((resolve, reject) => {
-    const child = spawn(spec.file, invocation.args, {
+    const child = spawn(spec.file, invocation.args, { windowsHide: true,
       cwd: spec.cwd,
       env: spec.env,
       stdio: ["pipe", "pipe", "pipe"],

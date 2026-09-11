@@ -1,4 +1,5 @@
 import { buildRepoContextSection, buildRequirementsSection, buildArchitectureDecisionsSection } from "../utils/repoContext";
+import { TAG_CANVAS_CONFLICT, withPhaseTag } from "../../headless-runtime/llm/phaseTags";
 
 export interface ResolveConflictPromptInput {
   issueNumber: number;
@@ -42,7 +43,7 @@ export function buildResolveConflictPrompt(
     input.conflictFiles && input.conflictFiles.length > 0
       ? `La app ya corrió el test-merge contra origin/main y precargó la lista de archivos en conflicto (NO hace falta correr gh pr view ni leer el comentario del Mergeador): ${input.conflictFiles.join(", ")}.`
       : `Leé la lista exacta de archivos en conflicto del comentario del Mergeador en el PR: gh pr view ${input.prNumber} --comments (y gh pr view ${input.prNumber} --json body si hace falta) — buscá el comentario con prefijo [mergeador].`;
-  return [
+  const body = [
     `# Resolver conflicto de merge — issue #${input.issueNumber} — ${input.title}`,
     "",
     `El PR #${input.prNumber} (rama ${input.branch}) no se pudo mergear contra main automáticamente: el mergeador detectó conflictos.`,
@@ -83,4 +84,6 @@ export function buildResolveConflictPrompt(
     `- NUNCA crees una rama o PR nuevo: la resolución va al PR #${input.prNumber} existente.`,
     `- Prefijá tus pasos con [fix-conflicto-${input.issueNumber}].`,
   ].join("\n");
+  // Etiqueta humana de fase (primera línea).
+  return withPhaseTag(body, TAG_CANVAS_CONFLICT);
 }

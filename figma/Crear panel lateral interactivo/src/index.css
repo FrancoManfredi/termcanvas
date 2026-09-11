@@ -1,0 +1,97 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap');
+@import 'tailwindcss';
+
+@theme {
+  --font-sans: 'Inter', sans-serif;
+  --font-mono: 'JetBrains Mono', monospace;
+
+  /* Surfaces — not pure black to reduce halation */
+  --bg:            #0d0d0d;
+  --bg-elevated:   #141414;
+  --bg-panel:      #111111;
+  --bg-hover:      #1c1c1c;
+  --bg-active:     #1f1f2e;
+
+  /* Borders */
+  --border:        #282828;
+  --border-subtle: #1e1e1e;
+  --border-focus:  #3b82f6;
+
+  /* Text — all pass AA 4.5:1 on #0d0d0d */
+  --text-primary:   #f0f0f0;   /* 17.7:1 */
+  --text-secondary: #c0c0c0;   /* 11.2:1 */
+  --text-tertiary:  #888888;   /*  5.9:1 */
+  --text-disabled:  #505050;   /*  2.9:1 — for truly decorative only */
+
+  /* Accent */
+  --accent:         #3b82f6;
+  --accent-hover:   #2563eb;
+  --accent-dim:     rgba(59,130,246,0.12);
+  --accent-border:  rgba(59,130,246,0.35);
+
+  /* Status semantics */
+  --status-pending:    #888888;
+  --status-progress:   #f59e0b;
+  --status-awaiting:   #a855f7;
+  --status-done:       #22c55e;
+
+  /* Phase palette */
+  --phase-impl:    #22d3ee;
+  --phase-review:  #fb923c;
+  --phase-fix:     #e879f9;
+
+  /* Awaiting palette */
+  --await-review:  #a78bfa;
+  --await-fix:     #fbbf24;
+  --await-merge:   #34d399;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+}
+
+/* Focus visible — never remove outlines entirely */
+:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}
+
+/* Scrollbar — hidden by default, show on hover */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2e2e2e transparent;
+}
+*::-webkit-scrollbar { width: 4px; height: 4px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb { background: #2e2e2e; border-radius: 4px; }
+*::-webkit-scrollbar-thumb:hover { background: #3e3e3e; }
+
+/* Animations */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.35; transform: scale(0.65); }
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.pulse-dot {
+  animation: pulse-dot 1.8s ease-in-out infinite;
+  display: inline-block;
+}
+.spin-icon {
+  animation: spin 1.6s linear infinite;
+  display: inline-block;
+}
+
+/* Respect reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .pulse-dot, .spin-icon { animation: none; }
+  * { transition-duration: 0ms !important; }
+}

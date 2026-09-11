@@ -1,0 +1,327 @@
+{
+  "consumer": {
+    "name": "playground-F05"
+  },
+  "interactions": [
+    {
+      "description": "a request to create a job with valid modelRef (gate pass)",
+      "providerStates": [
+        {
+          "name": "gate allows valid model",
+          "params": {
+            "worktree": "C:\\tmp\\playground-F05-valid"
+          }
+        }
+      ],
+      "request": {
+        "body": {
+          "cli": "claude",
+          "modelRef": {
+            "modelID": "gpt-4o",
+            "providerID": "openai",
+            "variant": "default"
+          },
+          "phase": "diagnosisLlm",
+          "prompt": "playground-F05-valid-prompt",
+          "worktree": "C:\\tmp\\playground-F05-valid"
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.cli": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.modelRef.modelID": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^gpt-4o$"
+                }
+              ]
+            },
+            "$.modelRef.providerID": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.modelRef.variant": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.phase": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.prompt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.worktree": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        },
+        "method": "POST",
+        "path": "/factory/jobs"
+      },
+      "response": {
+        "body": {
+          "id": "job-f05-valid01",
+          "job": {
+            "createdAt": "2026-05-13T14:22:10.123Z",
+            "id": "job-f05-valid01",
+            "phase": "diagnosisLlm",
+            "prompt": "playground-F05-valid-prompt",
+            "state": "queued",
+            "worktree": "C:\\tmp\\playground-F05-valid"
+          },
+          "path": "C:\\tmp\\playground-F05-valid\\.agents\\factory\\job-f05-valid01"
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.id": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^job-[a-z0-9\\-]+$"
+                }
+              ]
+            },
+            "$.job.createdAt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^\\d{4}-\\d{2}-\\d{2}T.*Z$"
+                }
+              ]
+            },
+            "$.job.id": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^job-[a-z0-9\\-]+$"
+                }
+              ]
+            },
+            "$.job.phase": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.job.prompt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.job.state": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^queued$"
+                }
+              ]
+            },
+            "$.job.worktree": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.path": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^[A-Z]:\\\\.*\\.agents\\\\factory\\\\job-.*"
+                }
+              ]
+            }
+          }
+        },
+        "status": 201
+      }
+    },
+    {
+      "description": "a request to create a job with invalid modelRef gpt-99 (gate fail)",
+      "providerStates": [
+        {
+          "name": "gate rejects invalid model",
+          "params": {
+            "worktree": "C:\\tmp\\playground-F05-invalid"
+          }
+        }
+      ],
+      "request": {
+        "body": {
+          "cli": "claude",
+          "modelRef": {
+            "modelID": "gpt-99",
+            "providerID": "openai",
+            "variant": "default"
+          },
+          "phase": "diagnosisLlm",
+          "prompt": "playground-F05-invalid-prompt",
+          "worktree": "C:\\tmp\\playground-F05-invalid"
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.cli": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.modelRef.modelID": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^gpt-99$"
+                }
+              ]
+            },
+            "$.modelRef.providerID": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.modelRef.variant": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.phase": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.prompt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.worktree": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        },
+        "method": "POST",
+        "path": "/factory/jobs"
+      },
+      "response": {
+        "body": {
+          "alternatives": [
+            "gpt-4o"
+          ],
+          "error": "model not in catalog"
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.alternatives": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$.error": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^model not in catalog$"
+                }
+              ]
+            }
+          }
+        },
+        "status": 400
+      }
+    }
+  ],
+  "metadata": {
+    "pact-js": {
+      "version": "14.0.0"
+    },
+    "pactRust": {
+      "ffi": "0.4.28",
+      "models": "1.3.5"
+    },
+    "pactSpecification": {
+      "version": "3.0.0"
+    }
+  },
+  "provider": {
+    "name": "FactoryProvider"
+  }
+}

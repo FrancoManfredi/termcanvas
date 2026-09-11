@@ -167,7 +167,7 @@ export class ClaudeCodeDriver {
 
     if (isDev) console.log("[ClaudeCodeDriver] start:", { args, cwd: this.options.cwd, sessionId: this.options.sessionId });
 
-    this.proc = spawn("claude", args, {
+    this.proc = spawn("claude", args, { windowsHide: true,
       cwd: this.options.cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],

@@ -459,6 +459,7 @@ async function captureLoginShellEnv(
         encoding: "buffer",
         maxBuffer: 1024 * 1024 * 4,
         timeout: 10_000,
+        windowsHide: true,
       },
       (error, stdout) => {
         if (error) {

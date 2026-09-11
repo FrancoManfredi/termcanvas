@@ -12,6 +12,9 @@ import { resolveActiveWorktree } from "../planner/planningSession";
 import { useT } from "../i18n/useT";
 import { getWorkspaceBaseName } from "../titleHelper";
 import { formatShortcut, useShortcutStore } from "../stores/shortcutStore";
+import { useFactoryLabStore } from "../stores/factoryLabStore";
+import { useWarpPanelStore } from "../features/warpPanel/warpPanelStore";
+
 
 export { TOOLBAR_HEIGHT } from "./toolbarHeight";
 
@@ -42,6 +45,10 @@ export function Toolbar() {
   const openSettings = useSettingsModalStore((s) => s.openSettings);
   const closeSettings = useSettingsModalStore((s) => s.closeSettings);
   const [showUpdate, setShowUpdate] = useState(false);
+  const factoryLabActive = useFactoryLabStore((s) => s.factoryLabActive);
+  const toggleFactoryLab = useFactoryLabStore((s) => s.toggleFactoryLab);
+  const warpPanelActive = useWarpPanelStore((s) => s.warpPanelActive);
+  const toggleWarpPanel = useWarpPanelStore((s) => s.toggleWarpPanel);
 
   const hubOpen = useHubStore((s) => s.open);
   const toggleHub = useHubStore((s) => s.toggleHub);
@@ -52,6 +59,7 @@ export function Toolbar() {
   // Modal unificado de arquitectura: reemplaza los dos botones separados
   // (entrevista de contexto + entrevista de requerimientos). El modal
   // inicializa los stores de las entrevistas al abrirse.
+
   const [coreOpen, setCoreOpen] = useState(false);
 
   const openCore = () => {
@@ -116,6 +124,42 @@ export function Toolbar() {
               onClick={() => setShowUpdate(true)}
             />
           )}
+
+          <button
+            type="button"
+            data-factory-lab-trigger="true"
+            data-active={factoryLabActive ? "true" : "false"}
+            className={iconButtonClass}
+            style={{
+              ...ICON_BUTTON_TRANSITION,
+              color: factoryLabActive ? "var(--text-primary)" : undefined,
+              backgroundColor: factoryLabActive ? "var(--surface-hover)" : undefined,
+            }}
+            onClick={toggleFactoryLab}
+            title="Factory Lab — probar cableado opencode web"
+            aria-label={factoryLabActive ? "Salir de Factory Lab" : "Abrir Factory Lab"}
+            aria-pressed={factoryLabActive}
+          >
+            <PlaygroundIcon active={factoryLabActive} />
+          </button>
+
+          <button
+            type="button"
+            data-warp-panel-trigger="true"
+            data-active={warpPanelActive ? "true" : "false"}
+            className={iconButtonClass}
+            style={{
+              ...ICON_BUTTON_TRANSITION,
+              color: warpPanelActive ? "var(--text-primary)" : undefined,
+              backgroundColor: warpPanelActive ? "var(--surface-hover)" : undefined,
+            }}
+            onClick={toggleWarpPanel}
+            title="Warp Panel — issues side panel"
+            aria-label={warpPanelActive ? "Close Warp Panel" : "Open Warp Panel"}
+            aria-pressed={warpPanelActive}
+          >
+            <WarpPanelIcon active={warpPanelActive} />
+          </button>
 
           <button
             type="button"
@@ -473,6 +517,64 @@ function StarIcon() {
         stroke="currentColor"
         strokeWidth="1.2"
         strokeLinejoin="round"
+      />
+    </svg>
+  );
+}
+
+function PlaygroundIcon({ active }: { active?: boolean }) {
+  // Beaker / test-tube — distinct from Hub (rows) and Architecture (layers).
+  // Filled when active so the user reads at a glance "estoy en playground".
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <path
+        d="M6 2h4M7 2v3.8L3.6 11.2a1.3 1.3 0 0 0 1.1 1.9h6.6a1.3 1.3 0 0 0 1.1-1.9L9 5.8V2"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        fill={active ? "currentColor" : "none"}
+        fillOpacity={active ? 0.14 : 0}
+      />
+      <path d="M5.5 10h5" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" opacity={0.55} />
+      {active && <circle cx="8" cy="8.5" r="1" fill="currentColor" opacity={0.9} />}
+    </svg>
+  );
+}
+
+function WarpPanelIcon({ active }: { active?: boolean }) {
+  // Kanban columns — three vertical bars echoing the WarpPanel board view.
+  // Stroke-only like its toolbar siblings; center bar filled when active.
+  return (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden>
+      <rect
+        x="1.5"
+        y="2.5"
+        width="3.5"
+        height="11"
+        rx="1"
+        stroke="currentColor"
+        strokeWidth="1.3"
+      />
+      <rect
+        x="6.25"
+        y="2.5"
+        width="3.5"
+        height="11"
+        rx="1"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        fill={active ? "currentColor" : "none"}
+        fillOpacity={active ? 0.35 : 0}
+      />
+      <rect
+        x="11"
+        y="2.5"
+        width="3.5"
+        height="11"
+        rx="1"
+        stroke="currentColor"
+        strokeWidth="1.3"
       />
     </svg>
   );

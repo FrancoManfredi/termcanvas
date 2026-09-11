@@ -1,0 +1,42 @@
+{
+  "$comment": "Ola 12 — Tasks de referencia para benchmarks (comparar CONFIGS DE REVIEWER sobre TASKS FIJAS, Correctness built-in, sin ganador automático).",
+  "version": 1,
+  "choice": "Un solo archivo reference-tasks.json (4 tasks): simple de versionar y de cargar en el POST humano a /factory/benchmarks. Si el set crece, partir en un *.json por task.",
+  "honestyNote": "Las 4 tasks tienen expectedVerdict accept. Los casos revise se agregan cuando haya fixtures con defectos inyectados (Ola 13+): hoy un accept del revisor sobre una task revise-expectante fallaría Correctness sin ser bug del modelo, así que no se incluyen. Nada de findings inventados.",
+  "isolationNote": "Jobs/pacts nunca tocan benchmarks: nadie invoca estas tasks salvo POST humano a /factory/benchmarks (sin gate necesario).",
+  "tasks": [
+    {
+      "id": "trivial-folder-note",
+      "prompt": "Create a folder named notes containing a file readme.txt with a one-line description of the folder purpose.",
+      "files": [{ "path": "notes/readme.txt", "content": "Notes folder: short reference memos for the team.\n" }],
+      "verification": { "overall": "pass" },
+      "expectedVerdict": "accept"
+    },
+    {
+      "id": "minimal-single-file-tweak",
+      "prompt": "Update config/defaults.txt changing the retry count from 2 to 3, nothing else.",
+      "files": [{ "path": "config/defaults.txt", "content": "retries=3\ntimeout_ms=5000\nverbose=false\n" }],
+      "verification": { "overall": "pass" },
+      "expectedVerdict": "accept"
+    },
+    {
+      "id": "docs-touch",
+      "prompt": "Add a short paragraph to docs/overview.md describing the nightly backup window.",
+      "files": [
+        {
+          "path": "docs/overview.md",
+          "content": "# Overview\n\nThis service runs a nightly backup window between 02:00 and 03:00 UTC.\n"
+        }
+      ],
+      "verification": { "overall": "pass" },
+      "expectedVerdict": "accept"
+    },
+    {
+      "id": "comment-tidy",
+      "prompt": "Tidy the header comment of notes/style-guide.md so it states the line-length rule in one sentence.",
+      "files": [{ "path": "notes/style-guide.md", "content": "<!-- Keep lines under 100 chars. -->\n\n# Style guide\n" }],
+      "verification": { "overall": "pass" },
+      "expectedVerdict": "accept"
+    }
+  ]
+}

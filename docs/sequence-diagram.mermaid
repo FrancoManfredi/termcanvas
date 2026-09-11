@@ -1,0 +1,73 @@
+sequenceDiagram
+    actor User as Usuario
+    participant Lab as FactoryLabPage<br/>polling 2.5s
+    participant Factory as FactoryServer<br/>17680
+    participant Store as WorkItemStore<br/>reviewCount
+    participant ImplSvc as ImplementService<br/>handleBuilding
+    participant Writer as ResultWriter<br/>result.json
+    participant RevSvc as ReviewService<br/>handleReview
+    participant Selector as ReviewModelSelector<br/>pares+fallback
+    participant Agent as ReviewAgent<br/>read-only tools
+    participant OpMgr as OpencodeServerManager<br/>efimero
+    participant Disk as review.json<br/>disco atomico
+    participant FLog as ForemanLogStore<br/>timeline+logs
+
+    Note over ImplSvc,Writer: Building ya termino con pass (Ola 3)
+    ImplSvc->>Writer: write(dir, payload pass) result.json tmp-renombrado
+    ImplSvc->>Store: transition(Building → Review, actor runner, msg verification passed → review)
+    Store-->>ImplSvc: WorkItem Review reviewCount=0
+    ImplSvc->>FLog: info [Implement] job-x → Review (pass, dispara revision)
+    ImplSvc->>RevSvc: handleReview(workItem) async post-transition (fire-and-forget)
+    RevSvc->>Store: acquireReviewLock(job-x) true
+    RevSvc->>Selector: selectReviewer(implementModel)
+    alt mismo modelo (igual provider/model)
+        Selector-->>RevSvc: SAME_MODEL block
+        RevSvc->>Store: appendEvent Review ask_human mismo-modelo-bloqueado
+        RevSvc->>FLog: warn [Review] job-x ask_human mismo modelo implement==reviewer
+        RevSvc->>Store: releaseReviewLock(job-x)
+    else modelos distintos
+        Selector-->>RevSvc: reviewerModel (par o fallback)
+        RevSvc->>Store: appendEvent review:started reviewer=X attempt=N
+        RevSvc->>Agent: consume({prompt original, createdFiles, verification, diff}, reviewerModel)
+        Agent->>OpMgr: getClient() reusa efimero
+        Agent->>Agent: buildReviewPrompt(input) 4000 + diff + result.json
+        Agent->>OpMgr: session.create({title: Review job-x, directory: worktree})
+        OpMgr-->>Agent: sessionId ses_rev_abc
+        Agent->>OpMgr: session.prompt({model: reviewerModel, tools:{read,glob,grep}, json_schema})
+        Note over OpMgr: LLM solo-lectura<br/>read createdFiles, grep secretos,<br/>glob tests/** — NO write/edit
+        OpMgr-->>Agent: JSON {verdict, findings[3 ejes], summary, confidence}
+        Agent->>Agent: parseReviewResponse(raw) zod strict + robustExtract
+        Agent-->>RevSvc: ReviewResult {verdict, findings, confidence}
+        RevSvc->>Disk: writeReview(dir, result) review.json tmp-rename
+        RevSvc->>Store: appendEvent review:verdict verdict=X findings=N
+        RevSvc->>FLog: decision/warn [Review] job-x → verdict X
+        alt verdict accept
+            RevSvc->>Store: transitionWithReview(Review → Complete, result)
+            RevSvc->>Disk: ensure .done existe
+            RevSvc->>FLog: info [Review] job-x → Complete (accept)
+        else verdict revise AND reviewCount < 2
+            RevSvc->>Store: incrementReviewCount(job-x) → 1 o 2
+            RevSvc->>Store: transitionWithReview(Review → Building, result, msg findings para rebuild)
+            RevSvc->>FLog: warn [Review] job-x → Building (revise N/2)
+            Note over ImplSvc: Building re-ejecuta ImplementAgent con findings en prompt<br/>al terminar pass vuelve a Review (attempt+1)
+        else verdict revise AND reviewCount >= 2
+            RevSvc->>Store: appendEvent Review ask_human max-revisiones-2-alcanzado (SIN transicion)
+            RevSvc->>FLog: warn [Review] job-x ask_human max 2 revisiones
+            Note over Lab: queda en Review esperando humano
+        else verdict ask_human
+            RevSvc->>Store: appendEvent Review ask_human reason (SIN transicion)
+            RevSvc->>FLog: warn [Review] job-x ask_human + summary
+            Note over Lab: queda en Review esperando humano
+        end
+        RevSvc->>Store: releaseReviewLock(job-x)
+    end
+
+    par Polling visible sin reload
+        Lab->>Factory: GET /factory/jobs cada 2.5s
+        Factory->>Store: list() con lastReview + reviewCount + verdict
+        Store-->>Factory: WorkItem[] Review/Complete/Building
+        Factory-->>Lab: 200 jobs + reviewPreview + timeline
+        Lab->>Lab: FlowBar Review activo + badge accept/revise/ask_human + ReviewPanel findings
+        Lab->>Factory: GET /foreman/logs?limit=100 cada 2.5s
+        Factory-->>Lab: logs [Review] verdict + findings
+    end

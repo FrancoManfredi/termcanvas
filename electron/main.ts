@@ -51,6 +51,8 @@ import {
 import { buildLaunchSpec } from "./pty-launch.js";
 import { registerInterviewIpc, closeInterviewService, setInterviewActivitySink } from "./interview-service";
 import { registerModelCatalogIpc } from "./model-catalog-ipc";
+import { registerPlaygroundIpc } from "./playground-ipc";
+import { ensureFactoryServer, closeFactoryServer } from "../headless-runtime/factory/factoryServer";
 import {
   createDefaultComposerSubmitDeps,
   submitComposerRequest,
@@ -988,7 +990,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         const execFileAsync = promisify(execFile);
         const branchExists = async (ref: string) => {
           try {
-            await execFileAsync("git", ["rev-parse", "--verify", ref], {
+            await execFileAsync("git", ["rev-parse", "--verify", ref], { windowsHide: true,
               cwd: resolvedRepo,
             });
             return true;
@@ -1003,7 +1005,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
           await execFileAsync(
             "git",
             ["worktree", "add", worktreePath, trimmedBranch],
-            { cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
+            { windowsHide: true, cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
           );
         } else if (await branchExists(`refs/remotes/origin/${trimmedBranch}`)) {
           // Branch only exists on the remote: create the local branch
@@ -1011,13 +1013,13 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
           await execFileAsync(
             "git",
             ["worktree", "add", "-b", trimmedBranch, worktreePath, `origin/${trimmedBranch}`],
-            { cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
+            { windowsHide: true, cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
           );
         } else {
           await execFileAsync(
             "git",
             ["worktree", "add", "-b", trimmedBranch, worktreePath],
-            { cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
+            { windowsHide: true, cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
           );
         }
         const worktrees = await projectScanner.listWorktreesAsync(resolvedRepo);
@@ -1077,13 +1079,13 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
           await execFileAsync(
             "git",
             ["worktree", "add", worktreePath, trimmedBranch],
-            { cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
+            { windowsHide: true, cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
           );
         } else {
           await execFileAsync(
             "git",
             ["worktree", "add", "-b", trimmedBranch, worktreePath, `origin/${trimmedBranch}`],
-            { cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
+            { windowsHide: true, cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
           );
         }
         const worktrees = await projectScanner.listWorktreesAsync(resolvedRepo);
@@ -1145,7 +1147,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         // in-use guard handles those.
         const { stdout: registeredOut } = await execFileAsync(
           "git", ["worktree", "list", "--porcelain"],
-          { cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
+          { windowsHide: true, cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
         );
         const registered = new Set(
           registeredOut
@@ -1179,7 +1181,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         await execFileAsync(
           "git",
           ["worktree", "add", "--detach", worktreePath, resolved.ref],
-          { cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
+          { windowsHide: true, cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
         );
         // Persist the source branch so the scanner can display
         // "<branch> (review)" instead of "(detached)". Stored in git's
@@ -1237,7 +1239,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
           const { stdout } = await execFileAsync(
             "git",
             ["status", "--porcelain"],
-            { cwd: resolvedWorktree, maxBuffer: 10 * 1024 * 1024 },
+            { windowsHide: true, cwd: resolvedWorktree, maxBuffer: 10 * 1024 * 1024 },
           );
           return stdout.trim().length > 0;
         } catch {
@@ -1248,7 +1250,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
 
       const pruneWorktrees = async (): Promise<void> => {
         try {
-          await execFileAsync("git", ["worktree", "prune"], {
+          await execFileAsync("git", ["worktree", "prune"], { windowsHide: true,
             cwd: resolvedRepo,
             maxBuffer: 10 * 1024 * 1024,
           });
@@ -1266,7 +1268,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
           const { stdout } = await execFileAsync(
             "git",
             ["worktree", "list", "--porcelain"],
-            { cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
+            { windowsHide: true, cwd: resolvedRepo, maxBuffer: 10 * 1024 * 1024 },
           );
           let currentPath = "";
           for (const line of stdout.split("\n")) {
@@ -1298,7 +1300,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
 
       const deleteWorktreeBranch = async (branch: string): Promise<void> => {
         try {
-          await execFileAsync("git", ["branch", "-D", branch], {
+          await execFileAsync("git", ["branch", "-D", branch], { windowsHide: true,
             cwd: resolvedRepo,
             maxBuffer: 10 * 1024 * 1024,
           });
@@ -1328,7 +1330,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
           ? buildGitWorktreeRemoveArgs(resolvedWorktree)
           : ["worktree", "remove", resolvedWorktree];
         try {
-          await execFileAsync("git", args, {
+          await execFileAsync("git", args, { windowsHide: true,
             cwd: resolvedRepo,
             maxBuffer: 10 * 1024 * 1024,
           });
@@ -2822,7 +2824,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         execFile(
           "git",
           ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
-          { cwd: dirPath, timeout: 10000, maxBuffer: 64 * 1024 * 1024 },
+          { windowsHide: true, cwd: dirPath, timeout: 10000, maxBuffer: 64 * 1024 * 1024 },
           (err, stdout) => (err ? reject(err) : resolve(stdout)),
         );
       });
@@ -2873,7 +2875,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         execFile(
           "git",
           args,
-          { cwd: dirPath, timeout: 10000, maxBuffer: 64 * 1024 * 1024 },
+          { windowsHide: true, cwd: dirPath, timeout: 10000, maxBuffer: 64 * 1024 * 1024 },
           (err, out) => (err ? reject(err) : resolve(out)),
         );
       });
@@ -2933,7 +2935,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
           execFile(
             spec.file,
             ["--version"],
-            { timeout: 5000, env: spec.env },
+            { windowsHide: true, timeout: 5000, env: spec.env },
             (err, stdout) => {
               if (err) {
                 resolve(null);
@@ -3404,7 +3406,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         try {
           const { stdout: remoteUrl } = await execFileAsync(
             "git", ["remote", "get-url", "origin"],
-            { cwd, timeout: 10_000, env: execEnv },
+            { windowsHide: true, cwd, timeout: 10_000, env: execEnv },
           );
           const match = remoteUrl.trim().match(
             /github\.com[:/]([^/]+)\/([^/\s.]+?)(?:\.git)?$/i,
@@ -3429,9 +3431,9 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         // Step 2: GraphQL query for ALL issue data including project fields,
         // sub-issues, relationships, and linked PRs
         const query = `
-          query($owner: String!, $repo: String!, $cursor: String) {
+          query($owner: String!, $repo: String!, $endCursor: String) {
             repository(owner: $owner, name: $repo) {
-              issues(first: 50, states: [OPEN, CLOSED], after: $cursor, orderBy: {field: CREATED_AT, direction: DESC}) {
+              issues(first: 50, states: [OPEN, CLOSED], after: $endCursor, orderBy: {field: CREATED_AT, direction: DESC}) {
                 nodes {
                   number
                   title
@@ -3563,19 +3565,74 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
             }
           }`;
 
-        const { stdout } = await execFileAsync(
-          "gh", [
-            "api", "graphql",
-            "--paginate",
-            "-F", `owner=${owner}`,
-            "-F", `repo=${repo}`,
-            "-f", `query=${query}`,
-          ],
-          { cwd, timeout: 60_000, maxBuffer: 50 * 1024 * 1024, env: execEnv },
-        );
-
-        // gh api graphql --paginate returns concatenated JSON; parse each page
-        const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
+        // Manual pagination (NOT `gh api graphql --paginate`: the paginator
+        // only injects `$endCursor`, silently loops forever on any other
+        // variable name, and gives no truncation signal. Looping here gives
+        // a completeness flag so the canvas only prunes stale cards on a
+        // fully-paginated fetch, never on a partial one).
+        const MAX_ISSUE_PAGES = 20;
+        const lines: string[] = [];
+        let fetchComplete = true;
+        {
+          let cursor: string | null = null;
+          for (let page = 0; page < MAX_ISSUE_PAGES; page++) {
+            const pageArgs = [
+              "api",
+              "graphql",
+              "-F",
+              `owner=${owner}`,
+              "-F",
+              `repo=${repo}`,
+              ...(cursor !== null ? ["-F", `endCursor=${cursor}`] : []),
+              "-f",
+              `query=${query}`,
+            ];
+            let pageOut: string;
+            try {
+              const res = await execFileAsync("gh", pageArgs, { windowsHide: true,
+                cwd,
+                timeout: 30_000,
+                maxBuffer: 50 * 1024 * 1024,
+                env: execEnv,
+              });
+              pageOut = res.stdout;
+            } catch (err) {
+              if (lines.length > 0) {
+                fetchComplete = false;
+                break;
+              }
+              throw err;
+            }
+            let parsed: unknown = null;
+            try {
+              parsed = JSON.parse(pageOut);
+            } catch {
+              fetchComplete = false;
+              break;
+            }
+            lines.push(pageOut);
+            const info = (parsed as Record<string, unknown> | null)?.data as
+              | Record<string, unknown>
+              | null
+              | undefined;
+            const issuesConn = (info?.repository as Record<string, unknown> | null | undefined)?.issues as
+              | Record<string, unknown>
+              | null
+              | undefined;
+            const pageInfo = issuesConn?.pageInfo as
+              | { hasNextPage?: unknown; endCursor?: unknown }
+              | null
+              | undefined;
+            if (!pageInfo || pageInfo.hasNextPage !== true) break;
+            if (typeof pageInfo.endCursor !== "string" || pageInfo.endCursor.length === 0) {
+              fetchComplete = false;
+              break;
+            }
+            cursor = pageInfo.endCursor;
+            if (page === MAX_ISSUE_PAGES - 1) fetchComplete = false;
+          }
+        }
+        const stdout = lines.join("\n");
         const allIssues: Array<Record<string, unknown>> = [];
         let graphqlErrors: Array<{ message: string }> = [];
 
@@ -3604,11 +3661,11 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
           console.error("[gh-issues] GraphQL errors in response:", JSON.stringify(graphqlErrors));
         }
         if (graphqlErrors.length > 0 || allIssues.length > 0) {
-          return { ok: true as const, issues: allIssues };
+          return { ok: true as const, issues: allIssues, complete: fetchComplete };
         }
 
         // No issues and no GraphQL errors — assume the repo exists but has no open issues
-        return { ok: true as const, issues: [] };
+        return { ok: true as const, issues: [], complete: fetchComplete };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         const code =
@@ -3732,7 +3789,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         try {
           const { stdout: remoteUrl } = await execFileAsync(
             "git", ["remote", "get-url", "origin"],
-            { cwd, timeout: 10_000, env: execEnv },
+            { windowsHide: true, cwd, timeout: 10_000, env: execEnv },
           );
           const match = remoteUrl.trim().match(
             /github\.com[:/]([^/]+)\/([^/\s.]+?)(?:\.git)?$/i,
@@ -3778,7 +3835,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
             "-F", `number=${issueNumber}`,
             "-f", `query=${query}`,
           ],
-          { cwd, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, env: execEnv },
+          { windowsHide: true, cwd, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, env: execEnv },
         );
 
         const data = JSON.parse(stdout);
@@ -3852,7 +3909,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         try {
           const { stdout: remoteUrl } = await execFileAsync(
             "git", ["remote", "get-url", "origin"],
-            { cwd, timeout: 10_000, env: execEnv },
+            { windowsHide: true, cwd, timeout: 10_000, env: execEnv },
           );
           const match = remoteUrl.trim().match(
             /github\.com[:/]([^/]+)\/([^/\s.]+?)(?:\.git)?$/i,
@@ -3898,7 +3955,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
             "-F", `number=${issueNumber}`,
             "-f", `query=${query}`,
           ],
-          { cwd, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, env: execEnv },
+          { windowsHide: true, cwd, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, env: execEnv },
         );
 
         const data = JSON.parse(stdout);
@@ -3978,7 +4035,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
             "--json", "reviewDecision,reviews,labels,headRefOid",
             "--jq", "{ decision: .reviewDecision, headRefOid: .headRefOid, reviews: [.reviews[] | { state: .state, body: .body, submittedAt: .submittedAt, commitOid: .commit.oid }], labels: [.labels[].name] }",
           ],
-          { cwd, timeout: 15_000, maxBuffer: 10 * 1024 * 1024, env: execEnv },
+          { windowsHide: true, cwd, timeout: 15_000, maxBuffer: 10 * 1024 * 1024, env: execEnv },
         );
         const parsed = JSON.parse(stdout);
         const decision = parsed?.decision;
@@ -4070,7 +4127,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         const { stdout } = await execFileAsync(
           "gh",
           ["pr", "view", String(prNumber), "--comments"],
-          { cwd, timeout: 20_000, maxBuffer: 10 * 1024 * 1024, env: execEnv },
+          { windowsHide: true, cwd, timeout: 20_000, maxBuffer: 10 * 1024 * 1024, env: execEnv },
         );
         const full = stdout.trim();
         const MAX_COMMENT_CHARS = 5000;
@@ -4128,7 +4185,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
           args: string[],
           timeout = 15_000,
         ): Promise<string> =>
-          execFileAsync("gh", args, {
+          execFileAsync("gh", args, { windowsHide: true,
             cwd,
             timeout,
             maxBuffer: 10 * 1024 * 1024,
@@ -4294,26 +4351,26 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
       try {
         // Same fetch pattern as the mergeador: the PR branch is fetched by
         // ref so the detached throwaway worktree can be created at it.
-        await execFileAsync("git", ["fetch", "origin", "main"], {
+        await execFileAsync("git", ["fetch", "origin", "main"], { windowsHide: true,
           cwd,
           ...gitOpts,
         });
         await execFileAsync(
           "git",
           ["fetch", "origin", `refs/heads/${branch}`],
-          { cwd, ...gitOpts },
+          { windowsHide: true, cwd, ...gitOpts },
         );
         await execFileAsync(
           "git",
           ["worktree", "add", "--detach", worktreePath, `origin/${branch}`],
-          { cwd, ...gitOpts },
+          { windowsHide: true, cwd, ...gitOpts },
         );
         let conflictFiles: string[] = [];
         try {
           await execFileAsync(
             "git",
             ["merge", "origin/main", "--no-commit", "--no-ff"],
-            { cwd: worktreePath, ...gitOpts },
+            { windowsHide: true, cwd: worktreePath, ...gitOpts },
           );
           // Clean merge → the branch already integrates with main.
         } catch {
@@ -4324,7 +4381,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
           const { stdout } = await execFileAsync(
             "git",
             ["diff", "--name-only", "--diff-filter=U"],
-            { cwd: worktreePath, ...gitOpts },
+            { windowsHide: true, cwd: worktreePath, ...gitOpts },
           );
           conflictFiles = stdout
             .split(/\r?\n/)
@@ -4340,7 +4397,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         // worktree remove clears the temp checkout regardless. A failure here
         // never blocks the result — a leftover detached worktree is harmless.
         try {
-          await execFileAsync("git", ["merge", "--abort"], {
+          await execFileAsync("git", ["merge", "--abort"], { windowsHide: true,
             cwd: worktreePath,
             ...gitOpts,
           });
@@ -4351,7 +4408,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
           await execFileAsync(
             "git",
             ["worktree", "remove", "--force", worktreePath],
-            { cwd, ...gitOpts },
+            { windowsHide: true, cwd, ...gitOpts },
           );
         } catch {
           // Best-effort cleanup.
@@ -4367,7 +4424,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
     const { promisify } = await import("util");
     const execFileAsync = promisify(execFile);
     try {
-      const { stdout } = await execFileAsync("gh", ["label", "list", "--json", "name,color,description"], { cwd, timeout: 15_000, env: { ...process.env } });
+      const { stdout } = await execFileAsync("gh", ["label", "list", "--json", "name,color,description"], { windowsHide: true, cwd, timeout: 15_000, env: { ...process.env } });
       const labels = JSON.parse(stdout);
       return { ok: true as const, labels: labels as Array<{ name: string; color: string; description: string }> };
     } catch (err) {
@@ -4384,7 +4441,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
     const { promisify } = await import("util");
     const execFileAsync = promisify(execFile);
     try {
-      const { stdout } = await execFileAsync("gh", ["issue", "list", "--state", "open", "--limit", "50", "--json", "number,title"], { cwd, timeout: 15_000, env: { ...process.env } });
+      const { stdout } = await execFileAsync("gh", ["issue", "list", "--state", "open", "--limit", "50", "--json", "number,title"], { windowsHide: true, cwd, timeout: 15_000, env: { ...process.env } });
       const issues = JSON.parse(stdout);
       return { ok: true as const, issues: issues as Array<{ number: number; title: string }> };
     } catch {
@@ -4399,7 +4456,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
     const { promisify } = await import("util");
     const execFileAsync = promisify(execFile);
     try {
-      const { stdout } = await execFileAsync("gh", ["api", "/repos/{owner}/{repo}/milestones", "--jq", ".[] | {number, title, due_on}"], { cwd, timeout: 15_000, env: { ...process.env } });
+      const { stdout } = await execFileAsync("gh", ["api", "/repos/{owner}/{repo}/milestones", "--jq", ".[] | {number, title, due_on}"], { windowsHide: true, cwd, timeout: 15_000, env: { ...process.env } });
       const lines = stdout.trim().split(/\r?\n/).filter(Boolean);
       const milestones = lines.map((l) => JSON.parse(l));
       return { ok: true as const, milestones: milestones as Array<{ number: number; title: string; due_on: string | null }> };
@@ -4440,7 +4497,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         args.splice(1, 0, "reopen");
       }
 
-      await execFileAsync("gh", args, { cwd, timeout: 15_000, env: { ...process.env } });
+      await execFileAsync("gh", args, { windowsHide: true, cwd, timeout: 15_000, env: { ...process.env } });
       return { ok: true as const };
     } catch (err) {
       return { ok: false as const, error: String(err) };
@@ -4452,7 +4509,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
     const { promisify } = await import("util");
     const execFileAsync = promisify(execFile);
     try {
-      await execFileAsync("gh", ["issue", "comment", String(number), "--body", body], { cwd, timeout: 15_000, env: { ...process.env } });
+      await execFileAsync("gh", ["issue", "comment", String(number), "--body", body], { windowsHide: true, cwd, timeout: 15_000, env: { ...process.env } });
       return { ok: true as const };
     } catch (err) {
       return { ok: false as const, error: String(err) };
@@ -4480,7 +4537,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
     const execFileAsync = promisify(execFile);
     const bodyFile = join(tmpdir(), `termcanvas-issue-${Date.now()}-${Math.random().toString(36).slice(2)}.md`);
     const ghArgs = (args: string[]) =>
-      execFileAsync("gh", args, { cwd, timeout: 30_000, env: { ...process.env } });
+      execFileAsync("gh", args, { windowsHide: true, cwd, timeout: 30_000, env: { ...process.env } });
     const parseCreated = (stdout: string) => {
       const url = stdout.trim();
       const match = url.match(/\/issues\/(\d+)\s*$/);
@@ -4516,11 +4573,11 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
       await ensureLabels();
       const labelsArgs = labels.flatMap((label) => ["--label", label]);
       try {
-        const { stdout } = await execFileAsync("gh", ["issue", "create", "--title", title, "--body-file", bodyFile, ...labelsArgs], { cwd, timeout: 30_000, env: { ...process.env } });
+        const { stdout } = await execFileAsync("gh", ["issue", "create", "--title", title, "--body-file", bodyFile, ...labelsArgs], { windowsHide: true, cwd, timeout: 30_000, env: { ...process.env } });
         return parseCreated(stdout);
       } catch {
         // Labels inexistentes en el repo: crear igual sin ellos.
-        const { stdout } = await execFileAsync("gh", ["issue", "create", "--title", title, "--body-file", bodyFile], { cwd, timeout: 30_000, env: { ...process.env } });
+        const { stdout } = await execFileAsync("gh", ["issue", "create", "--title", title, "--body-file", bodyFile], { windowsHide: true, cwd, timeout: 30_000, env: { ...process.env } });
         return parseCreated(stdout);
       }
     } catch (err) {
@@ -4542,7 +4599,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
     try {
       const { stdout: remoteUrl } = await execFileAsync(
         "git", ["remote", "get-url", "origin"],
-        { cwd, timeout: 10_000, env: { ...process.env } },
+        { windowsHide: true, cwd, timeout: 10_000, env: { ...process.env } },
       );
       const match = remoteUrl.trim().match(
         /github\.com[:/]([^/]+)\/([^/\s.]+?)(?:\.git)?$/i,
@@ -4551,7 +4608,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
       const { stdout } = await execFileAsync(
         "gh",
         ["api", `repos/${match[1]}/${match[2]}/issues?state=all&per_page=1&sort=created&direction=desc`, "--jq", ".[0].number"],
-        { cwd, timeout: 15_000, env: { ...process.env } },
+        { windowsHide: true, cwd, timeout: 15_000, env: { ...process.env } },
       );
       const number = Number(stdout.trim());
       return Number.isFinite(number) ? number : null;
@@ -4614,7 +4671,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
     const { join } = await import("path");
     const execFileAsync = promisify(execFile);
     const ghArgs = (args: string[]) =>
-      execFileAsync("gh", args, { cwd, timeout: 30_000, env: { ...process.env } });
+      execFileAsync("gh", args, { windowsHide: true, cwd, timeout: 30_000, env: { ...process.env } });
 
     const configPath = join(cwd, ".agents", "planning", "project-config.json");
     let raw: string;
@@ -4636,7 +4693,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
     try {
       let owner = config.owner;
       if (!owner) {
-        const { stdout: remoteUrl } = await execFileAsync("git", ["remote", "get-url", "origin"], { cwd, timeout: 10_000, env: { ...process.env } });
+        const { stdout: remoteUrl } = await execFileAsync("git", ["remote", "get-url", "origin"], { windowsHide: true, cwd, timeout: 10_000, env: { ...process.env } });
         const match = remoteUrl.trim().match(/github\.com[:/]([^/]+)\//i);
         if (!match) {
           return { ok: false as const, error: "No se pudo deducir el owner del remote" };
@@ -4709,7 +4766,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
       await execFileAsync(
         "gh",
         ["label", "create", labelName, "--color", REVIEW_LABEL_COLORS[labelName] ?? "d4c5f9", "--force"],
-        { cwd, timeout: 15_000, env: { ...process.env } },
+        { windowsHide: true, cwd, timeout: 15_000, env: { ...process.env } },
       );
     } catch {
       // Already exists (or the repo is read-only) — applying the label below
@@ -4729,7 +4786,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
       const { stdout: prBody } = await execFileAsync(
         "gh",
         ["pr", "view", String(prNumber), "--json", "body", "--jq", ".body"],
-        { cwd, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, env: { ...process.env } },
+        { windowsHide: true, cwd, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, env: { ...process.env } },
       );
       const match = prBody.match(
         /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)\b/i,
@@ -4763,7 +4820,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
           args.push("--remove-label", other);
         }
       }
-      await execFileAsync("gh", args, {
+      await execFileAsync("gh", args, { windowsHide: true,
         cwd,
         timeout: 15_000,
         env: { ...process.env },
@@ -4815,7 +4872,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
           "--remove-label", REVIEW_LABEL_FIX_APPLIED,
           "--remove-label", REVIEW_LABEL_PENDING,
         ];
-        await execFileAsync("gh", args, { cwd, timeout: 15_000, env: execEnv });
+        await execFileAsync("gh", args, { windowsHide: true, cwd, timeout: 15_000, env: execEnv });
         // Mirror the new state onto the associated issue (best-effort).
         const issueNumber = await issueNumberForPr(execFileAsync, cwd, prNumber);
         if (issueNumber !== null) {
@@ -4905,7 +4962,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         for (const other of REVIEW_CYCLE_LABELS) {
           if (other !== label) args.push("--remove-label", other);
         }
-        await execFileAsync("gh", args, { cwd, timeout: 15_000, env: execEnv });
+        await execFileAsync("gh", args, { windowsHide: true, cwd, timeout: 15_000, env: execEnv });
         // The PR may be brand-new and not reference its issue yet; only sync
         // when the renderer already resolved it.
         if (issueNumber !== null) {
@@ -4946,7 +5003,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         const { stdout: prBody } = await execFileAsync(
           "gh",
           ["pr", "view", String(prNumber), "--json", "body", "--jq", ".body"],
-          { cwd, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, env: execEnv },
+          { windowsHide: true, cwd, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, env: execEnv },
         );
         const mergeBody = [prBody.trim(), "Merged via TermCanvas"]
           .filter(Boolean)
@@ -4960,7 +5017,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
           const { stdout } = await execFileAsync(
             "gh",
             ["pr", "merge", String(prNumber), "--squash", "--body-file", bodyFile],
-            { cwd, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, env: execEnv },
+            { windowsHide: true, cwd, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, env: execEnv },
           );
           const prUrl = stdout.trim() || `https://github.com/owner/repo/pull/${prNumber}`;
           return { ok: true as const, prUrl };
@@ -5046,7 +5103,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
             "--jq", "[.[] | {number, headRefName, title, labels: [.labels[].name], reviews: [.reviews[] | .body]}]",
             "--limit", "100",
           ],
-          { cwd, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, env: execEnv },
+          { windowsHide: true, cwd, timeout: 30_000, maxBuffer: 10 * 1024 * 1024, env: execEnv },
         );
         const openPrs = JSON.parse(stdout) as Array<{
           number: number;
@@ -5108,7 +5165,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
                 "--remove-label", REVIEW_LABEL_FIX_APPLIED,
                 "--remove-label", REVIEW_LABEL_PENDING,
               ],
-              { cwd, ...ghOpts },
+              { windowsHide: true, cwd, ...ghOpts },
             );
             // Mirror the approved state onto the associated issue so the
             // issue reflects the PR in every state, not just conflict.
@@ -5127,14 +5184,14 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
             }
             log("fetching main and branch");
             emitMergeProgress({ type: "step", prNumber: pr.number, phase: "fetch" });
-            await execFileAsync("git", ["fetch", "origin", "main"], {
+            await execFileAsync("git", ["fetch", "origin", "main"], { windowsHide: true,
               cwd,
               ...gitOpts,
             });
             await execFileAsync(
               "git",
               ["fetch", "origin", `refs/heads/${pr.headRefName}`],
-              { cwd, ...gitOpts },
+              { windowsHide: true, cwd, ...gitOpts },
             );
             // --detach is required: the PR branch is checked out in the
             // implementer worktree, and git refuses a second checkout of the
@@ -5147,7 +5204,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
                 "worktree", "add", "--detach",
                 worktreePath, `origin/${pr.headRefName}`,
               ],
-              { cwd, ...gitOpts },
+              { windowsHide: true, cwd, ...gitOpts },
             );
             let mergeClean = false;
             try {
@@ -5155,7 +5212,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
               await execFileAsync(
                 "git",
                 ["merge", "origin/main", "--no-commit", "--no-ff"],
-                { cwd: worktreePath, ...gitOpts },
+                { windowsHide: true, cwd: worktreePath, ...gitOpts },
               );
               mergeClean = true;
             } catch {
@@ -5174,7 +5231,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
                 const { stdout: prBody } = await execFileAsync(
                   "gh",
                   ["pr", "view", String(pr.number), "--json", "body", "--jq", ".body"],
-                  { cwd, ...ghOpts },
+                  { windowsHide: true, cwd, ...ghOpts },
                 );
                 const mergeBody = [prBody.trim(), "Merged via TermCanvas"]
                   .filter(Boolean)
@@ -5194,7 +5251,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
                   bodyFile
                     ? ["pr", "merge", String(pr.number), "--squash", "--body-file", bodyFile]
                     : ["pr", "merge", String(pr.number), "--squash"],
-                  { cwd, ...ghOpts },
+                  { windowsHide: true, cwd, ...ghOpts },
                 );
               } finally {
                 if (bodyFile) {
@@ -5217,7 +5274,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
                 const { stdout: diffOut } = await execFileAsync(
                   "git",
                   ["diff", "--name-only", "--diff-filter=U"],
-                  { cwd: worktreePath, ...gitOpts },
+                  { windowsHide: true, cwd: worktreePath, ...gitOpts },
                 );
                 files = diffOut
                   .split(/\r?\n/)
@@ -5231,7 +5288,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
               // not advanced past the branch) and required when the merge left
               // the index dirty.
               try {
-                await execFileAsync("git", ["merge", "--abort"], {
+                await execFileAsync("git", ["merge", "--abort"], { windowsHide: true,
                   cwd: worktreePath,
                   ...gitOpts,
                 });
@@ -5255,7 +5312,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
                 await execFileAsync(
                   "gh",
                   ["issue", "comment", String(pr.number), "--body", body],
-                  { cwd, ...ghOpts },
+                  { windowsHide: true, cwd, ...ghOpts },
                 );
                 await execFileAsync(
                   "gh",
@@ -5270,7 +5327,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
                     "--remove-label", REVIEW_LABEL_FIX_APPLIED,
                     "--remove-label", REVIEW_LABEL_PENDING,
                   ],
-                  { cwd, ...ghOpts },
+                  { windowsHide: true, cwd, ...ghOpts },
                 );
                 // Mirror the conflict state onto the associated issue.
                 const conflictIssueNumber = await issueNumberForPr(
@@ -5309,13 +5366,13 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
               await execFileAsync(
                 "git",
                 ["worktree", "remove", "--force", worktreePath],
-                { cwd, ...gitOpts },
+                { windowsHide: true, cwd, ...gitOpts },
               );
             } catch {
               // Best-effort cleanup: a failed add leaves nothing to remove.
             }
             try {
-              await execFileAsync("git", ["worktree", "prune"], {
+              await execFileAsync("git", ["worktree", "prune"], { windowsHide: true,
                 cwd,
                 ...gitOpts,
               });
@@ -5390,7 +5447,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
             "--json", "state,headRefName,headRefOid,baseRefOid",
             "--jq", "{ state: .state, headRefName: .headRefName, headRefOid: .headRefOid, baseRefOid: .baseRefOid }",
           ],
-          { cwd, ...ghOpts },
+          { windowsHide: true, cwd, ...ghOpts },
         );
         const pr = JSON.parse(prJson) as {
           state: string;
@@ -5410,11 +5467,11 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         log(`head ${pr.headRefOid.slice(0, 8)} (${pr.headRefName}) → base ${pr.baseRefOid.slice(0, 8)}`);
 
         // 2) Fetch de main + rama del PR (mismo contrato que el mergeador).
-        await execFileAsync("git", ["fetch", "origin", "main"], { cwd, ...gitOpts });
+        await execFileAsync("git", ["fetch", "origin", "main"], { windowsHide: true, cwd, ...gitOpts });
         await execFileAsync(
           "git",
           ["fetch", "origin", `refs/heads/${pr.headRefName}`],
-          { cwd, ...gitOpts },
+          { windowsHide: true, cwd, ...gitOpts },
         );
 
         // 3) Worktree descartable detached del head (nunca toca la rama local
@@ -5424,7 +5481,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         await execFileAsync(
           "git",
           ["worktree", "add", "--detach", worktreePath, `origin/${pr.headRefName}`],
-          { cwd, ...gitOpts },
+          { windowsHide: true, cwd, ...gitOpts },
         );
         const nmSrc = path.join(cwd, "node_modules");
         if (fs.existsSync(nmSrc)) {
@@ -5432,7 +5489,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
             await execFileAsync(
               "cmd",
               ["/c", "mklink", "/J", path.join(worktreePath, "node_modules"), nmSrc],
-              { cwd, timeout: 30_000 },
+              { windowsHide: true, cwd, timeout: 30_000 },
             );
           } catch {
             log("junction de node_modules falló; el gate degradará los checks que lo requieran");
@@ -5458,7 +5515,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
             "--head", pr.headRefOid,
             "--out", outDir,
           ],
-          { cwd, timeout: 900_000, maxBuffer: 64 * 1024 * 1024, env: execEnv },
+          { windowsHide: true, cwd, timeout: 900_000, maxBuffer: 64 * 1024 * 1024, env: execEnv },
         );
         const after = fs
           .readdirSync(outDir)
@@ -5514,13 +5571,13 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
             await execFileAsync(
               "git",
               ["worktree", "remove", "--force", worktreePath],
-              { cwd, ...gitOpts },
+              { windowsHide: true, cwd, ...gitOpts },
             );
           } catch {
             /* best effort */
           }
           try {
-            await execFileAsync("git", ["worktree", "prune"], { cwd, ...gitOpts });
+            await execFileAsync("git", ["worktree", "prune"], { windowsHide: true, cwd, ...gitOpts });
           } catch {
             /* best effort */
           }
@@ -5550,7 +5607,7 @@ ipcMain.on("terminal:input", (_event, ptyId: number, data: string) => {
         const { stdout } = await execFileAsync(
           "node",
           [orchestrator, "--audit", "--repo", cwd],
-          { timeout: 120_000, maxBuffer: 16 * 1024 * 1024, env: execEnv },
+          { windowsHide: true, timeout: 120_000, maxBuffer: 16 * 1024 * 1024, env: execEnv },
         );
         const parsed = JSON.parse(stdout) as SecurityAuditResponse;
         return parsed;
@@ -5799,6 +5856,16 @@ app.whenReady().then(async () => {
     hookSocketPath = null;
     console.error("[HookReceiver] Startup disabled:", error);
   }
+
+  // Factory daemon real — cimiento de la nube local (F01). Debe levantar
+  // antes de cualquier otra cosa para que curl http://127.0.0.1:17680/factory/health responda.
+  // Best-effort: si el puerto está ocupado o falla, no bloquea el arranque de la app.
+  try {
+    const factoryPort = await ensureFactoryServer();
+    if (factoryPort) console.log(`[Factory] daemon ready on http://127.0.0.1:${factoryPort}`);
+  } catch (err) {
+    console.error("[Factory] Failed to start daemon:", err);
+  }
   let previousSessionHistoryScope = new Map<string, string>();
   sessionScanner.start((sessions) => {
     const nextSessionHistoryScope = buildSessionHistoryScope(sessions);
@@ -5858,6 +5925,8 @@ app.whenReady().then(async () => {
     } catch {}
   }, 1000);
   registerInterviewIpc();
+  // Playground Pact — Ola 4 (pacts/*.json como fuente de verdad, verdicts, verify)
+  registerPlaygroundIpc();
   // Catálogo de modelos + routing por fase (models:*).
   registerModelCatalogIpc();
   await initAuth();
@@ -5935,6 +6004,9 @@ app.on("will-quit", (event) => {
     stopAutoUpdater();
     apiServer.stop();
     closeInterviewService();
+    try {
+      closeFactoryServer();
+    } catch {}
     cleanupPortFile();
     app.quit();
   })();

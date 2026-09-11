@@ -66,7 +66,7 @@ async function execGitText(
   args: string[],
   maxBuffer?: number,
 ): Promise<string> {
-  const { stdout } = await execFileAsync("git", args, {
+  const { stdout } = await execFileAsync("git", args, { windowsHide: true,
     cwd: worktreePath,
     encoding: "utf-8",
     ...(maxBuffer ? { maxBuffer } : {}),
@@ -79,7 +79,7 @@ async function execGitBuffer(
   args: string[],
   maxBuffer?: number,
 ): Promise<Buffer> {
-  const { stdout } = await execFileAsync("git", args, {
+  const { stdout } = await execFileAsync("git", args, { windowsHide: true,
     cwd: worktreePath,
     encoding: "buffer",
     ...(maxBuffer ? { maxBuffer } : {}),

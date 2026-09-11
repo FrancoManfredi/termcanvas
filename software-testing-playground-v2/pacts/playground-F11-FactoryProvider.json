@@ -1,0 +1,364 @@
+{
+  "consumer": {
+    "name": "playground-F11"
+  },
+  "interactions": [
+    {
+      "description": "a request to create a job with unicode prompt and worktree with space",
+      "providerStates": [
+        {
+          "name": "factory is healthy"
+        }
+      ],
+      "request": {
+        "body": {
+          "phase": "diagnosisLlm",
+          "prompt": "línea1\nlínea2 con ñ y → y tildes ó í",
+          "worktree": "C:\\tmp\\playground F11 ñ test"
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.phase": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.prompt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.worktree": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        },
+        "method": "POST",
+        "path": "/factory/jobs"
+      },
+      "response": {
+        "body": {
+          "id": "job-f11-unicode01",
+          "job": {
+            "createdAt": "2026-05-13T14:22:10.123Z",
+            "id": "job-f11-unicode01",
+            "phase": "diagnosisLlm",
+            "prompt": "línea1\nlínea2 con ñ y → y tildes ó í",
+            "state": "queued",
+            "worktree": "C:\\tmp\\playground F11 ñ test"
+          },
+          "path": "C:\\tmp\\playground F11 ñ test\\.agents\\factory\\job-f11-unicode01"
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.id": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^job-[a-z0-9\\-]+$"
+                }
+              ]
+            },
+            "$.job.createdAt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^\\d{4}-\\d{2}-\\d{2}T.*Z$"
+                }
+              ]
+            },
+            "$.job.id": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^job-[a-z0-9\\-]+$"
+                }
+              ]
+            },
+            "$.job.phase": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.job.prompt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "[\\s\\S]*línea1[\\s\\S]*"
+                }
+              ]
+            },
+            "$.job.state": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^queued$"
+                }
+              ]
+            },
+            "$.job.worktree": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": ".*playground F11.*"
+                }
+              ]
+            },
+            "$.path": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^[A-Z]:\\\\.*playground F11.*\\.agents\\\\factory\\\\job-.*"
+                }
+              ]
+            }
+          }
+        },
+        "status": 201
+      }
+    },
+    {
+      "description": "a request for job with unicode prompt (persistencia GET)",
+      "providerStates": [
+        {
+          "name": "a job with unicode prompt exists",
+          "params": {
+            "id": "job-f11-unicode01"
+          }
+        }
+      ],
+      "request": {
+        "headers": {
+          "Accept": "application/json"
+        },
+        "matchingRules": {
+          "path": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "^\\/factory\\/jobs\\/job-f11-unicode01$"
+              }
+            ]
+          }
+        },
+        "method": "GET",
+        "path": "/factory/jobs/job-f11-unicode01"
+      },
+      "response": {
+        "body": {
+          "createdAt": "2026-05-13T14:22:10.123Z",
+          "dir": "C:\\tmp\\playground F11 ñ test\\.agents\\factory\\job-f11-unicode01",
+          "id": "job-f11-unicode01",
+          "logs": [
+            "opencode: streaming tokens…"
+          ],
+          "phase": "diagnosisLlm",
+          "prompt": "línea1\nlínea2 con ñ y → y tildes ó í",
+          "resultPreview": {
+            "createdAt": "2026-05-13T14:22:10.123Z",
+            "jobId": "job-f11-unicode01",
+            "phase": "diagnosisLlm",
+            "promptPreview": "línea1\nlínea2 con ñ y → y tildes ó í",
+            "state": "queued",
+            "summary": "Job completado correctamente (local).",
+            "worktree": "C:\\tmp\\playground F11 ñ test"
+          },
+          "state": "queued",
+          "updatedAt": "2026-05-13T14:22:10.123Z",
+          "worktree": "C:\\tmp\\playground F11 ñ test"
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.createdAt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^\\d{4}-\\d{2}-\\d{2}T.*Z$"
+                }
+              ]
+            },
+            "$.dir": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^[A-Z]:\\\\.*playground F11.*\\.agents\\\\factory\\\\job-.*"
+                }
+              ]
+            },
+            "$.id": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^job-f11-unicode01$"
+                }
+              ]
+            },
+            "$.logs": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$.phase": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.prompt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "[\\s\\S]*línea1[\\s\\S]*ñ[\\s\\S]*"
+                }
+              ]
+            },
+            "$.resultPreview.createdAt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^\\d{4}-\\d{2}-\\d{2}T.*Z$"
+                }
+              ]
+            },
+            "$.resultPreview.jobId": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^job-f11-unicode01$"
+                }
+              ]
+            },
+            "$.resultPreview.phase": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.resultPreview.promptPreview": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.resultPreview.state": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^(queued|running|done|error)$"
+                }
+              ]
+            },
+            "$.resultPreview.summary": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.resultPreview.worktree": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^[A-Z]:\\\\.*playground F11.*"
+                }
+              ]
+            },
+            "$.state": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^(queued|running|done|error)$"
+                }
+              ]
+            },
+            "$.updatedAt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^\\d{4}-\\d{2}-\\d{2}T.*Z$"
+                }
+              ]
+            },
+            "$.worktree": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": ".*playground F11 ñ.*"
+                }
+              ]
+            }
+          }
+        },
+        "status": 200
+      }
+    }
+  ],
+  "metadata": {
+    "pact-js": {
+      "version": "14.0.0"
+    },
+    "pactRust": {
+      "ffi": "0.4.28",
+      "models": "1.3.5"
+    },
+    "pactSpecification": {
+      "version": "3.0.0"
+    }
+  },
+  "provider": {
+    "name": "FactoryProvider"
+  }
+}

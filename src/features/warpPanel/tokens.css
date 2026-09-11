@@ -1,0 +1,105 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap');
+
+/*
+ * WarpPanel design tokens.
+ * Scoped under `.warppanel` so Figma values never leak into the host
+ * (host `:root` defines --bg/--border/--text-* with different values).
+ * Values are identical to figma/Crear panel lateral interactivo/src/index.css,
+ * renamed --bg -> --wp-bg (mechanical var(--bg) -> var(--wp-bg) substitution).
+ */
+
+.warppanel {
+  --wp-font-sans: 'Inter', system-ui, sans-serif;
+  --wp-font-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+  /* Surfaces — not pure black to reduce halation */
+  --wp-bg:            #0d0d0d;
+  --wp-bg-elevated:   #141414;
+  --wp-bg-panel:      #111111;
+  --wp-bg-hover:      #1c1c1c;
+  --wp-bg-active:     #1f1f2e;
+
+  /* Borders */
+  --wp-border:        #282828;
+  --wp-border-subtle: #1e1e1e;
+  --wp-border-focus:  #3b82f6;
+
+  /* Text — all pass AA 4.5:1 on #0d0d0d */
+  --wp-text-primary:   #f0f0f0;
+  --wp-text-secondary: #c0c0c0;
+  --wp-text-tertiary:  #888888;
+  --wp-text-disabled:  #505050;
+
+  /* Accent */
+  --wp-accent:         #3b82f6;
+  --wp-accent-hover:   #2563eb;
+  --wp-accent-dim:     rgba(59,130,246,0.12);
+  --wp-accent-border:  rgba(59,130,246,0.35);
+
+  /* Status semantics */
+  --wp-status-pending:    #888888;
+  --wp-status-progress:   #f59e0b;
+  --wp-status-awaiting:   #a855f7;
+  --wp-status-done:       #22c55e;
+
+  /* Phase palette */
+  --wp-phase-impl:    #22d3ee;
+  --wp-phase-review:  #fb923c;
+  --wp-phase-fix:     #e879f9;
+
+  /* Awaiting palette */
+  --wp-await-review:  #a78bfa;
+  --wp-await-fix:     #fbbf24;
+  --wp-await-merge:   #34d399;
+
+  background: var(--wp-bg);
+  color: var(--wp-text-primary);
+  font-family: var(--wp-font-sans);
+}
+
+.warppanel *,
+.warppanel *::before,
+.warppanel *::after {
+  box-sizing: border-box;
+}
+
+/* Focus visible — never remove outlines entirely (scoped) */
+.warppanel :focus-visible {
+  outline: 2px solid var(--wp-border-focus);
+  outline-offset: 2px;
+}
+
+/* Scrollbar — hidden by default, show on hover (scoped) */
+.warppanel * {
+  scrollbar-width: thin;
+  scrollbar-color: #2e2e2e transparent;
+}
+.warppanel *::-webkit-scrollbar { width: 4px; height: 4px; }
+.warppanel *::-webkit-scrollbar-track { background: transparent; }
+.warppanel *::-webkit-scrollbar-thumb { background: #2e2e2e; border-radius: 4px; }
+.warppanel *::-webkit-scrollbar-thumb:hover { background: #3e3e3e; }
+
+/* Animations (verbatim keyframes) */
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.35; transform: scale(0.65); }
+}
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+.warppanel .pulse-dot {
+  animation: pulse-dot 1.8s ease-in-out infinite;
+  display: inline-block;
+}
+.warppanel .spin-icon {
+  animation: spin 1.6s linear infinite;
+  display: inline-block;
+}
+
+/* Respect reduced motion (verbatim behavior, scoped selector) */
+@media (prefers-reduced-motion: reduce) {
+  .warppanel .pulse-dot, .warppanel .spin-icon { animation: none; }
+  .warppanel * { transition-duration: 0ms !important; }
+}

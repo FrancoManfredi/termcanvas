@@ -7,6 +7,13 @@
 // Es tonto a propósito: recibe grupos ya construidos y devuelve el value
 // canónico ("provider/model" o "" = default); la traducción a ModelRef vive
 // en phaseModelOptions.refFromOptionValue.
+//
+// H-007 (lab E2E): el trigger mostraba label y provider en spans adyacentes
+// separados solo por margen CSS (`ml-1.5`) — el nombre accesible concatenaba
+// ambos sin separador textual (`muse-spark-1.2-contributoropencode-go`).
+// Formato elegido `modelo (provider)`: el modelo sigue prominente
+// (font-medium, como antes) y los paréntesis son separador textual visible
+// para lectores de pantalla y snapshots sin cambiar el layout.
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -181,7 +188,7 @@ export function ModelCombobox({
               <>
                 <span className="font-medium">{sel.label}</span>
                 {sel.provider && (
-                  <span className="ml-1.5 text-[11px] font-normal text-[var(--text-muted)]">{sel.provider}</span>
+                  <span className="ml-1.5 text-[11px] font-normal text-[var(--text-muted)]">({sel.provider})</span>
                 )}
               </>
             )}

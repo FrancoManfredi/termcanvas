@@ -14,7 +14,7 @@ export async function probeLocal(
     // 1. Verificar que el binario base existe (npx, node, etc.)
     await new Promise<void>((resolve, reject) => {
       const checkCmd = process.platform === "win32" ? "where" : "which";
-      const proc = spawn(checkCmd, [command], { stdio: "ignore", shell: true });
+      const proc = spawn(checkCmd, [command], { windowsHide: true, stdio: "ignore", shell: true });
       let timedOut = false;
       const timer = setTimeout(() => {
         timedOut = true;
@@ -36,7 +36,7 @@ export async function probeLocal(
     // 2. Si es npx, verificar que npx --help funciona (indica que npm/node están bien)
     if (command === "npx") {
       await new Promise<void>((resolve, reject) => {
-        const proc = spawn("npx", ["--help"], { stdio: "ignore", shell: true });
+        const proc = spawn("npx", ["--help"], { windowsHide: true, stdio: "ignore", shell: true });
         let timedOut = false;
         const timer = setTimeout(() => {
           timedOut = true;
@@ -95,7 +95,7 @@ export async function probeLocalWithHandshake(
     const isWin = process.platform === "win32";
     const spawnCmd = isWin && command === "npx" ? "cmd" : command;
     const spawnArgs = isWin && command === "npx" ? ["/c", "npx", ...finalArgs] : finalArgs;
-    const proc = spawn(spawnCmd, spawnArgs, {
+    const proc = spawn(spawnCmd, spawnArgs, { windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
       shell: false,
       cwd: projectPath || undefined,

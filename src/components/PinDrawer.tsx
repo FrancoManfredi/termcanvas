@@ -238,6 +238,9 @@ export function PinDrawer() {
   const leftOffset = collapsed ? COLLAPSED_TAB_WIDTH : leftPanelWidth;
 
   useEffect(() => {
+    // Bridge-only live feed (no hay stream de pins en el daemon F4):
+    // skip honesto en web en vez de crashear el drawer en montaje.
+    if (!window.termcanvas?.pins) return;
     const unsub = window.termcanvas.pins.subscribe((event: PinEvent) => {
       if (event.type === "pin:created" || event.type === "pin:updated") {
         upsertPin(event.repo, event.pin);

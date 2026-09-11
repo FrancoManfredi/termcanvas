@@ -1,0 +1,15 @@
+{
+  "id": "F02",
+  "version": "1.0.0",
+  "title": "Job en disco",
+  "wave": "Ola 2 — Job en disco (backend)",
+  "blockedBy": ["F01"],
+  "timeoutMs": 2000,
+  "criterio": "Tras POST /factory/jobs con prompt y worktree, debe responder 201 con { id, path, job: { state: 'queued' } } y existir en disco {worktree}/.agents/factory/<id>/job.json y prompt.md con contenido exacto del prompt enviado. No debe validar running/done/result.json/logs.",
+  "pact": "software-testing-playground-v2/pacts/playground-F02-FactoryProvider.json",
+  "verifier": {
+    "kind": "pact",
+    "provider": "FactoryProvider",
+    "consumer": "playground-F02"
+  }
+}

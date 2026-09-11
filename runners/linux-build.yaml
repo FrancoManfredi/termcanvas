@@ -1,0 +1,2 @@
+# REDIRECCIÓN (TANDA 3): el yaml canónico vive en `factory/runners/` — este legacy ya no es fuente (el lector vivo `getRunnerYamlPath` cae al fallback honesto; el path caliente lee el canónico vía `getRunner`).
+# Ver `tests/canonical-yaml.test.ts` (canónico + redirección + barrido).

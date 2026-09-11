@@ -1,0 +1,285 @@
+{
+  "consumer": {
+    "name": "playground-F06"
+  },
+  "interactions": [
+    {
+      "description": "a request for job logs via dedicated endpoint",
+      "providerStates": [
+        {
+          "name": "a job with logs exists",
+          "params": {
+            "id": "job-abc123"
+          }
+        }
+      ],
+      "request": {
+        "headers": {
+          "Accept": "application/json"
+        },
+        "matchingRules": {
+          "path": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "^\\/factory\\/jobs\\/job-[a-z0-9\\-]+\\/logs$"
+              }
+            ]
+          }
+        },
+        "method": "GET",
+        "path": "/factory/jobs/job-abc123/logs"
+      },
+      "response": {
+        "body": {
+          "id": "job-abc123",
+          "logs": [
+            "opencode: streaming tokens…"
+          ]
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.id": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^job-[a-z0-9\\-]+$"
+                }
+              ]
+            },
+            "$.logs": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            }
+          }
+        },
+        "status": 200
+      }
+    },
+    {
+      "description": "a request for job with resultPreview (disk validation)",
+      "providerStates": [
+        {
+          "name": "a job with logs exists",
+          "params": {
+            "id": "job-abc123"
+          }
+        }
+      ],
+      "request": {
+        "headers": {
+          "Accept": "application/json"
+        },
+        "matchingRules": {
+          "path": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "^\\/factory\\/jobs\\/job-[a-z0-9\\-]+$"
+              }
+            ]
+          }
+        },
+        "method": "GET",
+        "path": "/factory/jobs/job-abc123"
+      },
+      "response": {
+        "body": {
+          "createdAt": "2026-05-13T14:22:10.123Z",
+          "dir": "C:\\tmp\\playground-F06-abc\\.agents\\factory\\job-abc123",
+          "id": "job-abc123",
+          "logs": [
+            "opencode: streaming tokens…"
+          ],
+          "phase": "diagnosisLlm",
+          "prompt": "playground-F06-abc123",
+          "resultPreview": {
+            "createdAt": "2026-05-13T14:22:10.123Z",
+            "jobId": "job-abc123",
+            "phase": "diagnosisLlm",
+            "promptPreview": "playground-F06-abc123",
+            "state": "done",
+            "summary": "Job completado correctamente (local).",
+            "worktree": "C:\\tmp\\playground-F06-abc"
+          },
+          "state": "done",
+          "updatedAt": "2026-05-13T14:22:10.123Z",
+          "worktree": "C:\\tmp\\playground-F06-abc"
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.createdAt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^\\d{4}-\\d{2}-\\d{2}T.*Z$"
+                }
+              ]
+            },
+            "$.dir": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^[A-Z]:\\\\.*\\.agents\\\\factory\\\\job-.*"
+                }
+              ]
+            },
+            "$.id": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^job-[a-z0-9\\-]+$"
+                }
+              ]
+            },
+            "$.logs": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type",
+                  "min": 1
+                }
+              ]
+            },
+            "$.phase": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.prompt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.resultPreview.createdAt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^\\d{4}-\\d{2}-\\d{2}T.*Z$"
+                }
+              ]
+            },
+            "$.resultPreview.jobId": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^job-[a-z0-9\\-]+$"
+                }
+              ]
+            },
+            "$.resultPreview.phase": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.resultPreview.promptPreview": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.resultPreview.state": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^done$"
+                }
+              ]
+            },
+            "$.resultPreview.summary": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.resultPreview.worktree": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^[A-Z]:\\\\.*"
+                }
+              ]
+            },
+            "$.state": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^done$"
+                }
+              ]
+            },
+            "$.updatedAt": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^\\d{4}-\\d{2}-\\d{2}T.*Z$"
+                }
+              ]
+            },
+            "$.worktree": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": "^[A-Z]:\\\\.*"
+                }
+              ]
+            }
+          }
+        },
+        "status": 200
+      }
+    }
+  ],
+  "metadata": {
+    "pact-js": {
+      "version": "14.0.0"
+    },
+    "pactRust": {
+      "ffi": "0.4.28",
+      "models": "1.3.5"
+    },
+    "pactSpecification": {
+      "version": "3.0.0"
+    }
+  },
+  "provider": {
+    "name": "FactoryProvider"
+  }
+}

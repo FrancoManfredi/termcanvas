@@ -1,0 +1,26 @@
+{
+  "id": "0MTIZNZCEE5075BD149",
+  "featureId": "F10",
+  "pactFile": "software-testing-playground-v2/pacts/playground-F10-FactoryProvider.json",
+  "pactFileAbsolute": "C:\\Users\\Estudiante UCU\\OneDrive\\Escritorio\\termcanvas\\software-testing-playground-v2\\pacts\\playground-F10-FactoryProvider.json",
+  "providerBaseUrl": "http://127.0.0.1:17681",
+  "consumerResult": {
+    "passed": true,
+    "pactFileExists": true,
+    "pactFileMtime": "2026-09-01T18:16:05.571Z"
+  },
+  "providerResult": {
+    "status": "fail",
+    "rawOutput": "Verfication failed"
+  },
+  "rawOutput": "Verfication failed",
+  "conclusion": "fail",
+  "reason": "Provider verification failed — Verfication failed",
+  "commitSha": "dirty-15fece3e",
+  "commitDirty": true,
+  "actor": "script",
+  "actorDetail": "software-testing-playground-v2/pact/provider/verify.ts — F10 (FAILED)",
+  "startedAt": "2026-09-01T18:16:29.582Z",
+  "finishedAt": "2026-09-01T18:16:30.821Z",
+  "durationMs": 113
+}

@@ -1,0 +1,149 @@
+{
+  "consumer": {
+    "name": "playground-F07"
+  },
+  "interactions": [
+    {
+      "description": "a request to create a job without prompt (DX 400)",
+      "providerStates": [
+        {
+          "name": "factory is healthy"
+        }
+      ],
+      "request": {
+        "body": {
+          "phase": "diagnosisLlm",
+          "worktree": "C:\\tmp\\playground-F07-noprompt"
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.phase": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.worktree": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        },
+        "method": "POST",
+        "path": "/factory/jobs"
+      },
+      "response": {
+        "body": {
+          "error": "prompt is required",
+          "hint": "En PowerShell usa Invoke-RestMethod -UseBasicParsing -Body '{\"prompt\":\"hola\",...}'",
+          "received": "{\"worktree\":\"C:\\tmp\\playground-F07-noprompt\",\"phase\":\"diagnosisLlm\"}"
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.error": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": ".*prompt is required.*"
+                }
+              ]
+            },
+            "$.hint": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            },
+            "$.received": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "type"
+                }
+              ]
+            }
+          }
+        },
+        "status": 400
+      }
+    },
+    {
+      "description": "a request for nonexistent job (DX 404)",
+      "providerStates": [
+        {
+          "name": "no job exists"
+        }
+      ],
+      "request": {
+        "headers": {
+          "Accept": "application/json"
+        },
+        "matchingRules": {
+          "path": {
+            "combine": "AND",
+            "matchers": [
+              {
+                "match": "regex",
+                "regex": "^\\/factory\\/jobs\\/job-notexist-99$"
+              }
+            ]
+          }
+        },
+        "method": "GET",
+        "path": "/factory/jobs/job-notexist-99"
+      },
+      "response": {
+        "body": {
+          "error": "job not found: job-notexist-99"
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "matchingRules": {
+          "body": {
+            "$.error": {
+              "combine": "AND",
+              "matchers": [
+                {
+                  "match": "regex",
+                  "regex": ".*job not found.*"
+                }
+              ]
+            }
+          }
+        },
+        "status": 404
+      }
+    }
+  ],
+  "metadata": {
+    "pact-js": {
+      "version": "14.0.0"
+    },
+    "pactRust": {
+      "ffi": "0.4.28",
+      "models": "1.3.5"
+    },
+    "pactSpecification": {
+      "version": "3.0.0"
+    }
+  },
+  "provider": {
+    "name": "FactoryProvider"
+  }
+}

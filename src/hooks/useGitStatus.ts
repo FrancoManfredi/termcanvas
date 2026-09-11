@@ -90,7 +90,17 @@ export function useGitStatus(worktreePath: string | null): UseGitStatusResult {
 
     refresh();
 
-    const unsub = window.termcanvas.git.onChanged((changedPath) => {
+    // Live-feed solo con bridge (sin stream de git en el daemon F4):
+    // refresh() ya degrada a vacío vía try/catch; solo el subscribe
+    // hay que saltearlo para no crashear el montaje en web.
+    const git = window.termcanvas?.git;
+    if (!git) {
+      return () => {
+        mountedRef.current = false;
+      };
+    }
+
+    const unsub = git.onChanged((changedPath) => {
       if (changedPath === worktreePath) {
         refresh();
       }

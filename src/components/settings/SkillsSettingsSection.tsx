@@ -44,7 +44,9 @@ export function SkillsSettingsSection() {
           return;
         }
       } catch {}
-      setActiveProject("C:/Users/Estudiante UCU/OneDrive/Escritorio/termcanvas");
+      // Ola 6 H1: sin proyecto resoluble en runtime no se adivina ruta — queda sin proyecto activo.
+      setActiveProject(null);
+      setLoading(false);
       return;
     }
     setLoading(true);
@@ -70,9 +72,9 @@ export function SkillsSettingsSection() {
         const { resolveActiveWorktree } = await import("../../planner/planningSession");
         const active = resolveActiveWorktree();
         if (active) setActiveProject(active.path);
-        else setActiveProject("C:/Users/Estudiante UCU/OneDrive/Escritorio/termcanvas");
+        else setActiveProject(null);
       } catch {
-        setActiveProject("C:/Users/Estudiante UCU/OneDrive/Escritorio/termcanvas");
+        setActiveProject(null);
       }
     })();
   }, []);

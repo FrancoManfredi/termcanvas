@@ -96,7 +96,7 @@ function runGitAsync(dirPath: string, args: string[]): Promise<string> {
     execFile(
       "git",
       args,
-      { cwd: dirPath, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 },
+      { windowsHide: true, cwd: dirPath, encoding: "utf-8", maxBuffer: 10 * 1024 * 1024 },
       (err, stdout) => {
         if (err) {
           reject(err);
@@ -111,7 +111,7 @@ function runGitAsync(dirPath: string, args: string[]): Promise<string> {
 export class ProjectScanner {
   scan(dirPath: string): ProjectInfo | null {
     try {
-      execSync("git rev-parse --git-dir", { cwd: dirPath, stdio: "pipe" });
+      execSync("git rev-parse --git-dir", { windowsHide: true, cwd: dirPath, stdio: "pipe" });
     } catch {
       return null;
     }
@@ -183,7 +183,7 @@ export class ProjectScanner {
       const output = execFileSync(
         "git",
         ["worktree", "list", "--porcelain"],
-        {
+        { windowsHide: true,
           cwd: dirPath,
           encoding: "utf-8",
           maxBuffer: 10 * 1024 * 1024,
@@ -236,7 +236,7 @@ export class ProjectScanner {
 
   private getCurrentBranch(dirPath: string): string {
     try {
-      return execFileSync("git", ["branch", "--show-current"], {
+      return execFileSync("git", ["branch", "--show-current"], { windowsHide: true,
         cwd: dirPath,
         encoding: "utf-8",
         maxBuffer: 1024 * 1024,

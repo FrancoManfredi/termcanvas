@@ -1,0 +1,15 @@
+{
+  "id": "F05",
+  "version": "1.1.0",
+  "title": "Planning/Tools vía Factory — gate de modelo (pact gate)",
+  "wave": "Ola 5 — Planning/Tools gate + encolado (pact gate 201 vs 400)",
+  "blockedBy": ["F04"],
+  "timeoutMs": 3000,
+  "criterio": "Gate POST /factory/jobs valida modelRef antes de encolar: modelo válido (ej gpt-4o con providerID openai) → 201 {id, path, job:{state:'queued'}}; modelo inexistente (ej gpt-99) → 400 {error:'model not in catalog', alternatives:[...]} fail fast sin gastar tokens. Requiere daemon real y validación server-side de modelRef + cli opcional. Cero PTYs y cero localStorage en flujo.",
+  "pact": "software-testing-playground-v2/pacts/playground-F05-FactoryProvider.json",
+  "verifier": {
+    "kind": "pact",
+    "provider": "FactoryProvider",
+    "consumer": "playground-F05"
+  }
+}

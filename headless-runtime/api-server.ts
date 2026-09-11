@@ -19,6 +19,22 @@ import type { ServerEventBus } from "./event-bus.ts";
 import { ensureProjectTracked, rescanTrackedProject } from "./project-sync.ts";
 import { createWorktreeControl, type WorktreeControl } from "./worktree-control.ts";
 import { destroyTrackedTerminal, launchTrackedTerminal } from "./terminal-launch.ts";
+import {
+  applyCycleLabel,
+  applyReviewLabel,
+  findPrsForIssue,
+  getConflictFiles,
+  getPrComments,
+  getPrReviewDecision,
+  syncIssueReviewLabel,
+  type GhExecFn,
+  type ReviewLabelVerdict,
+} from "./github-lookups.ts";
+import {
+  parseClientMessage,
+  serializeServerMessage,
+  type PtyClientMessage,
+} from "./pty-protocol.ts";
 
 interface HeadlessApiServerDeps {
   projectStore: ProjectStore;
@@ -32,6 +48,7 @@ interface HeadlessApiServerDeps {
   corsOrigins?: string[];
   serverVersion?: string;
   worktreeControl?: WorktreeControl;
+  ghExec?: GhExecFn;
 }
 
 interface RateLimitEntry {
@@ -346,6 +363,12 @@ export class HeadlessApiServer {
     if (method === "POST" && pathname === "/worktree/create") {
       return this.worktreeCreate(body);
     }
+    if (method === "POST" && pathname === "/worktree/review") {
+      return this.worktreeCreateReview(body);
+    }
+    if (method === "POST" && pathname === "/worktree/restore") {
+      return this.worktreeRestore(body);
+    }
     if (method === "DELETE" && pathname === "/worktree") {
       return this.worktreeRemove(url);
     }
@@ -427,6 +450,56 @@ export class HeadlessApiServer {
 
     if (method === "GET" && pathname === "/state") {
       return this.getState();
+    }
+
+    if (
+      method === "GET" &&
+      pathname.match(/^\/github\/issues\/\d+\/prs$/)
+    ) {
+      const issueNumber = Number(pathname.split("/")[3]);
+      return this.githubIssuePrs(url, issueNumber);
+    }
+    if (
+      method === "GET" &&
+      pathname.match(/^\/github\/prs\/\d+\/decision$/)
+    ) {
+      const prNumber = Number(pathname.split("/")[3]);
+      return this.githubPrDecision(url, prNumber);
+    }
+    if (
+      method === "GET" &&
+      pathname.match(/^\/github\/prs\/\d+\/comments$/)
+    ) {
+      const prNumber = Number(pathname.split("/")[3]);
+      return this.githubPrComments(url, prNumber);
+    }
+    if (
+      method === "GET" &&
+      pathname.match(/^\/github\/prs\/\d+\/conflict-files$/)
+    ) {
+      const prNumber = Number(pathname.split("/")[3]);
+      return this.githubConflictFiles(url, prNumber);
+    }
+    if (
+      method === "POST" &&
+      pathname.match(/^\/github\/prs\/\d+\/review-label$/)
+    ) {
+      const prNumber = Number(pathname.split("/")[3]);
+      return this.githubApplyReviewLabel(body, prNumber);
+    }
+    if (
+      method === "POST" &&
+      pathname.match(/^\/github\/prs\/\d+\/cycle-label$/)
+    ) {
+      const prNumber = Number(pathname.split("/")[3]);
+      return this.githubApplyCycleLabel(body, prNumber);
+    }
+    if (
+      method === "POST" &&
+      pathname.match(/^\/github\/issues\/\d+\/review-label$/)
+    ) {
+      const issueNumber = Number(pathname.split("/")[3]);
+      return this.githubSyncIssueReviewLabel(body, issueNumber);
     }
 
     throw Object.assign(new Error("Not found"), { status: 404 });
@@ -552,6 +625,49 @@ export class HeadlessApiServer {
       branch,
       worktreePath: worktreePath ?? requestedPath,
       baseBranch,
+    });
+  }
+
+  private async worktreeCreateReview(body: unknown): Promise<unknown> {
+    const { repo, repoPath, branch, baseName } = body as {
+      repo?: string;
+      repoPath?: string;
+      branch?: string;
+      baseName?: string;
+    };
+    const resolvedRepo = repoPath ?? repo;
+    if (!resolvedRepo) {
+      throw Object.assign(new Error("repo is required"), { status: 400 });
+    }
+    if (!branch) {
+      throw Object.assign(new Error("branch is required"), { status: 400 });
+    }
+    if (!baseName) {
+      throw Object.assign(new Error("baseName is required"), { status: 400 });
+    }
+    return this.worktreeControl.createReview({
+      repoPath: resolvedRepo,
+      baseName,
+      branch,
+    });
+  }
+
+  private async worktreeRestore(body: unknown): Promise<unknown> {
+    const { repo, repoPath, branch } = body as {
+      repo?: string;
+      repoPath?: string;
+      branch?: string;
+    };
+    const resolvedRepo = repoPath ?? repo;
+    if (!resolvedRepo) {
+      throw Object.assign(new Error("repo is required"), { status: 400 });
+    }
+    if (!branch) {
+      throw Object.assign(new Error("branch is required"), { status: 400 });
+    }
+    return this.worktreeControl.restore({
+      repoPath: resolvedRepo,
+      branch,
     });
   }
 
@@ -789,6 +905,101 @@ export class HeadlessApiServer {
     return this.projectList();
   }
 
+  private requireRepoParam(url: URL): string {
+    const repo = url.searchParams.get("repo");
+    if (!repo) {
+      throw Object.assign(new Error("repo query parameter is required"), {
+        status: 400,
+      });
+    }
+    return repo;
+  }
+
+  private async githubIssuePrs(url: URL, issueNumber: number): Promise<unknown> {
+    const repo = this.requireRepoParam(url);
+    return findPrsForIssue(repo, issueNumber, this.deps.ghExec);
+  }
+
+  private async githubPrDecision(url: URL, prNumber: number): Promise<unknown> {
+    const repo = this.requireRepoParam(url);
+    return getPrReviewDecision(repo, prNumber, this.deps.ghExec);
+  }
+
+  private async githubPrComments(url: URL, prNumber: number): Promise<unknown> {
+    const repo = this.requireRepoParam(url);
+    return getPrComments(repo, prNumber, this.deps.ghExec);
+  }
+
+  private async githubConflictFiles(
+    url: URL,
+    prNumber: number,
+  ): Promise<unknown> {
+    const repo = this.requireRepoParam(url);
+    const branch = url.searchParams.get("branch");
+    if (!branch) {
+      throw Object.assign(new Error("branch query parameter is required"), {
+        status: 400,
+      });
+    }
+    return getConflictFiles(repo, branch, prNumber, this.deps.ghExec);
+  }
+
+  private requireRepoBody(body: unknown): { repo: string; rest: Record<string, unknown> } {
+    const repo = (body as { repo?: unknown })?.repo;
+    if (typeof repo !== "string" || !repo) {
+      throw Object.assign(new Error("repo is required"), { status: 400 });
+    }
+    return { repo, rest: body as Record<string, unknown> };
+  }
+
+  private async githubApplyReviewLabel(
+    body: unknown,
+    prNumber: number,
+  ): Promise<unknown> {
+    const { repo, rest } = this.requireRepoBody(body);
+    return applyReviewLabel(
+      repo,
+      prNumber,
+      (rest.verdict ?? null) as ReviewLabelVerdict,
+      this.deps.ghExec,
+    );
+  }
+
+  private async githubApplyCycleLabel(
+    body: unknown,
+    prNumber: number,
+  ): Promise<unknown> {
+    const { repo, rest } = this.requireRepoBody(body);
+    if (typeof rest.label !== "string") {
+      throw Object.assign(new Error("label is required"), { status: 400 });
+    }
+    const issueNumber =
+      typeof rest.issueNumber === "number" ? rest.issueNumber : null;
+    return applyCycleLabel(
+      repo,
+      prNumber,
+      issueNumber,
+      rest.label,
+      this.deps.ghExec,
+    );
+  }
+
+  private async githubSyncIssueReviewLabel(
+    body: unknown,
+    issueNumber: number,
+  ): Promise<unknown> {
+    const { repo, rest } = this.requireRepoBody(body);
+    if (!Array.isArray(rest.prLabels)) {
+      throw Object.assign(new Error("prLabels is required"), { status: 400 });
+    }
+    return syncIssueReviewLabel(
+      repo,
+      issueNumber,
+      rest.prLabels as string[],
+      this.deps.ghExec,
+    );
+  }
+
   private getServerStatus(): unknown {
     const terminals = this.deps.projectStore.listTerminals();
     const activeWorkflows = this.getActiveWorkflows();
@@ -926,31 +1137,81 @@ export class HeadlessApiServer {
         ws.close(1008, "Invalid ptyId");
         return;
       }
-      this.attachToPty(ws, ptyId);
+      this.attachToPty(ws, ptyId, url.searchParams.get("format") === "json");
+      return;
+    }
+    // JSON clients connect with ?format=json and send {type:"create"}
+    // so they control cwd/cols/rows. Raw clients keep auto-create.
+    if (url.searchParams.get("format") === "json") {
+      this.waitForJsonCreate(ws);
     } else {
       this.createAndAttachPty(ws);
     }
   }
 
-  private attachToPty(ws: WebSocket, ptyId: number): void {
+  private waitForJsonCreate(ws: WebSocket): void {
+    const onMessage = (data: WebSocket.RawData) => {
+      const text = typeof data === "string" ? data : (data as Buffer).toString();
+      const msg = parseClientMessage(text);
+      if (!msg || msg.type !== "create") {
+        ws.close(1008, "Expected create message");
+        return;
+      }
+      ws.off("message", onMessage);
+      this.createAndAttachPty(ws, msg, true);
+    };
+    ws.on("message", onMessage);
+    ws.on("close", () => {
+      ws.off("message", onMessage);
+    });
+  }
+
+  private attachToPty(ws: WebSocket, ptyId: number, jsonModeInit = false): void {
     // PtyManager.onData/onExit don't return cleanup functions —
     // cleanup happens automatically when the PTY is destroyed.
+    let jsonMode = jsonModeInit;
+    let readySent = false;
+    const sendReady = () => {
+      if (jsonMode && !readySent && ws.readyState === WebSocket.OPEN) {
+        readySent = true;
+        ws.send(serializeServerMessage({ type: "ready", ptyId }));
+      }
+    };
+
     this.deps.ptyManager.onData(ptyId, (data: string) => {
       this.deps.ptyManager.captureOutput(ptyId, data);
       if (ws.readyState === WebSocket.OPEN) {
-        ws.send(data);
+        ws.send(
+          jsonMode ? serializeServerMessage({ type: "output", data }) : data,
+        );
       }
     });
 
-    this.deps.ptyManager.onExit(ptyId, () => {
+    this.deps.ptyManager.onExit(ptyId, (exitCode: number) => {
       if (ws.readyState === WebSocket.OPEN) {
+        if (jsonMode) {
+          ws.send(serializeServerMessage({ type: "exit", exitCode }));
+        }
         ws.close(1000, "PTY exited");
       }
     });
 
+    // JSON attach path announces itself so the client learns the ptyId
+    // even when it already knew it (symmetric with the create path).
+    if (jsonMode) sendReady();
+
     ws.on("message", (data) => {
       const text =
         typeof data === "string" ? data : (data as Buffer).toString();
+      const msg = parseClientMessage(text);
+      if (msg) {
+        if (!jsonMode) {
+          jsonMode = true;
+          sendReady();
+        }
+        void this.handleJsonPtyMessage(ws, ptyId, msg);
+        return;
+      }
       this.deps.ptyManager.write(ptyId, text);
     });
 
@@ -959,13 +1220,82 @@ export class HeadlessApiServer {
     });
   }
 
-  private createAndAttachPty(ws: WebSocket): void {
-    const cwd = this.deps.workspaceDir ?? process.cwd();
+  private async handleJsonPtyMessage(
+    ws: WebSocket,
+    ptyId: number,
+    msg: PtyClientMessage,
+  ): Promise<void> {
+    if (msg.type === "input") {
+      this.deps.ptyManager.write(ptyId, msg.data);
+      return;
+    }
+    if (msg.type === "resize") {
+      const resize = (this.deps.ptyManager as unknown as {
+        resize?: (id: number, cols: number, rows: number) => void;
+      }).resize;
+      resize?.call(this.deps.ptyManager, ptyId, msg.cols, msg.rows);
+      return;
+    }
+    if (msg.type === "destroy") {
+      try {
+        await this.deps.ptyManager.destroy(ptyId);
+      } catch (err) {
+        console.error("[api-server] failed to destroy PTY:", err);
+      }
+      // Grace window: let the natural process-exit deliver the true exit
+      // code first (onExit sends it and closes). If the kill never reports
+      // back, close anyway — the client maps close to exit, so the socket
+      // can never hang. No invented exit codes on this path.
+      setTimeout(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.close(1000, "PTY destroyed");
+        }
+      }, 500);
+      return;
+    }
+    // {type:"create"} on an attached socket: acknowledge, no second PTY.
+    if (msg.type === "create" && ws.readyState === WebSocket.OPEN) {
+      ws.send(serializeServerMessage({ type: "ready", ptyId }));
+    }
+  }
+
+  private createAndAttachPty(
+    ws: WebSocket,
+    createMsg?: {
+      cwd?: string;
+      shell?: string;
+      args?: string[];
+      envOverrides?: Record<string, string>;
+      terminalId?: string;
+      terminalType?: string;
+      cols?: number;
+      rows?: number;
+    },
+    jsonMode = false,
+  ): void {
+    const cwd = createMsg?.cwd ?? this.deps.workspaceDir ?? process.cwd();
 
     void this.deps.ptyManager
-      .create({ cwd })
+      .create({
+        cwd,
+        ...(createMsg?.shell ? { shell: createMsg.shell } : {}),
+        ...(createMsg?.args ? { args: createMsg.args } : {}),
+        ...(createMsg?.envOverrides ? { envOverrides: createMsg.envOverrides } : {}),
+        ...(createMsg?.terminalId ? { terminalId: createMsg.terminalId } : {}),
+        ...(createMsg?.terminalType ? { terminalType: createMsg.terminalType } : {}),
+      })
       .then((ptyId) => {
-        this.attachToPty(ws, ptyId);
+        const resize = (this.deps.ptyManager as unknown as {
+          resize?: (id: number, cols: number, rows: number) => void;
+        }).resize;
+        if (createMsg?.cols && createMsg?.rows) {
+          try {
+            resize?.call(this.deps.ptyManager, ptyId, createMsg.cols, createMsg.rows);
+          } catch {
+            // Non-fatal: shell still usable at default size.
+          }
+        }
+        this.attachToPty(ws, ptyId, jsonMode);
       })
       .catch((err) => {
         console.error("[api-server] failed to create PTY:", err);

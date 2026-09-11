@@ -1,0 +1,269 @@
+# factory/factory.yaml — Ola 7 Agents as code (H4/H5).
+# Fuente versionada de puertos, timeouts, modelos default y pares del revisor.
+# Cambiar el comportamiento = cambiar este archivo + test, nunca editar TS a ciegas.
+# Rollback = git revert.
+
+# Puertos: espejo de FACTORY_DEFAULT_PORT / FACTORY_PORT_MAX (headless-runtime/factory/factoryServer.ts).
+ports:
+  factoryDefault: 17680
+  factoryMax: 17690
+
+# Timeouts en milisegundos — doctrina sin-límites: el ÚNICO que queda es el
+# de verificación (cada paso test/build muere por este techo con kill en 2
+# fases: seguridad de proceso, no límite de fase). Los turnos LLM viven hasta
+# el fusible global GLOBAL_AGENT_FUSE_MS (headless-runtime/llm/agentTransport)
+# y session.create hasta SESSION_CREATE_FUSE_MS: sin timeouts por fase.
+# - verifyMs: IMPLEMENT_VERIFY_TIMEOUT_MS (shared/types/implement.ts, verify fail-fast test+build) — 120s por paso.
+timeouts:
+  verifyMs: 120000
+
+# Modelos default: espejo de los fallbacks efectivos en código.
+# - foreman / implement: default efectivo cuando el job no trae modelRef.
+# - review: auto-disjoint documenta que lo resuelve reviewModelSelector (ver H4),
+#   con override explícito reviewerRef cuando el usuario lo pide.
+defaultModels:
+  foreman: "opencode-go/muse-spark-1.2-contributor"
+  implement: "opencode-go/muse-spark-1.2-contributor"
+  review: "auto-disjoint"
+
+# Pares builder -> revisor (H4): espejo EXACTO de REVIEWER_PAIRS
+# (headless-runtime/review/reviewModelSelector.ts). El selector los lee de acá
+# y usa las constantes solo como fallback si este archivo falta o es inválido.
+reviewerPairs:
+  - match: "muse-spark → big-pickle"
+    reviewer: "opencode/big-pickle"
+  - match: "big-pickle → muse-spark"
+    reviewer: "opencode-go/muse-spark-1.2-contributor"
+  - match: "anthropic/* → gpt-4o"
+    reviewer: "openai/gpt-4o"
+  - match: "openai/* → anthropic"
+    reviewer: "anthropic/claude-sonnet-4-20250514"
+
+# Scorers: samplingRate 25 vigente desde Ola 11, sin efecto hoy.
+scorers:
+  samplingRate: 25
+
+# Runners (Ola 15, runners honestos): default usado por verificación/ejecución
+# cuando el job no pide otro. windows-local = el daemon corre en Windows, sin
+# aislamiento (honesto). Definiciones en factory/runners/<name>.yaml.
+runners:
+  default: "windows-local"
+
+# Costo (Ola 15): costTracking false = no se estima nada (se muestra "—").
+# costRates vacío = modo "sin tarifa" (se muestran llamadas+duración, NUNCA
+# USD 0.00 como si fuera dato). Lo usa el módulo de costo (E2); solo entran
+# acá tarifas confirmadas por el usuario, nunca números inventados.
+costTracking: true
+
+# F4 money track (PLAN-100 PARIDAD section 3.3, F4-T1): rate shape =
+#   "provider/model":
+#     inputUSDper1M: <number >= 0>
+#     outputUSDper1M: <number >= 0>
+# Rules: ONLY user-confirmed tariffs enter this map (never invent numbers
+# here); `{}` stays VALID and means "sin tarifa" (calls shown, USD null,
+# never 0.00 as data). The validator (`yaml-cost-rates` rule, CostRateSchema
+# in headless-runtime/factory/definitionValidate.ts) rejects negative /
+# non-finite values, unknown keys and missing fields with file:line.
+#
+# FU-4 (2026-09-05, source https://opencode.ai/docs/go/): 27 user-confirmed
+# tariffs below. Keys are EXACT live modelKeys ("opencode-go/<model-id>",
+# verified against defaultModels above and FACTORY_DEFAULTS in
+# headless-runtime/factory/agentLoader.ts). Policy (documented, no exceptions):
+# - ONLY the base branch per model: tier ≤ / off-peak / no Peak. Cache columns
+#   and the "Uso" (subscription) column are IGNORED: the tracker estimates
+#   tokens as floor(chars/4) with no cache split, and "Uso" is subscription
+#   credit, not marginal USD — mixing it in would invent data (Regla 1).
+# - Brief said "28 models" but lists 27 ids; the 27 below are implemented, no
+#   28th was invented (see software-paridad-100/REPORT-FU4-tariffs.md).
+# WEEKLY RITUAL (<2min, manual, zero automation by design — no network fetch
+# in the daemon, no new intervals, Regla 8):
+#   1. Open https://opencode.ai/docs/go/ and compare each pair below.
+#   2. Update ONLY the numbers that changed (same keys, same shape).
+#   3. Bump `ratesAsOf:` below to today's YYYY-MM-DD.
+#   4. Run `node scripts/factory.mjs validate` (exit 0 = green).
+# The badge tooltip shows `rates as of <date>` so staleness is visible.
+costRates:
+  "opencode-go/grok-4.6":
+    inputUSDper1M: 2.00
+    outputUSDper1M: 6.00
+  "opencode-go/gpt-5.6-luna":
+    inputUSDper1M: 0.20
+    outputUSDper1M: 1.20
+  "opencode-go/glm-5.3-flash":
+    inputUSDper1M: 0.15
+    outputUSDper1M: 0.50
+  "opencode-go/glm-5.3":
+    inputUSDper1M: 1.40
+    outputUSDper1M: 4.40
+  "opencode-go/glm-5.2":
+    inputUSDper1M: 1.40
+    outputUSDper1M: 4.40
+  "opencode-go/glm-5.1":
+    inputUSDper1M: 1.40
+    outputUSDper1M: 4.40
+  "opencode-go/kimi-k3":
+    inputUSDper1M: 3.00
+    outputUSDper1M: 15.00
+  "opencode-go/kimi-k2.7-code":
+    inputUSDper1M: 0.95
+    outputUSDper1M: 4.00
+  "opencode-go/kimi-k2.6":
+    inputUSDper1M: 0.95
+    outputUSDper1M: 4.00
+  "opencode-go/longcat-2.0":
+    inputUSDper1M: 0.30
+    outputUSDper1M: 1.20
+  "opencode-go/mimo-v2.5":
+    inputUSDper1M: 0.14
+    outputUSDper1M: 0.28
+  "opencode-go/mimo-v2.5-pro":
+    inputUSDper1M: 0.435
+    outputUSDper1M: 0.87
+  "opencode-go/minimax-m2.7":
+    inputUSDper1M: 0.30
+    outputUSDper1M: 1.20
+  "opencode-go/minimax-m3":
+    inputUSDper1M: 0.30
+    outputUSDper1M: 1.20
+  "opencode-go/muse-spark-1.2-contributor":
+    inputUSDper1M: 0.10
+    outputUSDper1M: 0.20
+  "opencode-go/muse-spark-1.3-contributor":
+    inputUSDper1M: 0.10
+    outputUSDper1M: 0.20
+  "opencode-go/omen-alpha":
+    inputUSDper1M: 0.20
+    outputUSDper1M: 0.66
+  "opencode-go/qwen3.6-plus":
+    inputUSDper1M: 0.50
+    outputUSDper1M: 3.00
+  "opencode-go/qwen3.7-max":
+    inputUSDper1M: 2.50
+    outputUSDper1M: 7.50
+  "opencode-go/qwen3.7-plus":
+    inputUSDper1M: 0.40
+    outputUSDper1M: 1.60
+  "opencode-go/qwen3.8-flash":
+    inputUSDper1M: 0.15
+    outputUSDper1M: 0.47
+  "opencode-go/qwen3.8-max":
+    inputUSDper1M: 2.00
+    outputUSDper1M: 6.00
+  "opencode-go/deepseek-v4-pro":
+    inputUSDper1M: 0.66
+    outputUSDper1M: 1.98
+  "opencode-go/deepseek-v4-flash":
+    inputUSDper1M: 0.22
+    outputUSDper1M: 0.66
+  "opencode-go/deepseek-v4-flash-vision-exp":
+    inputUSDper1M: 0.22
+    outputUSDper1M: 0.66
+  "opencode-go/hy4-preview":
+    inputUSDper1M: 0.834
+    outputUSDper1M: 2.501
+  "opencode-go/hy3":
+    inputUSDper1M: 0.14
+    outputUSDper1M: 0.58
+# FU-4 seals (additive scalars, validated by the loader + `yaml-cost-rates`):
+# ratesAsOf = tariff effective date (YYYY-MM-DD, bump it in the ritual step 3).
+# ratesSource = where the numbers came from (documented only, never fetched).
+ratesAsOf: "2026-09-05"
+ratesSource: "https://opencode.ai/docs/go/"
+
+# Sesiones de agente (Ola 16, continuidad conversacional): true = UNA sesión
+# por (job, rol) reutilizada entre turnos, con renovación lazy visible ante
+# daemon reiniciado ("sesión renovada (la anterior expiró)").
+# false = comportamiento viejo exacto (sesión nueva por llamada). Regla 8.
+agentSessions: true
+
+# Re-verificación del reviewer (Ola 17, review que re-valida): true = un
+# veredicto `revise` con pedido `reverify` válido dispara UNA verificación
+# enfocada (allowlist cerrada) antes de volver a Building, dentro del budget
+# de 2 revisiones. false = revise clásico exacto (cero ejecuciones). Regla 8.
+reviewerReverify: true
+
+# Auto-propose de self-improvement (Ola 18 P1.4, features a medio cablear):
+# máx de propuestas `pending|ready` abiertas por scorer antes de frenar el
+# auto-propose (default 1). 0 = auto-propose apagado (el scoring manual y
+# `createProposal` manual siguen intactos). Regla 8, estilo `samplingRate: 0`.
+improveProposalCooldown: 1
+
+# Notificaciones locales (Ola 19, centro de notificaciones + toast OS):
+# notificationsEnabled false = centro apagado total (notify no-op null, el
+# GET devuelve `notifications: []` pero el store NO borra). Regla 8.
+# osNotifications false = sin toast OS nativo (el centro sigue guardando;
+# solo la campana/panel lo muestran). Regla 8.
+notificationsEnabled: true
+osNotifications: true
+
+# Triage on-demand (T2): cuándo corre el Triage-agent.
+# auto = el foreman decide primero con el issue completo; el triage-agent
+#   corre SOLO si el foreman dice needs_triage/needs_input (para formular
+#   preguntas). Un issue claro cuesta 1 llamada LLM en vez de 2. Default.
+# always = régimen anterior exacto (pre-triage siempre antes del foreman).
+# never = jamás corre el triage-agent (needs_triage parquea directo).
+# Regla 8.
+triageMode: auto
+
+# Automations (Wave 14, triggers without risk): enabled false = no trigger
+# fires (ticks are skipped); tickMs 0 = ticker fully off; each trigger
+# honors its own enabled + maxFires (0 = never fires) + cooldownMs between
+# fires. Rules 7-8.
+automations:
+  enabled: true
+  tickMs: 30000
+  triggers:
+    - name: "nightly-trivial"
+      kind: "schedule"
+      enabled: true
+      intervalMs: 86400000
+      promptRef: "factory/prompts/nightly.md"
+      maxFires: 5
+      cooldownMs: 3600000
+    - name: "announce-ask-human"
+      kind: "event"
+      enabled: true
+      on: "ask_human"
+      action: "notify-integration"
+      maxFires: 20
+      cooldownMs: 60000
+
+# Integrations (Wave 14, local mock without secrets): enabled false =
+# outbound posts are refused with an honest 409. P0 accepts ONLY
+# mode "mock-local" and provider "linear"; any secret field
+# (token/secret/webhook/...) is rejected by the validator. Rule 8.
+integrations:
+  enabled: true
+  mode: "mock-local"
+  provider: "linear"
+
+# Live intake (F1 wiring, PLAN-100 PARIDAD §3.1): OPT-IN, default OFF.
+# `liveMode: false` keeps the exact P0 mock-local behavior (same posts, same
+# 409/400 gates). Live traffic resolves credentials from environment
+# variable NAMES only — NEVER write secret values in this file. The
+# validator (`integrations-live-*` rules) rejects secret-looking fields in
+# every mode and demands a `vaultRef` env name when `liveMode` is true.
+# The block is FLAT scalars only (the service reader is flat-only too):
+# intake filters ride the webhook-in trigger, not this block (a nested
+# `filter:` here shouts `integrations-live-filter`). Commented example
+# (zero parser impact while commented):
+#   live:
+#     liveMode: false
+#     provider: "linear"
+#     vaultRef: "LINEAR_API_KEY"
+#     webhookSecretRef: "LINEAR_WEBHOOK_SECRET"
+#     allowPostBack: true
+
+# Human-in-the-measure decisions (F3 wiring, PLAN-100 PARIDAD §4.3):
+# conventions only — zero new keys in this task (comments only).
+# - A benchmark DECISION is human-only (decidedBy human, never auto): it lives
+#   beside its run as factory/.benchmark-results/<runId>.decision.json with a
+#   trialsRef pointing at that run. The validator shouts on broken sidecars
+#   (decisions-benchmark-record); a missing sidecar is valid (deciding is
+#   optional — shouting is for broken evidence, never for absence).
+# - A proposal is Adopted/Discarded by a human, optionally FROM its
+#   proposal-ready notification (extract the imp-id, call the existing
+#   adopt/discard route, ack the notification). Decided proposals must carry
+#   decidedAt (decisions-proposal-link); auto* keys are forbidden anywhere.
+# - F3-T3 added no benchmark/proposal route (route table +0, see
+#   routing/routeTable.ts): record flows reuse create/get/adopt/discard/ack.

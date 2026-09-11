@@ -25,7 +25,7 @@ async function getOAuthToken(): Promise<string | null> {
     const { stdout } = await execFileAsync(
       "/usr/bin/security",
       ["find-generic-password", "-s", "Claude Code-credentials", "-w"],
-      { encoding: "utf-8", timeout: KEYCHAIN_TIMEOUT_MS },
+      { windowsHide: true, encoding: "utf-8", timeout: KEYCHAIN_TIMEOUT_MS },
     );
     const raw = stdout.trim();
     const parsed = JSON.parse(raw);

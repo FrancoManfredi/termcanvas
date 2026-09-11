@@ -100,10 +100,12 @@ async function execGitText(
   args: string[],
   maxBuffer = DEFAULT_MAX_BUFFER,
 ): Promise<string> {
+  // Windows: sin windowsHide cada git abre una consola (PowerShell).
   const { stdout } = await execFileAsync("git", args, {
     cwd: worktreePath,
     encoding: "utf-8",
     maxBuffer,
+    windowsHide: true,
   });
   return stdout;
 }
@@ -296,7 +298,7 @@ export async function resolveBranchCheckoutRef(
       await execFileAsync(
         "git",
         ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`],
-        { cwd: repoPath, maxBuffer: DEFAULT_MAX_BUFFER },
+        { cwd: repoPath, maxBuffer: DEFAULT_MAX_BUFFER, windowsHide: true },
       );
       return true;
     } catch {
@@ -313,6 +315,7 @@ export async function resolveBranchCheckoutRef(
       cwd: repoPath,
       timeout: 60_000,
       maxBuffer: DEFAULT_MAX_BUFFER,
+      windowsHide: true,
     });
   } catch (err) {
     fetchError = err instanceof Error ? err.message : String(err);
@@ -767,7 +770,7 @@ async function applyPatch(worktreePath: string, patch: string, extraArgs: string
     const proc = execFileCb(
       "git",
       ["apply", ...extraArgs],
-      { cwd: worktreePath, encoding: "utf-8", maxBuffer: DEFAULT_MAX_BUFFER },
+      { cwd: worktreePath, encoding: "utf-8", maxBuffer: DEFAULT_MAX_BUFFER, windowsHide: true },
       (err) => { if (err) reject(err); else resolve(); },
     );
     proc.stdin?.write(patch);
@@ -841,6 +844,7 @@ async function execGitRemote(
       maxBuffer: DEFAULT_MAX_BUFFER,
       env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
       signal: controller.signal,
+      windowsHide: true,
     });
     return stdout || stderr;
   } catch (err: unknown) {

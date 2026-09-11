@@ -1,0 +1,15 @@
+{
+  "id": "F06",
+  "version": "1.0.0",
+  "title": "Logs y result.json",
+  "wave": "Ola 6 — Logs y result.json (dedicated endpoint)",
+  "blockedBy": ["F03"],
+  "timeoutMs": 6500,
+  "criterio": "GET /factory/jobs/:id/logs → 200 {id, logs: string[]} con logs 'opencode: streaming' (endpoint dedicado) + GET /factory/jobs/:id → 200 con resultPreview valida result.json/logs.ndjson en disco tras done. Pact con 2 interactions similar a F03 pero enfocado en logs endpoint. Usa factoryServer real, no localStorage ni PTY.",
+  "pact": "software-testing-playground-v2/pacts/playground-F06-FactoryProvider.json",
+  "verifier": {
+    "kind": "pact",
+    "provider": "FactoryProvider",
+    "consumer": "playground-F06"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "id": "F12",
+  "version": "1.0.0",
+  "title": "Cancel errores 409 ya done y 404 no existe",
+  "wave": "Ola 12 — Cancel errores 409/404",
+  "blockedBy": ["F04"],
+  "timeoutMs": 3000,
+  "criterio": "Complementa F04 (cancel success 200) validando paths de error nunca probados: POST /factory/jobs/job-f12-done01/cancel sobre job ya done/error → 409 {error regex \"already (done|error)\"} + POST /factory/jobs/job-notexist-99/cancel sobre job inexistente → 404 {error regex \"job not found\"}. PactV3 MatchersV3 headers plain application/json body {}, Windows only. factoryServer POST /cancel ya implementa 404 si !job y 409 si done/error (ver factoryServer.ts line ~596: if done/error → 409). No flaky: handler deja job en done antes de verificar.",
+  "pact": "software-testing-playground-v2/pacts/playground-F12-FactoryProvider.json",
+  "verifier": {
+    "kind": "pact",
+    "provider": "FactoryProvider",
+    "consumer": "playground-F12"
+  }
+}

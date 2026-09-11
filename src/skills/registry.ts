@@ -151,11 +151,23 @@ export const DELIVERY_SKILLS: readonly string[] = [
 // (convención cat:<category-id>, escrita al crear issues desde un
 // diagnóstico). Acepta labels de IssueNodeData ({name}) o strings crudos.
 // Devuelve null si no hay label válida: el issue se resuelve sin scoping.
+//
+// Defensive normalization (same pattern as liveIssues normalizeLabels):
+// non-array `labels` (legacy persisted string, null/undefined, GraphQL
+// `{ nodes }` connection object, any other junk) → null instead of
+// throwing `(labels ?? []) is not iterable`. Junk array entries (null,
+// numbers, objects without a string `name`) are skipped, never dereferenced.
 export function categoryIdFromLabels(
-  labels: Array<{ name: string } | string> | undefined,
+  labels: unknown,
 ): DiagnosisCategoryId | null {
-  for (const label of labels ?? []) {
-    const name = typeof label === "string" ? label : label.name;
+  if (!Array.isArray(labels)) return null;
+  for (const label of labels) {
+    const name =
+      typeof label === "string"
+        ? label
+        : typeof label === "object" && label !== null
+          ? (label as { name?: unknown }).name
+          : undefined;
     if (typeof name !== "string" || !name.startsWith("cat:")) continue;
     const id = name.slice(4);
     if (isDiagnosisCategoryId(id)) return id;

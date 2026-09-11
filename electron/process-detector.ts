@@ -326,7 +326,7 @@ export async function detectCli(shellPid: number): Promise<{
     execFile(
       processListCommand.command,
       processListCommand.args,
-      { timeout: 10_000 },
+      { windowsHide: true, timeout: 10_000 },
       (err, stdout) => {
         if (err) return reject(err);
         resolve(stdout);
@@ -348,7 +348,7 @@ export async function detectCli(shellPid: number): Promise<{
         execFile(
           "tmux",
           ["display-message", "-p", "#S"],
-          { timeout: 10_000 },
+          { windowsHide: true, timeout: 10_000 },
           (err, stdout) => {
             if (err) return reject(err);
             resolve(stdout.trim());
@@ -379,7 +379,7 @@ export async function getProcessSnapshot(
     execFile(
       processListCommand.command,
       processListCommand.args,
-      { timeout: 10_000 },
+      { windowsHide: true, timeout: 10_000 },
       (err, stdout) => {
         if (err) return reject(err);
         resolve(stdout);

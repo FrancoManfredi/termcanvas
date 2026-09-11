@@ -1,0 +1,22 @@
+{
+  "id": "F04",
+  "version": "1.2.0",
+  "title": "Panel Factory — lista Queued/Running/Done + Cancel",
+  "wave": "Ola 4 — UI Panel Factory (hybrid pact+human) — Ola Cancel pacteada",
+  "blockedBy": ["F03"],
+  "timeoutMs": 3000,
+  "criterio": "Panel Factory debe listar jobs Queued/Running/Done desde daemon real vía GET /factory/jobs y soportar Cancelar vía POST /factory/jobs/:id/cancel (pacteado, no flaky 409). Pact valida GET lista + POST cancel; human valida filtros UI y tail vivo SSE/logs.",
+  "pact": "software-testing-playground-v2/pacts/playground-F04-FactoryProvider.json",
+  "verifier": {
+    "kind": "pact-hybrid",
+    "provider": "FactoryProvider",
+    "consumer": "playground-F04",
+    "entry": "software-testing-playground-v2/verifiers/verify-F04.human.md",
+    "hybridNote": "Pact valida GET /factory/jobs (lista) + POST /factory/jobs/:id/cancel (cancel, providerState a cancellable job exists asegura queued, no 409). Human valida filtros Queued/Running/Done y Ver logs tail vivo (SSE vivo no pacteable).",
+    "humanChecklist": [
+      "Encolar issue #1 (POST real) → Ver en lista Queued (GET /factory/jobs Pact lista)",
+      "Esperar transición queued→running→done (ver logs tail real / SSE — human valida tail vivo)",
+      "Probar filtro Queued/Running/Done y Ver logs sin abrir terminal — Cancel ya pacteado (POST /cancel → 200 error, no 409 flaky)"
+    ]
+  }
+}
