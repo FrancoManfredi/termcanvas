@@ -2741,9 +2741,17 @@ export interface WorkflowDefinitionInfo {
   };
 }
 
+export interface WorkflowPendingWait {
+  runId: string;
+  nodeId: string;
+  event: string;
+  deadlineMs?: number;
+}
+
 export interface WorkflowRunDetail {
   run: WorkflowRunInfo;
   pending: WorkflowPendingGate | null;
+  wait: WorkflowPendingWait | null;
 }
 
 function parseWorkflowSummary(json: unknown): WorkflowSummary | null {
@@ -2804,6 +2812,20 @@ function parseRunInfo(json: unknown): WorkflowRunInfo | null {
   if (typeof record.finishedAt === "string") run.finishedAt = record.finishedAt;
   if (typeof record.error === "string") run.error = record.error;
   return run;
+}
+
+function parsePendingWait(json: unknown): WorkflowPendingWait | null {
+  const record = asRecord(json);
+  if (!record) return null;
+  const event = asNonEmptyString(record.event);
+  if (!event) return null;
+  const wait: WorkflowPendingWait = {
+    runId: typeof record.runId === "string" ? record.runId : "",
+    nodeId: typeof record.nodeId === "string" ? record.nodeId : "",
+    event,
+  };
+  if (typeof record.deadlineMs === "number") wait.deadlineMs = record.deadlineMs;
+  return wait;
 }
 
 function parsePendingGate(json: unknown): WorkflowPendingGate | null {
@@ -2986,7 +3008,11 @@ export async function getFactoryWorkflowRun(
     return {
       ok: true,
       status: raw.status,
-      data: { run, pending: parsePendingGate(record.pending) },
+      data: {
+        run,
+        pending: parsePendingGate(record.pending),
+        wait: parsePendingWait(record.wait),
+      },
     };
   } catch (e) {
     return {
@@ -3051,6 +3077,69 @@ export async function postFactoryWorkflowCancel(
     const raw = await requestRaw(url, postJsonInit({}), fetchFn, timeoutMs, label);
     if (raw.transportError !== null) return transportFail(fallback, raw.transportError);
     if (!isHttpOk(raw.status)) return httpFail(raw.status as unknown as number, fallback, raw.json, label);
+    return { ok: true, status: raw.status, data: { ok: true } };
+  } catch (e) {
+    return {
+      ok: false,
+      status: null,
+      data: fallback,
+      error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+    };
+  }
+}
+
+
+export async function postFactoryWorkflowResume(
+  runId: string,
+  opts: FactoryClientOptions = {},
+): Promise<FactoryResult<WorkflowRunInfo>> {
+  const fallback = null as unknown as WorkflowRunInfo;
+  try {
+    if (!isValidId(runId)) return invalidId(fallback);
+    const { port, fetchFn, timeoutMs } = await prepare(opts, FACTORY_WORKFLOW_RUN_TIMEOUT_MS);
+    if (port === null || fetchFn === null) return unavailable(fallback);
+    const url = factoryUrl(port, `/factory/workflows/runs/${encodeURIComponent(runId)}/resume`);
+    if (!url) return unavailable(fallback);
+    const label = "POST /factory/workflows/runs/:id/resume";
+    const raw = await requestRaw(url, postJsonInit({}), fetchFn, timeoutMs, label);
+    if (raw.transportError !== null) return transportFail(fallback, raw.transportError);
+    if (!isHttpOk(raw.status)) {
+      return httpFail(raw.status as unknown as number, fallback, raw.json, label);
+    }
+    const run = parseRunInfo(asRecord(raw.json)?.run);
+    if (!run) return badShape(raw.status as unknown as number, fallback, label);
+    return { ok: true, status: raw.status, data: run };
+  } catch (e) {
+    return {
+      ok: false,
+      status: null,
+      data: fallback,
+      error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+    };
+  }
+}
+
+export async function postFactoryWorkflowSignal(
+  runId: string,
+  event: string,
+  opts: FactoryClientOptions = {},
+): Promise<FactoryResult<{ ok: boolean }>> {
+  const fallback = { ok: false };
+  try {
+    if (!isValidId(runId)) return invalidId(fallback);
+    if (typeof event !== "string" || event.trim().length === 0) {
+      return { ok: false, status: null, data: fallback, error: "event requerido" };
+    }
+    const { port, fetchFn, timeoutMs } = await prepare(opts, FACTORY_WORKFLOW_DECISION_TIMEOUT_MS);
+    if (port === null || fetchFn === null) return unavailable(fallback);
+    const url = factoryUrl(port, `/factory/workflows/runs/${encodeURIComponent(runId)}/signal`);
+    if (!url) return unavailable(fallback);
+    const label = "POST /factory/workflows/runs/:id/signal";
+    const raw = await requestRaw(url, postJsonInit({ event: event.trim() }), fetchFn, timeoutMs, label);
+    if (raw.transportError !== null) return transportFail(fallback, raw.transportError);
+    if (!isHttpOk(raw.status)) {
+      return httpFail(raw.status as unknown as number, fallback, raw.json, label);
+    }
     return { ok: true, status: raw.status, data: { ok: true } };
   } catch (e) {
     return {

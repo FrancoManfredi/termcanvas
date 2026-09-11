@@ -215,6 +215,38 @@ nodes:
   assert.match(run.nodes.boom.error ?? "", /modelo caído/);
 });
 
+test("totales: agrega costos y tokens de los nodos", async () => {
+  const { tmp, runsDir } = sandbox();
+  const yaml = `name: totals
+description: totales
+nodes:
+  - id: a
+    prompt: "a"
+  - id: b
+    depends_on: [a]
+    prompt: "b"
+`;
+  const runner: AiNodeRunner = async (req) => ({
+    output: "ok",
+    sessionId: `s-${req.nodeId}`,
+    costUsd: 0.1,
+    usage: { inputTokens: 10, outputTokens: 5 },
+  });
+  const run = await runWorkflow(loaded(yaml, tmp), {
+    cwd: tmp,
+    runsDir,
+    aiRunner: runner,
+  });
+  assert.equal(run.status, "completed");
+  assert.equal(run.totals?.costUsd, 0.2);
+  assert.deepEqual(run.totals?.tokens, {
+    input: 20,
+    output: 10,
+    cacheRead: 0,
+    cacheWrite: 0,
+  });
+});
+
 test("reenvía capacidades y scope del nodo al runner", async () => {
   const { tmp, runsDir } = sandbox();
   const log: AiNodeRequest[] = [];

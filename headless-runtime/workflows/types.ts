@@ -63,6 +63,16 @@ export interface WorkflowRun {
   nodes: Record<string, NodeState>;
   error?: string;
   result?: RunResult;
+  /** Totales agregados del run (solo presentes si algún nodo reportó). */
+  totals?: {
+    costUsd?: number;
+    tokens?: {
+      input?: number;
+      output?: number;
+      cacheRead?: number;
+      cacheWrite?: number;
+    };
+  };
   /** Digest del YAML congelado al iniciar el run. */
   sourceDigest: string;
   /** Copia inmutable del workflow usada por este run. */

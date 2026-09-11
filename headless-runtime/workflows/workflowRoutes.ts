@@ -158,7 +158,11 @@ export function createWorkflowRouteHandler(
             sendJson(res, 404, { ok: false, error: `run "${runId}" no existe` });
             return true;
           }
-          sendJson(res, 200, { run, pending: runtime.getPending(runId) });
+          sendJson(res, 200, {
+            run,
+            pending: runtime.getPending(runId),
+            wait: runtime.getPendingWait(runId),
+          });
           return true;
         }
 
@@ -166,6 +170,22 @@ export function createWorkflowRouteHandler(
           const action = segments[2];
           if (action === "cancel") {
             runtime.cancel(runId);
+            sendJson(res, 200, { ok: true });
+            return true;
+          }
+          if (action === "resume") {
+            const resumed = await runtime.resume(runId);
+            sendJson(res, 202, { ok: true, run: resumed });
+            return true;
+          }
+          if (action === "signal") {
+            const body = await readJsonBody(req);
+            const event = typeof body.event === "string" ? body.event.trim() : "";
+            if (!event) {
+              sendJson(res, 400, { ok: false, error: "event requerido" });
+              return true;
+            }
+            runtime.signal(runId, event);
             sendJson(res, 200, { ok: true });
             return true;
           }

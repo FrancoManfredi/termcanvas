@@ -67,25 +67,9 @@ export async function executeScript(
   return { output: result.stdout.trimEnd() };
 }
 
-export async function executeWait(
-  wait: { duration_ms?: number; until?: string; event?: string; deadline_ms?: number },
-  ctx: NodeRunContext,
-): Promise<NodeExecutionResult> {
-  if (wait.duration_ms === undefined && !wait.until && !wait.event) {
-    throw new NodeExecutionError(
-      ctx.nodeId,
-      "wait requiere duration_ms, until o event",
-    );
-  }
-  if (wait.until || wait.event) {
-    throw new NodeExecutionError(
-      ctx.nodeId,
-      "wait durable (until/event) llega en Fase 6; usar duration_ms",
-    );
-  }
-  const duration = wait.duration_ms ?? 0;
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(resolve, duration);
+function sleepAbortable(ms: number, ctx: NodeRunContext): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(resolve, ms);
     ctx.signal?.addEventListener(
       "abort",
       () => {
@@ -95,7 +79,39 @@ export async function executeWait(
       { once: true },
     );
   });
-  return { output: `waited ${duration}ms` };
+}
+
+export async function executeWait(
+  wait: { duration_ms?: number; until?: string; event?: string; deadline_ms?: number },
+  ctx: NodeRunContext,
+  waitForEvent?: (event: string, deadlineMs?: number) => Promise<void>,
+): Promise<NodeExecutionResult> {
+  if (wait.event !== undefined) {
+    if (!waitForEvent) {
+      throw new NodeExecutionError(
+        ctx.nodeId,
+        "wait por evento sin handler (onWait) en el runtime",
+      );
+    }
+    await waitForEvent(wait.event, wait.deadline_ms);
+    return { output: `event ${wait.event}` };
+  }
+  if (wait.until !== undefined) {
+    const target = Date.parse(wait.until);
+    if (Number.isNaN(target)) {
+      throw new NodeExecutionError(ctx.nodeId, `wait.until inválido: ${wait.until}`);
+    }
+    await sleepAbortable(Math.max(0, target - Date.now()), ctx);
+    return { output: `waited until ${wait.until}` };
+  }
+  if (wait.duration_ms !== undefined) {
+    await sleepAbortable(wait.duration_ms, ctx);
+    return { output: `waited ${wait.duration_ms}ms` };
+  }
+  throw new NodeExecutionError(
+    ctx.nodeId,
+    "wait requiere duration_ms, until o event",
+  );
 }
 
 export function executeCancel(reason: string, ctx: NodeRunContext): never {

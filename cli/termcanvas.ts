@@ -598,9 +598,29 @@ async function main() {
           {},
         );
         console.log(`cancel enviado a ${rest[0]}`);
+      } else if (command === "resume" && rest[0]) {
+        const payload = await factoryFetch(
+          "POST",
+          `/factory/workflows/runs/${encodeURIComponent(rest[0])}/resume`,
+          {},
+        );
+        if (jsonFlag) {
+          console.log(JSON.stringify(payload, null, 2));
+        } else {
+          console.log(
+            `resume ${payload.run.id} (${payload.run.status}) — workflow ${payload.run.workflow}`,
+          );
+        }
+      } else if (command === "signal" && rest[0] && rest[1]) {
+        await factoryFetch(
+          "POST",
+          `/factory/workflows/runs/${encodeURIComponent(rest[0])}/signal`,
+          { event: rest[1] },
+        );
+        console.log(`signal "${rest[1]}" enviado a ${rest[0]}`);
       } else {
         console.log(
-          "Usage: termcanvas workflow <list|run|status|watch|approve|reject|cancel> [args]",
+          "Usage: termcanvas workflow <list|run|status|watch|approve|reject|cancel|resume|signal> [args]",
         );
       }
     } else if (group === "diff" && command) {

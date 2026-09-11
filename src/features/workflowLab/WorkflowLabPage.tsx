@@ -12,7 +12,9 @@ import {
   getFactoryWorkflows,
   postFactoryWorkflowCancel,
   postFactoryWorkflowDecision,
+  postFactoryWorkflowResume,
   postFactoryWorkflowRun,
+  postFactoryWorkflowSignal,
   type WorkflowDefinitionInfo,
   type WorkflowRunDetail,
   type WorkflowRunInfo,
@@ -136,6 +138,26 @@ export function WorkflowLabPage() {
     setBusy(false);
     if (!result.ok) setNotice(result.error);
     else setNotice("cancel enviado");
+    void refresh();
+  };
+
+  const resumeRun = async () => {
+    if (!selectedRunId) return;
+    setBusy(true);
+    const result = await postFactoryWorkflowResume(selectedRunId);
+    setBusy(false);
+    if (!result.ok) setNotice(result.error);
+    else setNotice(`run ${result.data.id} reanudado`);
+    void refresh();
+  };
+
+  const sendSignal = async (event: string) => {
+    if (!selectedRunId) return;
+    setBusy(true);
+    const result = await postFactoryWorkflowSignal(selectedRunId, event);
+    setBusy(false);
+    if (!result.ok) setNotice(result.error);
+    else setNotice(`signal "${event}" enviado`);
     void refresh();
   };
 
@@ -340,6 +362,17 @@ export function WorkflowLabPage() {
                   <span className="ml-auto text-xs text-[var(--text-secondary)]">
                     {formatTotals(detail.run)}
                   </span>
+                  {(detail.run.status === "failed" ||
+                    detail.run.status === "cancelled") && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void resumeRun()}
+                      className="rounded border border-[var(--border)] px-2 py-0.5 text-xs hover:bg-[var(--surface-hover)] disabled:opacity-40"
+                    >
+                      Resumir
+                    </button>
+                  )}
                   {(detail.run.status === "running" ||
                     detail.run.status === "pending") && (
                     <button
@@ -384,6 +417,24 @@ export function WorkflowLabPage() {
                         </button>
                       ))}
                     </div>
+                  </div>
+                )}
+
+                {detail.wait && (
+                  <div className="mt-3 flex items-center gap-2 rounded border border-sky-500/40 p-2 text-xs">
+                    <span>
+                      Esperando evento{" "}
+                      <span className="font-medium">{detail.wait.event}</span> en{" "}
+                      {detail.wait.nodeId}
+                    </span>
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void sendSignal(detail.wait!.event)}
+                      className="rounded border border-[var(--border)] px-2 py-0.5 hover:bg-[var(--surface-hover)] disabled:opacity-40"
+                    >
+                      Señalizar
+                    </button>
                   </div>
                 )}
 

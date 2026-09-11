@@ -57,6 +57,13 @@ export interface ApprovalResponse {
   text?: string;
 }
 
+export interface WaitRequest {
+  runId: string;
+  nodeId: string;
+  event: string;
+  deadlineMs?: number;
+}
+
 export interface RunWorkflowOptions {
   cwd: string;
   runsDir: string;
@@ -71,8 +78,12 @@ export interface RunWorkflowOptions {
   repoRoot?: string;
   /** Handler de gates humanos. Sin handler, un gate falla el nodo. */
   onApproval?: (request: ApprovalRequest) => Promise<ApprovalResponse>;
+  /** Handler de waits por evento (runtime). Sin handler, el nodo falla. */
+  onWait?: (request: WaitRequest) => Promise<void>;
   /** Callback inmediato con el run recién creado (para runtimes en background). */
   onRunCreated?: (run: WorkflowRun) => void;
+  /** Reanuda un run terminal existente (reusa fila, artefactos y nodos completados). */
+  resumeRunId?: string;
   /** Profundidad de anidamiento de child workflows (máx 3). */
   depth?: number;
 }
@@ -138,28 +149,57 @@ export async function runWorkflow(
     );
   }
   const def = loaded.def;
-  const inputs = resolveInputs(def, opts.inputs);
+  let inputs = resolveInputs(def, opts.inputs);
   const expanded = expandIncludes(def, (name) =>
     loadWorkflow(name, { repoRoot: opts.repoRoot ?? opts.cwd }),
   );
   validateWorkflow(expanded.def);
   const store = new WorkflowRunStore(opts.runsDir);
-  const run = store.create({
-    workflow: def.name,
-    description: def.description,
-    inputs,
-    args: opts.args ?? "",
-    sourceDigest: loaded.digest,
-    sourcePath: loaded.sourcePath,
-  });
+  let run: WorkflowRun;
+  if (opts.resumeRunId) {
+    const existing = store.load(opts.resumeRunId);
+    if (!existing) {
+      throw new WorkflowValidationError(`run "${opts.resumeRunId}" no existe`);
+    }
+    if (existing.status === "running" || existing.status === "pending") {
+      throw new WorkflowValidationError(
+        `run "${opts.resumeRunId}" sigue activo; cancelalo antes de resumir`,
+      );
+    }
+    run = existing;
+    inputs = existing.inputs ?? inputs;
+    for (const [nodeId, state] of Object.entries(run.nodes)) {
+      if (state.status !== "completed") delete run.nodes[nodeId];
+    }
+    run.status = "running";
+    run.error = undefined;
+    run.finishedAt = undefined;
+    run.result = undefined;
+    run.totals = undefined;
+    run.sourceDigest = loaded.digest;
+    run.sourcePath = loaded.sourcePath;
+    store.save(run);
+  } else {
+    run = store.create({
+      workflow: def.name,
+      description: def.description,
+      inputs,
+      args: opts.args ?? "",
+      sourceDigest: loaded.digest,
+      sourcePath: loaded.sourcePath,
+    });
+  }
   const artifacts: RunArtifacts = store.artifactsFor(run.id);
   opts.onRunCreated?.(run);
   const frozenDir = path.join(artifacts.runDir, "workflow-source");
   fs.mkdirSync(frozenDir, { recursive: true });
-  if (fs.existsSync(loaded.sourcePath)) {
-    fs.copyFileSync(loaded.sourcePath, path.join(frozenDir, "workflow.yaml"));
-  } else {
-    fs.writeFileSync(path.join(frozenDir, "workflow.yaml"), loaded.source, "utf-8");
+  const frozenFile = path.join(frozenDir, "workflow.yaml");
+  if (!fs.existsSync(frozenFile)) {
+    if (fs.existsSync(loaded.sourcePath)) {
+      fs.copyFileSync(loaded.sourcePath, frozenFile);
+    } else {
+      fs.writeFileSync(frozenFile, loaded.source, "utf-8");
+    }
   }
 
   const emit = (type: WorkflowEventType, nodeId?: string, data?: Record<string, unknown>) => {
@@ -803,7 +843,18 @@ export async function runWorkflow(
         { ...nodeCtx, env: scriptEnv },
       );
     }
-    if (node.wait !== undefined) return executeWait(node.wait, nodeCtx);
+    if (node.wait !== undefined) {
+      return executeWait(node.wait, nodeCtx, (event, deadlineMs) =>
+        opts.onWait
+          ? opts.onWait({ runId: run.id, nodeId: node.id, event, deadlineMs })
+          : Promise.reject(
+              new NodeExecutionError(
+                node.id,
+                "wait por evento sin handler (onWait) en el runtime",
+              ),
+            ),
+      );
+    }
     if (node.cancel !== undefined) {
       return Promise.resolve(executeCancel(resolveTemplate(node.cancel, varCtx), nodeCtx));
     }
@@ -822,6 +873,10 @@ export async function runWorkflow(
   const executeNode = async (node: WorkflowNode): Promise<void> => {
     if (cancelledReason || opts.signal?.aborted) return;
     const states = run.nodes;
+    if (states[node.id]?.status === "completed") {
+      emit("node_skipped", node.id, { reason: "resume: nodo ya completado" });
+      return;
+    }
 
     if (node.when) {
       const original = states[node.id];
@@ -985,6 +1040,38 @@ export async function runWorkflow(
     }
     run.result = result;
   }
+
+  const totals: NonNullable<WorkflowRun["totals"]> = {};
+  let totalCost = 0;
+  let hasCost = false;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let cacheRead = 0;
+  let cacheWrite = 0;
+  let hasTokens = false;
+  for (const state of Object.values(run.nodes)) {
+    if (typeof state.costUsd === "number") {
+      totalCost += state.costUsd;
+      hasCost = true;
+    }
+    if (state.usage) {
+      inputTokens += state.usage.inputTokens ?? 0;
+      outputTokens += state.usage.outputTokens ?? 0;
+      cacheRead += state.usage.cacheReadTokens ?? 0;
+      cacheWrite += state.usage.cacheWriteTokens ?? 0;
+      hasTokens = true;
+    }
+  }
+  if (hasCost) totals.costUsd = totalCost;
+  if (hasTokens) {
+    totals.tokens = {
+      input: inputTokens,
+      output: outputTokens,
+      cacheRead,
+      cacheWrite,
+    };
+  }
+  if (hasCost || hasTokens) run.totals = totals;
 
   const finalType: WorkflowEventType =
     run.status === "cancelled"
