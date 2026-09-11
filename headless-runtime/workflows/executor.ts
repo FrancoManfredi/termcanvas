@@ -36,6 +36,7 @@ import { runShellCommand } from "./nodes/shell";
 import { loadWorkflow } from "./loader";
 import { expandIncludes } from "./expand";
 import { prepareWorkflowWorktree } from "./isolation";
+import { extractBalancedJSONObject, stripJsonFences } from "../llm/jsonExtract";
 
 export interface LoadedWorkflow {
   def: WorkflowDefinition;
@@ -142,6 +143,33 @@ function readCommandFile(loaded: LoadedWorkflow, name: string): string {
   if (!text.startsWith("---")) return text;
   const end = text.indexOf("\n---", 3);
   return end === -1 ? text : text.slice(end + 4).replace(/^\r?\n/, "");
+}
+
+/**
+ * Parseo tolerante de la salida IA cuando el nodo declara output_format:
+ * JSON directo → sin fences → objeto balanceado embebido en prosa.
+ * Devuelve undefined si no hay JSON utilizable.
+ */
+function parseStructuredOutput(raw: string): unknown {
+  const candidates = [raw, stripJsonFences(raw)];
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    try {
+      return JSON.parse(candidate);
+    } catch {
+      // sigue con el extractor balanceado
+    }
+  }
+  for (const candidate of [raw, stripJsonFences(raw)]) {
+    const extracted = extractBalancedJSONObject(candidate);
+    if (extracted === null) continue;
+    try {
+      return JSON.parse(extracted);
+    } catch {
+      // candidato inválido: sigue
+    }
+  }
+  return undefined;
 }
 
 export async function runWorkflow(
@@ -332,11 +360,7 @@ export async function runWorkflow(
       if (!loop.fresh_context && result.sessionId) sessionId = result.sessionId;
       let outputJson = result.outputJson;
       if (outputJson === undefined && node.output_format) {
-        try {
-          outputJson = JSON.parse(result.output);
-        } catch {
-          outputJson = undefined;
-        }
+        outputJson = parseStructuredOutput(result.output);
       }
       if (outputJson !== undefined) lastResult.outputJson = outputJson;
       prevOutput = result.output;
@@ -956,14 +980,14 @@ export async function runWorkflow(
         if (result.outputJson !== undefined) {
           state.outputJson = result.outputJson;
         } else if (node.output_format) {
-          try {
-            state.outputJson = JSON.parse(result.output);
-          } catch {
+          const parsed = parseStructuredOutput(result.output);
+          if (parsed === undefined) {
             throw new NodeExecutionError(
               node.id,
-              "output no es JSON válido y el nodo declara output_format",
+              "output no contiene JSON válido y el nodo declara output_format",
             );
           }
+          state.outputJson = parsed;
         }
         artifacts.writeNodeOutput(node.id, result.output);
         if (state.outputJson !== undefined) {

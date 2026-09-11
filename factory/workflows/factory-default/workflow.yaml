@@ -1,5 +1,5 @@
 name: factory-default
-description: Pipeline local migrado (triage -> spec -> implement -> verify -> review)
+description: Pipeline local migrado (triage -> spec -> aprobación -> implement -> verify -> review)
 tags:
   - factory
   - defaults
@@ -17,20 +17,30 @@ nodes:
     depends_on: [triage]
     command: spec
 
-  - id: implement
+  - id: approve
     depends_on: [spec]
+    approval:
+      message: |
+        Aprobar la spec para pasar a implementación?
+
+        $spec.output
+      capture_response: true
+      on_reject:
+        prompt: |
+          Ajustá la spec según el rechazo humano y devolvé la spec corregida.
+
+          Rechazo: $REJECTION_REASON
+          Spec actual: $spec.output
+        max_attempts: 2
+
+  - id: implement
+    depends_on: [approve]
     command: implement
 
   - id: verify
     depends_on: [implement]
-    prompt: |
-      Verificá la implementación corriendo los checks del repo
-      (tests, typecheck, lint si existen).
-
-      Implementación: $implement.output
-
-      Reportá cada comando ejecutado con su resultado y un veredicto final
-      PASS o FAIL.
+    command: verify
+    output_type: verify-evidence
 
   - id: review
     depends_on: [verify]

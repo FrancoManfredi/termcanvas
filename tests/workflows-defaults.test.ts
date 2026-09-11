@@ -90,9 +90,11 @@ test("factory-default: pipeline migrado corre por el engine", async () => {
   const runner: AiNodeRunner = async (req) => {
     if (req.prompt.includes("Hacé el triage")) return { output: "triaje" };
     if (req.prompt.includes("Escribí una spec")) return { output: "spec" };
-    if (req.prompt.includes("Implementá la spec")) return { output: "impl" };
     if (req.prompt.includes("Verificá la implementación")) return { output: "PASS" };
-    return { output: '{"green":true,"findings":""}' };
+    if (req.prompt.includes("Revisá la implementación")) {
+      return { output: '{"green":true,"findings":""}' };
+    }
+    return { output: "impl" };
   };
   const run = await runWorkflow(
     loadWorkflow("factory-default", { repoRoot, globalDir: emptyGlobal }),
@@ -102,12 +104,21 @@ test("factory-default: pipeline migrado corre por el engine", async () => {
       repoRoot,
       inputs: { request: "arreglar login" },
       aiRunner: runner,
+      onApproval: async () => ({ decision: "approve", text: "ok" }),
     },
   );
   assert.equal(run.status, "completed");
   assert.equal(run.nodes.triage.output, "triaje");
+  assert.equal(run.nodes.approve.output, "ok");
+  assert.equal(run.nodes.verify.output, "PASS");
   assert.deepEqual(run.nodes.review.outputJson, { green: true, findings: "" });
   assert.equal(run.result?.outcome, "succeeded");
+  assert.ok(
+    fs.existsSync(
+      path.join(runsDir, run.id, "artifacts", "nodes", "verify.md"),
+    ),
+    "verify debe dejar evidencia sidecar",
+  );
 });
 
 test("fix-issue: cadena triage -> implement -> review", async () => {

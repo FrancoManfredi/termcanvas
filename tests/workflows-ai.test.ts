@@ -215,6 +215,30 @@ nodes:
   assert.match(run.nodes.boom.error ?? "", /modelo caído/);
 });
 
+test("output_format: extrae JSON embebido en prosa y fences", async () => {
+  const { tmp, runsDir } = sandbox();
+  const yaml = `name: ai-loose
+description: json tolerante
+nodes:
+  - id: verdict
+    prompt: "evaluá"
+    output_format:
+      type: object
+      properties:
+        green: { type: boolean }
+`;
+  const runner: AiNodeRunner = async () => ({
+    output: 'Acá va el veredicto:\n```json\n{"green": true}\n```\nlisto.',
+  });
+  const run = await runWorkflow(loaded(yaml, tmp), {
+    cwd: tmp,
+    runsDir,
+    aiRunner: runner,
+  });
+  assert.equal(run.status, "completed");
+  assert.deepEqual(run.nodes.verdict.outputJson, { green: true });
+});
+
 test("totales: agrega costos y tokens de los nodos", async () => {
   const { tmp, runsDir } = sandbox();
   const yaml = `name: totals
