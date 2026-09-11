@@ -42,6 +42,19 @@ export interface LoadedWorkflow {
   dir: string;
 }
 
+export interface ApprovalRequest {
+  runId: string;
+  nodeId: string;
+  message: string;
+  decisions: string[];
+  attempt: number;
+}
+
+export interface ApprovalResponse {
+  decision: string;
+  text?: string;
+}
+
 export interface RunWorkflowOptions {
   cwd: string;
   runsDir: string;
@@ -54,10 +67,11 @@ export interface RunWorkflowOptions {
   aiRunner?: AiNodeRunner;
   /** Raíz del proyecto para resolver skills (default: cwd). */
   repoRoot?: string;
+  /** Handler de gates humanos. Sin handler, un gate falla el nodo. */
+  onApproval?: (request: ApprovalRequest) => Promise<ApprovalResponse>;
 }
 
 const PHASE_BY_BODY: Record<string, string> = {
-  approval: "Fase 3",
   loop_group: "Fase 3",
   include: "Fase 3",
   workflow: "Fase 3",
@@ -295,6 +309,73 @@ export async function runWorkflow(
     resolveExpression: (expr: string) => resolveValue(expr, buildVarCtx()),
   };
 
+  const executeApproval = async (
+    node: WorkflowNode,
+    varCtx: VarContext,
+  ): Promise<NodeExecutionResult> => {
+    const approval = node.approval;
+    if (!approval) throw new NodeExecutionError(node.id, "nodo approval sin body");
+    if (!opts.onApproval) {
+      throw new NodeExecutionError(
+        node.id,
+        "gate sin handler de aprobación (onApproval); no se puede resolver desatendido",
+      );
+    }
+    const decisions = approval.decisions ?? ["approve", "reject"];
+    const maxAttempts = approval.on_reject?.max_attempts ?? 1;
+    let rejectionReason = "";
+    let attempt = 0;
+    let reworkSession: string | null = null;
+    for (;;) {
+      attempt += 1;
+      const message = resolveTemplate(approval.message, {
+        ...varCtx,
+        rejectionReason,
+      });
+      const response = await opts.onApproval({
+        runId: run.id,
+        nodeId: node.id,
+        message,
+        decisions,
+        attempt,
+      });
+      const decision =
+        typeof response?.decision === "string" ? response.decision : "";
+      if (!decisions.includes(decision)) {
+        throw new NodeExecutionError(
+          node.id,
+          `decisión inválida "${decision}" (válidas: ${decisions.join(", ")})`,
+        );
+      }
+      if (decision !== "reject") {
+        const text = response.text ?? "";
+        const output = approval.capture_response ? text || decision : decision;
+        return { output, outputJson: { decision, text } };
+      }
+      rejectionReason = response.text ?? "";
+      if (!approval.on_reject) {
+        throw new NodeCancelSignal(
+          node.id,
+          rejectionReason ? `gate rechazado: ${rejectionReason}` : "gate rechazado",
+        );
+      }
+      if (attempt >= maxAttempts) {
+        throw new NodeExecutionError(
+          node.id,
+          `gate rechazado tras ${attempt} intento(s)${
+            rejectionReason ? `: ${rejectionReason}` : ""
+          }`,
+        );
+      }
+      const reworkPrompt = resolveTemplate(approval.on_reject.prompt, {
+        ...varCtx,
+        rejectionReason,
+      });
+      const rework = await runAiNode(node, reworkPrompt, reworkSession);
+      if (rework.sessionId) reworkSession = rework.sessionId;
+    }
+  };
+
   const executeBody = (
     node: WorkflowNode,
     varCtx: VarContext,
@@ -323,6 +404,9 @@ export async function runWorkflow(
     }
     if (node.loop !== undefined) {
       return executeLoop(node, varCtx);
+    }
+    if (node.approval !== undefined) {
+      return executeApproval(node, varCtx);
     }
     if (node.bash !== undefined) {
       return executeBash(resolveTemplate(node.bash, varCtx), nodeCtx);
