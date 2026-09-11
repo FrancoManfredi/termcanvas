@@ -1,0 +1,28 @@
+name: review-lens
+description: Un revisor con foco en un lente (seguridad, tests, rendimiento, ...)
+tags:
+  - defaults
+  - review
+inputs:
+  lens:
+    required: true
+    description: Eje de revisión
+  diff:
+    default: "(sin diff provisto)"
+returns: verdict
+outcome_field: green
+nodes:
+  - id: verdict
+    prompt: |
+      Revisá el cambio con foco en "$INPUTS.lens".
+
+      Contexto / diff:
+      $INPUTS.diff
+
+      Respondé un veredicto con notas accionables.
+    output_format:
+      type: object
+      properties:
+        green: { type: boolean }
+        notes: { type: string }
+      required: [green, notes]

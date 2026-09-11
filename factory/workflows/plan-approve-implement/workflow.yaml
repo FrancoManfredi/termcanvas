@@ -1,0 +1,50 @@
+name: plan-approve-implement
+description: Planifica, pide aprobación humana y recién ahí implementa y revisa
+tags:
+  - defaults
+  - gate
+inputs:
+  request:
+    required: true
+    description: Qué hay que hacer
+returns: review
+nodes:
+  - id: plan
+    command: plan-request
+    output_format:
+      type: object
+      properties:
+        summary: { type: string }
+        steps:
+          type: array
+          items: { type: string }
+      required: [summary]
+
+  - id: gate
+    depends_on: [plan]
+    approval:
+      message: |
+        Aprobar el plan y continuar con la implementación?
+
+        $plan.output
+      capture_response: true
+
+  - id: implement
+    depends_on: [gate]
+    prompt: |
+      Implementá el plan aprobado.
+
+      Pedido original: $INPUTS.request
+      Plan: $plan.output
+      Comentario humano: $gate.output
+
+      Al terminar, resumí qué cambiaste y cómo verificarlo.
+
+  - id: review
+    depends_on: [implement]
+    prompt: |
+      Revisá la implementación contra el plan. Respondé OK si está lista,
+      o FINDINGS con la lista de problemas.
+
+      Plan: $plan.output
+      Implementación: $implement.output

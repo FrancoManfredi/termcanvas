@@ -1,0 +1,30 @@
+name: fix-issue
+description: Triaje, implementación y review en cadena sobre un issue
+tags:
+  - defaults
+inputs:
+  issue:
+    required: true
+    description: Descripción del issue (o URL)
+returns: review
+nodes:
+  - id: triage
+    prompt: |
+      Analizá el issue y proponé los pasos mínimos para resolverlo.
+
+      Issue: $INPUTS.issue
+
+  - id: implement
+    depends_on: [triage]
+    prompt: |
+      Implementá la solución siguiendo el triaje. Corré los tests relevantes.
+
+      Triaje: $triage.output
+
+  - id: review
+    depends_on: [implement]
+    prompt: |
+      Revisá el cambio contra el issue original. Respondé OK o FINDINGS.
+
+      Issue: $INPUTS.issue
+      Implementación: $implement.output

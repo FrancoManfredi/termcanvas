@@ -1,0 +1,21 @@
+name: parallel-reviews
+description: Varios revisores en paralelo sobre el mismo diff, agregados en orden
+tags:
+  - defaults
+  - review
+inputs:
+  diff:
+    default: "(sin diff provisto)"
+  lenses:
+    default: [seguridad, tests, rendimiento]
+returns: reviews
+nodes:
+  - id: reviews
+    workflow: review-lens
+    with:
+      diff: $INPUTS.diff
+    fan_out:
+      items: "$INPUTS.lenses"
+      as: lens
+      max_parallel: 3
+      join: all_success
