@@ -35,6 +35,7 @@ import { createOpencodeAiRunner, type AiNodeRunner } from "./nodes/ai";
 import { runShellCommand } from "./nodes/shell";
 import { loadWorkflow } from "./loader";
 import { expandIncludes } from "./expand";
+import { prepareWorkflowWorktree } from "./isolation";
 
 export interface LoadedWorkflow {
   def: WorkflowDefinition;
@@ -84,6 +85,10 @@ export interface RunWorkflowOptions {
   onRunCreated?: (run: WorkflowRun) => void;
   /** Reanuda un run terminal existente (reusa fila, artefactos y nodos completados). */
   resumeRunId?: string;
+  /** Aislamiento del run: inherit (cwd actual) o worktree (git worktree por run). */
+  isolation?: "inherit" | "worktree";
+  /** Branch base para el worktree (default: HEAD del repo). */
+  baseBranch?: string;
   /** Profundidad de anidamiento de child workflows (máx 3). */
   depth?: number;
 }
@@ -202,6 +207,20 @@ export async function runWorkflow(
     }
   }
 
+  let effectiveCwd = opts.cwd;
+  if (opts.isolation === "worktree" && !opts.resumeRunId) {
+    const worktree = prepareWorkflowWorktree({
+      repoRoot: opts.repoRoot ?? opts.cwd,
+      runId: run.id,
+      baseBranch: opts.baseBranch,
+    });
+    run.worktree = worktree;
+    effectiveCwd = worktree.path;
+    store.save(run);
+  } else if (opts.resumeRunId && run.worktree) {
+    effectiveCwd = run.worktree.path;
+  }
+
   const emit = (type: WorkflowEventType, nodeId?: string, data?: Record<string, unknown>) => {
     const event: WorkflowEvent = {
       ts: nowIso(),
@@ -267,7 +286,7 @@ export async function runWorkflow(
     aiRunner({
       runId: run.id,
       nodeId: node.id,
-      cwd: opts.cwd,
+      cwd: effectiveCwd,
       prompt,
       model: node.model ?? def.model,
       effort: node.effort ?? def.effort,
@@ -332,7 +351,7 @@ export async function runWorkflow(
       if (loop.until_bash) {
         const command = resolveTemplate(loop.until_bash, iterationVars);
         const shellResult = await runShellCommand(command, {
-          cwd: opts.cwd,
+          cwd: effectiveCwd,
           env: {
             ...baseEnv,
             ARTIFACTS_DIR: artifacts.artifactsDir,
@@ -626,7 +645,7 @@ export async function runWorkflow(
       if (group.until_bash) {
         const command = resolveTemplate(group.until_bash, untilVars);
         const shellResult = await runShellCommand(command, {
-          cwd: opts.cwd,
+          cwd: effectiveCwd,
           env: {
             ...baseEnv,
             ARTIFACTS_DIR: artifacts.artifactsDir,
@@ -683,7 +702,7 @@ export async function runWorkflow(
       );
     }
     const childRun = await runWorkflow(childLoaded, {
-      cwd: opts.cwd,
+      cwd: effectiveCwd,
       runsDir: opts.runsDir,
       inputs: childInputs,
       args: run.args,
@@ -801,7 +820,7 @@ export async function runWorkflow(
     };
     const nodeCtx: NodeRunContext = {
       nodeId: node.id,
-      cwd: opts.cwd,
+      cwd: effectiveCwd,
       env: nodeEnv,
       timeoutMs: node.timeout,
       signal: opts.signal,

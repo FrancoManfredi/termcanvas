@@ -103,7 +103,20 @@ export function createWorkflowRouteHandler(
             ? (body.inputs as Record<string, unknown>)
             : undefined;
         const args = typeof body.args === "string" ? body.args : undefined;
-        const run = await getRuntime().start(name, { inputs, args });
+        const isolation =
+          body.isolation === "worktree"
+            ? ("worktree" as const)
+            : body.isolation === "inherit"
+              ? ("inherit" as const)
+              : undefined;
+        const baseBranch =
+          typeof body.baseBranch === "string" ? body.baseBranch : undefined;
+        const run = await getRuntime().start(name, {
+          inputs,
+          args,
+          isolation,
+          baseBranch,
+        });
         sendJson(res, 201, { ok: true, run });
         return true;
       }

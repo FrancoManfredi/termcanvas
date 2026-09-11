@@ -26,6 +26,7 @@ test("bundled: discovery y validación de los defaults", () => {
     "parallel-reviews",
     "review-lens",
     "fix-issue",
+    "factory-default",
   ];
   const found = discoverWorkflows({ repoRoot, globalDir: emptyGlobal });
   for (const name of expected) {
@@ -82,6 +83,31 @@ test("parallel-reviews: fan_out de 3 lentes con child runs", async () => {
   assert.equal(reviews.length, 3);
   const runDirs = fs.readdirSync(runsDir).filter((entry) => entry.startsWith("run-"));
   assert.equal(runDirs.length, 4);
+});
+
+test("factory-default: pipeline migrado corre por el engine", async () => {
+  const runsDir = path.join(sandbox(), "runs");
+  const runner: AiNodeRunner = async (req) => {
+    if (req.prompt.includes("Hacé el triage")) return { output: "triaje" };
+    if (req.prompt.includes("Escribí una spec")) return { output: "spec" };
+    if (req.prompt.includes("Implementá la spec")) return { output: "impl" };
+    if (req.prompt.includes("Verificá la implementación")) return { output: "PASS" };
+    return { output: '{"green":true,"findings":""}' };
+  };
+  const run = await runWorkflow(
+    loadWorkflow("factory-default", { repoRoot, globalDir: emptyGlobal }),
+    {
+      cwd: repoRoot,
+      runsDir,
+      repoRoot,
+      inputs: { request: "arreglar login" },
+      aiRunner: runner,
+    },
+  );
+  assert.equal(run.status, "completed");
+  assert.equal(run.nodes.triage.output, "triaje");
+  assert.deepEqual(run.nodes.review.outputJson, { green: true, findings: "" });
+  assert.equal(run.result?.outcome, "succeeded");
 });
 
 test("fix-issue: cadena triage -> implement -> review", async () => {

@@ -27,6 +27,8 @@ import type { LoadedWorkflow } from "./executor";
 export interface StartRunParams {
   inputs?: Record<string, unknown>;
   args?: string;
+  isolation?: "inherit" | "worktree";
+  baseBranch?: string;
 }
 
 interface PendingGate {
@@ -95,6 +97,8 @@ export class WorkflowRuntime {
       repoRoot: this.opts.repoRoot,
       inputs: params.inputs,
       args: params.args,
+      isolation: params.isolation,
+      baseBranch: params.baseBranch,
       env: this.opts.env,
       signal: abort.signal,
       aiRunner: this.opts.aiRunner,

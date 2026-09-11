@@ -1,0 +1,43 @@
+name: factory-default
+description: Pipeline local migrado (triage -> spec -> implement -> verify -> review)
+tags:
+  - factory
+  - defaults
+inputs:
+  request:
+    required: true
+    description: Qué hay que hacer (texto o URL de issue)
+returns: review
+outcome_field: green
+nodes:
+  - id: triage
+    command: triage
+
+  - id: spec
+    depends_on: [triage]
+    command: spec
+
+  - id: implement
+    depends_on: [spec]
+    command: implement
+
+  - id: verify
+    depends_on: [implement]
+    prompt: |
+      Verificá la implementación corriendo los checks del repo
+      (tests, typecheck, lint si existen).
+
+      Implementación: $implement.output
+
+      Reportá cada comando ejecutado con su resultado y un veredicto final
+      PASS o FAIL.
+
+  - id: review
+    depends_on: [verify]
+    command: review
+    output_format:
+      type: object
+      properties:
+        green: { type: boolean }
+        findings: { type: string }
+      required: [green, findings]

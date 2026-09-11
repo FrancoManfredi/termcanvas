@@ -516,10 +516,15 @@ async function main() {
           }
         }
       } else if (command === "run" && rest[0]) {
+        const useWorktree = rest.includes("--worktree");
         const payload = await factoryFetch("POST", "/factory/workflows/run", {
           name: rest[0],
           args: workflowFlag("--args"),
           inputs: workflowInputs(),
+          ...(useWorktree ? { isolation: "worktree" } : {}),
+          ...(workflowFlag("--base")
+            ? { baseBranch: workflowFlag("--base") }
+            : {}),
         });
         if (jsonFlag) {
           console.log(JSON.stringify(payload, null, 2));

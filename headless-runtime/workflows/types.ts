@@ -73,6 +73,11 @@ export interface WorkflowRun {
       cacheWrite?: number;
     };
   };
+  /** Worktree aislado del run (isolation=worktree). */
+  worktree?: {
+    path: string;
+    branch: string;
+  };
   /** Digest del YAML congelado al iniciar el run. */
   sourceDigest: string;
   /** Copia inmutable del workflow usada por este run. */

@@ -2916,7 +2916,13 @@ export async function getFactoryWorkflowDefinition(
 }
 
 export async function postFactoryWorkflowRun(
-  input: { name: string; args?: string; inputs?: Record<string, unknown> },
+  input: {
+    name: string;
+    args?: string;
+    inputs?: Record<string, unknown>;
+    isolation?: "inherit" | "worktree";
+    baseBranch?: string;
+  },
   opts: FactoryClientOptions = {},
 ): Promise<FactoryResult<WorkflowRunInfo>> {
   const fallback = null as unknown as WorkflowRunInfo;
@@ -2936,6 +2942,8 @@ export async function postFactoryWorkflowRun(
           name: input.name.trim(),
           ...(input.args !== undefined ? { args: input.args } : {}),
           ...(input.inputs !== undefined ? { inputs: input.inputs } : {}),
+          ...(input.isolation !== undefined ? { isolation: input.isolation } : {}),
+          ...(input.baseBranch !== undefined ? { baseBranch: input.baseBranch } : {}),
         }),
       },
       fetchFn,
