@@ -121,7 +121,11 @@ nodes:
       const response = await fetch(
         `${server.base}/factory/workflows/runs/${runId}`,
       );
-      const payload = (await response.json()) as { run: WorkflowRun };
+      const payload = (await response.json()) as {
+        run: WorkflowRun;
+        active: boolean;
+      };
+      assert.equal(typeof payload.active, "boolean");
       return payload.run.status === "completed" ? payload.run : null;
     });
     assert.equal(finished.nodes.a.output, "ok");

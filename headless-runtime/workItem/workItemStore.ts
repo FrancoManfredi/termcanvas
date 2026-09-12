@@ -730,7 +730,16 @@ export class WorkItemStore {
    * ya fusionan vía `mergeCostWithPrevious`; esto cubre futuros callers).
    * `null` explícito (tracking apagado) sí persiste: es "—", no "sin tarifa".
    * Nunca lanza (null ante job inexistente o fallo interno).
-   */  private persistCostSummary(jobId: string, summary: CostSummary | null): WorkItem | null {
+   */  /**
+   * Fase 9: persiste un resumen de costo calculado FUERA del contador legacy
+   * (p. ej. los totals de un run del engine). Delega en persistCostSummary con
+   * la misma defensa FU-4d. Best-effort, nunca lanza.
+   */
+  applyExternalCost(jobId: string, summary: CostSummary | null): WorkItem | null {
+    return this.persistCostSummary(jobId, summary);
+  }
+
+  private persistCostSummary(jobId: string, summary: CostSummary | null): WorkItem | null {
     try {
       const current = this.items.get(jobId);
       if (!current) return null;

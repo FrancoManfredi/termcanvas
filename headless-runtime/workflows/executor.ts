@@ -37,6 +37,7 @@ import { loadWorkflow } from "./loader";
 import { expandIncludes } from "./expand";
 import { prepareWorkflowWorktree } from "./isolation";
 import { extractBalancedJSONObject, stripJsonFences } from "../llm/jsonExtract";
+import { validateAgainstSchema } from "./jsonSchema";
 
 export interface LoadedWorkflow {
   def: WorkflowDefinition;
@@ -362,6 +363,15 @@ export async function runWorkflow(
       let outputJson = result.outputJson;
       if (outputJson === undefined && node.output_format) {
         outputJson = parseStructuredOutput(result.output);
+      }
+      if (outputJson !== undefined && node.output_format) {
+        const schemaError = validateAgainstSchema(outputJson, node.output_format);
+        if (schemaError) {
+          throw new NodeExecutionError(
+            node.id,
+            `output_format inválido (iteración ${iteration}): ${schemaError}`,
+          );
+        }
       }
       if (outputJson !== undefined) lastResult.outputJson = outputJson;
       prevOutput = result.output;
@@ -762,6 +772,18 @@ export async function runWorkflow(
     }
     const result: NodeExecutionResult = { output };
     if (outputJson !== undefined) result.outputJson = outputJson;
+    // Roll-up de costos: el nodo padre hereda los totals del child run.
+    if (typeof childRun.totals?.costUsd === "number") {
+      result.costUsd = childRun.totals.costUsd;
+    }
+    if (childRun.totals?.tokens) {
+      result.usage = {
+        inputTokens: childRun.totals.tokens.input ?? 0,
+        outputTokens: childRun.totals.tokens.output ?? 0,
+        cacheReadTokens: childRun.totals.tokens.cacheRead ?? 0,
+        cacheWriteTokens: childRun.totals.tokens.cacheWrite ?? 0,
+      };
+    }
     return result;
   };
 
@@ -989,6 +1011,18 @@ export async function runWorkflow(
             );
           }
           state.outputJson = parsed;
+        }
+        if (node.output_format && state.outputJson !== undefined) {
+          const schemaError = validateAgainstSchema(
+            state.outputJson,
+            node.output_format,
+          );
+          if (schemaError) {
+            throw new NodeExecutionError(
+              node.id,
+              `output_format inválido: ${schemaError}`,
+            );
+          }
         }
         artifacts.writeNodeOutput(node.id, result.output);
         if (state.outputJson !== undefined) {

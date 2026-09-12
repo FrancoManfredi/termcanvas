@@ -2752,6 +2752,8 @@ export interface WorkflowRunDetail {
   run: WorkflowRunInfo;
   pending: WorkflowPendingGate | null;
   wait: WorkflowPendingWait | null;
+  /** true cuando el runtime lo tiene activo en memoria. */
+  active: boolean;
 }
 
 function parseWorkflowSummary(json: unknown): WorkflowSummary | null {
@@ -3020,6 +3022,7 @@ export async function getFactoryWorkflowRun(
         run,
         pending: parsePendingGate(record.pending),
         wait: parsePendingWait(record.wait),
+        active: record.active === true,
       },
     };
   } catch (e) {

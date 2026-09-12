@@ -185,6 +185,7 @@ export function createOpencodeAiRunner(): AiNodeRunner {
           label: `workflow ${req.nodeId} session.prompt`,
           jobId: req.runId,
           sessionId,
+          ...(typeof req.timeoutMs === "number" ? { ms: req.timeoutMs } : {}),
         },
       );
 

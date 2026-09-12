@@ -235,6 +235,41 @@ nodes:
   assert.match(run.nodes.fan.error ?? "", /fan_out con hijo fallido/);
 });
 
+test("costos: los child runs suman al run padre", async () => {
+  const { tmp, runsDir } = sandbox();
+  writeRepoWorkflow(
+    tmp,
+    "paid",
+    `name: paid
+description: con costo
+nodes:
+  - id: work
+    prompt: "x"
+`,
+  );
+  const yaml = `name: parent-cost
+description: padre
+nodes:
+  - id: child
+    workflow: paid
+`;
+  const aiRunner: AiNodeRunner = async () => ({
+    output: "ok",
+    costUsd: 0.25,
+    usage: { inputTokens: 4, outputTokens: 2 },
+  });
+  const run = await runWorkflow(loaded(yaml, tmp), {
+    cwd: tmp,
+    runsDir,
+    repoRoot: tmp,
+    aiRunner,
+  });
+  assert.equal(run.status, "completed");
+  assert.equal(run.totals?.costUsd, 0.25);
+  assert.equal(run.totals?.tokens?.input, 4);
+  assert.equal(run.totals?.tokens?.output, 2);
+});
+
 test("workflow anidado: guarda de profundidad máxima", async () => {
   const { tmp, runsDir } = sandbox();
   writeRepoWorkflow(

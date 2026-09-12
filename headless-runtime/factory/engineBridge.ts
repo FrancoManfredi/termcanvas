@@ -25,7 +25,7 @@ import type { WorkflowEvent, WorkflowRun } from "../workflows/types";
 import type { ApprovalRequest } from "../workflows/executor";
 import type { VerificationReport } from "../../shared/types/implement";
 import type { ReviewResult } from "../../shared/types/review";
-import type { WorkItemStatus } from "../../shared/types/workItem";
+import type { CostSummary, WorkItemStatus } from "../../shared/types/workItem";
 
 export function isWorkflowEngineEnabled(): boolean {
   try {
@@ -244,6 +244,41 @@ export function mirrorRunEvidence(itemId: string, run: WorkflowRun | null): void
   }
 }
 
+/**
+ * Espeja los totals del run a `costSummary` del work item (CostBadge).
+ * Solo cuando el run reportó un USD real: un resumen sin tarifa no inventa
+ * 0.00 (misma doctrina que el cost tracker legacy).
+ */
+export function mirrorRunCost(itemId: string, run: WorkflowRun | null): void {
+  try {
+    const totals = run?.totals;
+    if (!totals || typeof totals.costUsd !== "number") return;
+    const tokens = totals.tokens ?? {};
+    const summary: CostSummary = {
+      llmCalls: 1,
+      estimatedInputTokens: tokens.input ?? 0,
+      estimatedOutputTokens: tokens.output ?? 0,
+      estimatedUSD: totals.costUsd,
+      basis: "estimated-chars/4",
+      ratesRef: "workflow-run",
+      actual: {
+        inputTokens: tokens.input ?? 0,
+        outputTokens: tokens.output ?? 0,
+        reasoningTokens: 0,
+        cacheReadTokens: tokens.cacheRead ?? 0,
+        cacheWriteTokens: tokens.cacheWrite ?? 0,
+        calls: 1,
+        usd: totals.costUsd,
+        usdSource: "server",
+        basis: "opencode-session",
+      },
+    };
+    workItemStore.applyExternalCost(itemId, summary);
+  } catch {
+    // evidencia de costo best-effort
+  }
+}
+
 /** Espeja un evento del run al work item (status + timeline + logs). */
 export function handleRunEvent(
   event: WorkflowEvent,
@@ -296,7 +331,13 @@ export function handleRunEvent(
           result: event.data?.result,
         });
       }
-      mirrorRunEvidence(itemId, runtime?.getRun(event.runId) ?? null);
+      const finishedRun = runtime?.getRun(event.runId) ?? null;
+      mirrorRunEvidence(itemId, finishedRun);
+      mirrorRunCost(itemId, finishedRun);
+      // Auto-score como en el pipeline legacy (best-effort, no bloquea nada).
+      void import("../measure/scorerEngine")
+        .then((module) => module.autoScoreCompletedJob(itemId))
+        .catch(() => {});
       return;
     }
     if (event.type === "run_failed" || event.type === "run_cancelled") {
@@ -304,7 +345,22 @@ export function handleRunEvent(
       transitionSafe(itemId, "Cancelled", `engine: ${reason}`, {
         workflowRunId: event.runId,
       });
-      mirrorRunEvidence(itemId, runtime?.getRun(event.runId) ?? null);
+      const failedRun = runtime?.getRun(event.runId) ?? null;
+      mirrorRunEvidence(itemId, failedRun);
+      mirrorRunCost(itemId, failedRun);
+      if (event.type === "run_failed") {
+        try {
+          notify({
+            kind: "daemon-error",
+            workItemId: itemId,
+            title: `Run falló: ${event.workflow}`,
+            body: reason,
+            dedupeKey: `run-failed:${event.runId}`,
+          });
+        } catch {
+          // best-effort: la campana también ve el estado por polling
+        }
+      }
     }
   } catch {
     // el espejo es best-effort: jamás tumba el run

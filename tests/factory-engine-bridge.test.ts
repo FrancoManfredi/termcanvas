@@ -211,6 +211,7 @@ test("evidencia: run_completed espeja verify.json y review.json válidos", () =>
     status: "completed",
     startedAt: "2026-09-11T00:00:00Z",
     finishedAt: "2026-09-11T00:01:00Z",
+    totals: { costUsd: 0.42, tokens: { input: 10, output: 5 } },
     nodes: {
       verify: {
         id: "verify",
@@ -252,6 +253,53 @@ test("evidencia: run_completed espeja verify.json y review.json válidos", () =>
   const review = ReviewResultSchema.parse(reviewRaw);
   assert.equal(review.verdict, "accept");
   assert.equal(review.workItemId, "job-bridge-1");
+
+  const item = workItemStore.get("job-bridge-1");
+  assert.equal(item?.costSummary?.estimatedUSD, 0.42);
+  assert.equal(item?.costSummary?.estimatedInputTokens, 10);
+  assert.equal(item?.costSummary?.actual?.usd, 0.42);
+});
+
+test("run_failed: notifica daemon-error y espeja evidencia de fallo", () => {
+  if (!workItemStore.get("job-bridge-1")) makeItem("job-bridge-1");
+  const fake = fakeRuntime("run-bridge-1");
+  fake.setRun({
+    id: "run-bridge-1",
+    workflow: "factory-default",
+    status: "failed",
+    startedAt: "2026-09-11T00:00:00Z",
+    finishedAt: "2026-09-11T00:02:00Z",
+    nodes: {
+      verify: {
+        id: "verify",
+        status: "failed",
+        attempts: 1,
+        output: "FAIL: tests rojos",
+      },
+    },
+  });
+  handleRunEvent(
+    {
+      ts: "",
+      type: "run_failed",
+      runId: "run-bridge-1",
+      workflow: "factory-default",
+      data: { error: "verify falló" },
+    } as unknown as import("../headless-runtime/workflows/types.ts").WorkflowEvent,
+    fake.runtime,
+  );
+  const dir = workItemStore.get("job-bridge-1")?.dir;
+  assert.ok(dir);
+  const verify = VerifyJsonSchema.parse(
+    JSON.parse(fs.readFileSync(path.join(dir!, "verify.json"), "utf-8")),
+  );
+  assert.equal(verify.verification.overall, "fail");
+  const notificationsRaw = fs.readFileSync(
+    path.join(SANDBOX, ".notifications.json"),
+    "utf-8",
+  );
+  assert.match(notificationsRaw, /daemon-error/);
+  assert.match(notificationsRaw, /Run falló/);
 });
 
 test("jobs legacy (sin run) no son interceptados", async () => {

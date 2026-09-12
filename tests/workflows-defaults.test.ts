@@ -87,7 +87,9 @@ test("parallel-reviews: fan_out de 3 lentes con child runs", async () => {
 
 test("factory-default: pipeline migrado corre por el engine", async () => {
   const runsDir = path.join(sandbox(), "runs");
+  const log: AiNodeRequest[] = [];
   const runner: AiNodeRunner = async (req) => {
+    log.push(req);
     if (req.prompt.includes("Hacé el triage")) return { output: "triaje" };
     if (req.prompt.includes("Escribí una spec")) return { output: "spec" };
     if (req.prompt.includes("Verificá la implementación")) return { output: "PASS" };
@@ -119,6 +121,13 @@ test("factory-default: pipeline migrado corre por el engine", async () => {
     ),
     "verify debe dejar evidencia sidecar",
   );
+  const agentFor = (needle: string) =>
+    log.find((req) => req.prompt.includes(needle))?.agent;
+  assert.equal(agentFor("Hacé el triage"), "triage");
+  assert.equal(agentFor("Escribí una spec"), "spec");
+  assert.equal(agentFor("Implementá la spec"), "implement");
+  assert.equal(agentFor("Verificá la implementación"), "implement");
+  assert.equal(agentFor("Revisá la implementación"), "review");
 });
 
 test("fix-issue: cadena triage -> implement -> review", async () => {

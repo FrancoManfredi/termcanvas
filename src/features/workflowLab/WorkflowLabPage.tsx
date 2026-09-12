@@ -363,12 +363,18 @@ export function WorkflowLabPage() {
                     {formatTotals(detail.run)}
                   </span>
                   {(detail.run.status === "failed" ||
-                    detail.run.status === "cancelled") && (
+                    detail.run.status === "cancelled" ||
+                    (detail.run.status === "running" && !detail.active)) && (
                     <button
                       type="button"
                       disabled={busy}
                       onClick={() => void resumeRun()}
                       className="rounded border border-[var(--border)] px-2 py-0.5 text-xs hover:bg-[var(--surface-hover)] disabled:opacity-40"
+                      title={
+                        detail.run.status === "running" && !detail.active
+                          ? "Run huérfano (el daemon reinició): reanudar"
+                          : "Reanudar el run"
+                      }
                     >
                       Resumir
                     </button>

@@ -175,6 +175,7 @@ export function createWorkflowRouteHandler(
             run,
             pending: runtime.getPending(runId),
             wait: runtime.getPendingWait(runId),
+            active: runtime.isActive(runId),
           });
           return true;
         }

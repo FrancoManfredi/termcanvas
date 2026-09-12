@@ -12,10 +12,12 @@ outcome_field: green
 nodes:
   - id: triage
     command: triage
+    agent: triage
 
   - id: spec
     depends_on: [triage]
     command: spec
+    agent: spec
 
   - id: approve
     depends_on: [spec]
@@ -36,15 +38,18 @@ nodes:
   - id: implement
     depends_on: [approve]
     command: implement
+    agent: implement
 
   - id: verify
     depends_on: [implement]
     command: verify
+    agent: implement
     output_type: verify-evidence
 
   - id: review
     depends_on: [verify]
     command: review
+    agent: review
     output_format:
       type: object
       properties:

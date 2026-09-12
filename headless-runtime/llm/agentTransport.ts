@@ -385,7 +385,7 @@ export async function attemptPromptOnce(
  */
 export async function attemptJsonPromptOnce(
   call: (signal: AbortSignal, payload: Record<string, unknown>) => Promise<unknown>,
-  opts: { payload: Record<string, unknown>; label: string; preferKey?: string; jobId?: unknown; sessionId?: unknown },
+  opts: { payload: Record<string, unknown>; label: string; preferKey?: string; jobId?: unknown; sessionId?: unknown; ms?: number },
 ): Promise<PromptAttempt> {
   const first = isFormatUnsupportedServer() ? stripStructuredFormat(opts.payload) : opts.payload;
   const out = await attemptPromptOnce((signal) => call(signal, first), {
@@ -393,6 +393,7 @@ export async function attemptJsonPromptOnce(
     preferKey: opts.preferKey,
     jobId: opts.jobId,
     sessionId: opts.sessionId,
+    ...(typeof opts.ms === "number" ? { ms: opts.ms } : {}),
   });
   if (out.raw !== null) return out;
   if (!isFormatUnsupportedServer() && isFormatUnsupportedError(out.lastErr)) {
@@ -405,6 +406,7 @@ export async function attemptJsonPromptOnce(
       preferKey: opts.preferKey,
       jobId: opts.jobId,
       sessionId: opts.sessionId,
+      ...(typeof opts.ms === "number" ? { ms: opts.ms } : {}),
     });
   }
   return out;
