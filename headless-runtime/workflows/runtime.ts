@@ -205,6 +205,10 @@ export class WorkflowRuntime {
       return;
     }
     entry.firedEvents.add(event);
+    if (entry.firedEvents.size > 50) {
+      const oldest = entry.firedEvents.values().next().value;
+      if (typeof oldest === "string") entry.firedEvents.delete(oldest);
+    }
   }
 
   cancel(runId: string): void {

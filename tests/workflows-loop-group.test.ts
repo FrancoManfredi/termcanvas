@@ -118,6 +118,36 @@ nodes:
   assert.match(run.nodes.grp.error ?? "", /loop_group: nodo "bad" falló/);
 });
 
+test("loop_group: suma costos y tokens de los nodos IA al run", async () => {
+  const { tmp, runsDir } = sandbox();
+  const yaml = `name: group-cost
+description: costos
+nodes:
+  - id: grp
+    loop_group:
+      max_iterations: 2
+      until_bash: |
+        node -e "process.exit(1)"
+      nodes:
+        - id: work
+          prompt: "trabajá"
+`;
+  const runner: AiNodeRunner = async () => ({
+    output: "w",
+    costUsd: 0.1,
+    usage: { inputTokens: 3, outputTokens: 1 },
+  });
+  const run = await runWorkflow(loaded(yaml, tmp), {
+    cwd: tmp,
+    runsDir,
+    aiRunner: runner,
+  });
+  assert.equal(run.status, "completed");
+  assert.equal(run.totals?.costUsd, 0.2);
+  assert.equal(run.totals?.tokens?.input, 6);
+  assert.equal(run.nodes.grp.costUsd, 0.2);
+});
+
 test("loop_group: respeta max_iterations", async () => {
   const { tmp, runsDir } = sandbox();
   const log: AiNodeRequest[] = [];

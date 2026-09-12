@@ -533,6 +533,15 @@ async function main() {
             `run ${payload.run.id} (${payload.run.status}) — workflow ${payload.run.workflow}`,
           );
         }
+      } else if (command === "runs") {
+        const payload = await factoryFetch("GET", "/factory/workflows/runs");
+        if (jsonFlag) {
+          console.log(JSON.stringify(payload, null, 2));
+        } else {
+          for (const run of (payload.runs ?? []).slice(0, 20)) {
+            console.log(`${run.id}\t${run.status}\t${run.workflow}`);
+          }
+        }
       } else if (command === "status" && rest[0]) {
         const payload = await factoryFetch(
           "GET",
@@ -625,7 +634,7 @@ async function main() {
         console.log(`signal "${rest[1]}" enviado a ${rest[0]}`);
       } else {
         console.log(
-          "Usage: termcanvas workflow <list|run|status|watch|approve|reject|cancel|resume|signal> [args]",
+          "Usage: termcanvas workflow <list|run|runs|status|watch|approve|reject|cancel|resume|signal> [args]",
         );
       }
     } else if (group === "diff" && command) {

@@ -5,6 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   buildDagLayers,
+  defaultsForInputs,
   formatTotals,
   nodeBodyOf,
   parseInputsJson,
@@ -51,6 +52,19 @@ test("parseInputsJson: vacío, objeto, array e inválido", () => {
   const invalid = parseInputsJson("{no json");
   assert.equal(invalid.ok, false);
   if (!invalid.ok) assert.match(invalid.error, /JSON inválido/);
+});
+
+test("defaultsForInputs: solo inputs con default declarado", () => {
+  assert.deepEqual(
+    defaultsForInputs({
+      request: { required: true },
+      lenses: { default: ["a", "b"] },
+      diff: { default: "(sin diff)" },
+    }),
+    { lenses: ["a", "b"], diff: "(sin diff)" },
+  );
+  assert.deepEqual(defaultsForInputs(undefined), {});
+  assert.deepEqual(defaultsForInputs([]), {});
 });
 
 test("totales y tonos de estado", () => {

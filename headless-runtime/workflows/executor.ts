@@ -519,6 +519,13 @@ export async function runWorkflow(
     let prevStates: Record<string, NodeState> = {};
     let lastResult: NodeExecutionResult = { output: "" };
     let cancelSignal: NodeCancelSignal | null = null;
+    let groupCost = 0;
+    let hasGroupCost = false;
+    let groupInputTokens = 0;
+    let groupOutputTokens = 0;
+    let groupCacheRead = 0;
+    let groupCacheWrite = 0;
+    let hasGroupTokens = false;
 
     for (let iteration = 1; iteration <= group.max_iterations; iteration += 1) {
       const iterationStates: Record<string, NodeState> = {};
@@ -591,6 +598,17 @@ export async function runWorkflow(
                   state.outputJson = result.outputJson;
                 }
                 if (result.sessionId) state.sessionId = result.sessionId;
+                if (typeof result.costUsd === "number") {
+                  groupCost += result.costUsd;
+                  hasGroupCost = true;
+                }
+                if (result.usage) {
+                  groupInputTokens += result.usage.inputTokens ?? 0;
+                  groupOutputTokens += result.usage.outputTokens ?? 0;
+                  groupCacheRead += result.usage.cacheReadTokens ?? 0;
+                  groupCacheWrite += result.usage.cacheWriteTokens ?? 0;
+                  hasGroupTokens = true;
+                }
                 return;
               } catch (error) {
                 if (error instanceof NodeCancelSignal) {
@@ -695,6 +713,15 @@ export async function runWorkflow(
     }
 
     if (cancelSignal) throw cancelSignal;
+    if (hasGroupCost) lastResult.costUsd = groupCost;
+    if (hasGroupTokens) {
+      lastResult.usage = {
+        inputTokens: groupInputTokens,
+        outputTokens: groupOutputTokens,
+        cacheReadTokens: groupCacheRead,
+        cacheWriteTokens: groupCacheWrite,
+      };
+    }
     return lastResult;
   };
 

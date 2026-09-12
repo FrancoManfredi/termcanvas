@@ -146,3 +146,20 @@ export function nodeBodyOf(node: Record<string, unknown> | undefined): string {
   }
   return "?";
 }
+
+/** Prefill del form de run: solo inputs con default declarado. */
+export function defaultsForInputs(
+  inputs: unknown,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  if (!inputs || typeof inputs !== "object" || Array.isArray(inputs)) return out;
+  for (const [name, spec] of Object.entries(inputs as Record<string, unknown>)) {
+    if (spec && typeof spec === "object" && !Array.isArray(spec)) {
+      const record = spec as Record<string, unknown>;
+      if ("default" in record && record.default !== undefined) {
+        out[name] = record.default;
+      }
+    }
+  }
+  return out;
+}

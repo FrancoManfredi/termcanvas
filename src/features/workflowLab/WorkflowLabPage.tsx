@@ -22,6 +22,7 @@ import {
 } from "../../lib/factoryClient";
 import {
   buildDagLayers,
+  defaultsForInputs,
   formatTotals,
   nodeBodyOf,
   parseInputsJson,
@@ -83,8 +84,15 @@ export function WorkflowLabPage() {
     setSelectedWorkflow(name);
     setDefinition(null);
     const result = await getFactoryWorkflowDefinition(name);
-    if (result.ok) setDefinition(result.data.info);
-    else setNotice(result.error);
+    if (result.ok) {
+      setDefinition(result.data.info);
+      const defaults = defaultsForInputs(result.data.info.def.inputs);
+      setInputsText(
+        Object.keys(defaults).length > 0
+          ? JSON.stringify(defaults, null, 2)
+          : "",
+      );
+    } else setNotice(result.error);
   };
 
   const startRun = async () => {
