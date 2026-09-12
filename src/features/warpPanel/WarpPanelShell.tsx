@@ -7,6 +7,7 @@ import {
   persistPanelSection,
   shouldEnableFactoryPoll,
 } from "./panelSection";
+import { activityLog } from "./activityDebug";
 import { installWarpCrashRecorder } from "./warpCrashRecorder";
 import { KANBAN_COLUMNS } from "./adapters/mockIssues";
 import { useIssues } from "./hooks/useIssues";
@@ -60,6 +61,12 @@ export function WarpPanelShell() {
     "summary",
     false,
   );
+  useEffect(() => {
+    activityLog("WarpPanelShell: sección activa", {
+      activeSection,
+      factoryPoll: shouldEnableFactoryPoll(activeSection),
+    });
+  }, [activeSection]);
   // Crash ring (offline hunt, not a guess): window error/unhandledrejection
   // recorder mounted at the very top of the panel. Never throws, never
   // blocks; the section is read via ref so the handler always sees the
@@ -77,6 +84,10 @@ export function WarpPanelShell() {
   // Persisted section (item 2): survives transitions/remounts like the
   // rest of the warp UI state — see `panelSection.ts`.
   const setActiveSection = (section: NavSection): void => {
+    activityLog("WarpPanelShell.setActiveSection", {
+      from: activeSection,
+      to: section,
+    });
     try {
       if (!isValidPanelSection(section)) return;
       setActiveSectionState(section);

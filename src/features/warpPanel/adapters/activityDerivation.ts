@@ -271,7 +271,49 @@ function effectiveInputsForIssue(
  * second review. `Cancelled` jobs never match (`isFactoryJobCompleted`
  * is Complete-only), so a cancelled run never invents done or merge-ready.
  */
+import { activityLog } from "../activityDebug";
+
 export function deriveActivityStatus(
+  issueNumber: number,
+  review: LiveReviewSnapshot,
+  resolvingIssueNumber: number | null,
+  issueState?: string | null,
+  factoryActive?: boolean | null,
+  factoryAwaiting?: FactoryAwaitingKind | string | null,
+  factoryCompleted?: boolean | null,
+  optimisticReady?: boolean | null,
+): DerivedActivity {
+  const result = deriveActivityStatusInner(
+    issueNumber,
+    review,
+    resolvingIssueNumber,
+    issueState,
+    factoryActive,
+    factoryAwaiting,
+    factoryCompleted,
+    optimisticReady,
+  );
+  try {
+    activityLog("deriveActivityStatus", {
+      issueNumber,
+      issueState: issueState ?? null,
+      factoryActive: factoryActive ?? null,
+      factoryAwaiting: factoryAwaiting ?? null,
+      factoryCompleted: factoryCompleted ?? null,
+      optimisticReady: optimisticReady ?? null,
+      result: {
+        status: result.status,
+        phase: result.phase ?? null,
+        awaitingAction: result.awaitingAction ?? null,
+      },
+    });
+  } catch {
+    // el log nunca rompe la derivación
+  }
+  return result;
+}
+
+function deriveActivityStatusInner(
   issueNumber: number,
   review: LiveReviewSnapshot,
   resolvingIssueNumber: number | null,
@@ -546,6 +588,35 @@ export function phaseStartedForIssue(
  * otherwise unused here (never invented onto the row).
  */
 export function mapIssueNodeToActivity(
+  node: IssueNodeData,
+  derived: DerivedActivity,
+  review?: LiveReviewSnapshot,
+  projectName?: string,
+  activityEntries?: IssueActivityEntry[],
+): Issue {
+  const mapped = mapIssueNodeToActivityInner(
+    node,
+    derived,
+    review,
+    projectName,
+    activityEntries,
+  );
+  try {
+    activityLog("mapIssueNodeToActivity", {
+      id: mapped.id,
+      status: mapped.status,
+      phase: mapped.phase ?? null,
+      awaitingAction: mapped.awaitingAction ?? null,
+      factory: mapped.factory?.stage ?? null,
+      prNumber: mapped.prNumber ?? null,
+    });
+  } catch {
+    // el log nunca rompe el mapeo
+  }
+  return mapped;
+}
+
+function mapIssueNodeToActivityInner(
   node: IssueNodeData,
   derived: DerivedActivity,
   review?: LiveReviewSnapshot,

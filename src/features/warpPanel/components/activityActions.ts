@@ -1,4 +1,5 @@
 import { useIssueResolveStore } from "../../../stores/issueResolveStore";
+import { activityLog } from "../activityDebug";
 import { useIssueReviewStore } from "../../../stores/issueReviewStore";
 import { useIssueGateStore } from "../../../stores/issueGateStore";
 import { useWorkItemStore } from "../../../stores/workItemStore";
@@ -1443,6 +1444,12 @@ async function safeFactoryCreate(
   create: unknown,
   input: FactoryResolveCreateInput,
 ): Promise<FactoryResolveCreateResult> {
+  activityLog("safeFactoryCreate → create seam", {
+    viaInjected: typeof create === "function",
+    worktree: input.worktree,
+    phase: input.phase,
+    issueRef: input.issueRef,
+  });
   try {
     if (typeof create === "function") {
       const res = await (
@@ -1467,12 +1474,17 @@ async function safeFactoryCreate(
       { timeoutMs: FACTORY_JOB_CREATE_TIMEOUT_MS },
     );
     if (!res.ok || typeof res.data?.id !== "string" || res.data.id === "") {
+      activityLog("safeFactoryCreate resultado", {
+        ok: false,
+        error: res.ok ? "factory returned no job id" : res.error,
+      });
       return {
         ok: false,
         id: null,
         error: res.ok ? "factory returned no job id" : res.error,
       };
     }
+    activityLog("safeFactoryCreate resultado", { ok: true, id: res.data.id });
     return { ok: true, id: res.data.id, error: "" };
   } catch (e) {
     return {
@@ -1543,14 +1555,32 @@ export async function invokeActivityAction(
     busy.merging ||
     busy.resolvingConflict ||
     deps?.busy?.anyActive === true;
+  activityLog("invokeActivityAction", {
+    kind,
+    issueNumber,
+    pr: pr ?? null,
+    anyBusy,
+    busy,
+  });
 
   switch (kind) {
     case "resolve": {
-      if (busy.resolving) return;
+      if (busy.resolving) {
+        activityLog("invokeActivityAction resolve: bloqueado por busy.resolving", {
+          issueNumber,
+        });
+        return;
+      }
       // In-flight factory mutex: a second click while the create is in
       // flight refuses silently (the CTA shows `Resolving…` once the poll
       // list carries the job). Cleared on settle — never leaks.
-      if (factoryResolveInFlight.has(issueNumber)) return;
+      if (factoryResolveInFlight.has(issueNumber)) {
+        activityLog(
+          "invokeActivityAction resolve: ya hay un create en vuelo",
+          { issueNumber },
+        );
+        return;
+      }
       // Blocked-by gate (invoke-time backstop for the disabled CTA above —
       // same shared rule as the canvas card). Never throws.
       if (
@@ -1561,6 +1591,10 @@ export async function invokeActivityAction(
           ).map((n) => ({ kind: "blockedBy", number: n, state: "OPEN" })),
         ).blocked
       ) {
+        activityLog("invokeActivityAction resolve: bloqueado por blocked-by", {
+          issueNumber,
+          blockers: deps?.blockedByBlockers ?? [],
+        });
         return;
       }
       // Factory busy-match against the EXISTING poll list (matched by
@@ -1582,6 +1616,10 @@ export async function invokeActivityAction(
             parseGitHubIssueRepo(issueUrl),
           ) !== null
         ) {
+          activityLog(
+            "invokeActivityAction resolve: ya hay un factory job activo",
+            { issueNumber, jobs: jobs.length },
+          );
           return;
         }
       } catch {

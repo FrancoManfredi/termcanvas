@@ -25,6 +25,7 @@ import {
   isFactoryJobCompleted,
   readFactoryJobIssueRef,
 } from "@/features/warpPanel/adapters/factoryIssueJobs";
+import { activityLog } from "@/features/warpPanel/activityDebug";
 
 const POLL_INTERVAL_MS = 2500;
 const FETCH_TIMEOUT_MS = 3000;
@@ -408,6 +409,13 @@ async function sharedTick(): Promise<void> {
       useWorkItemStore.getState().setWorkItems(list as unknown as import("../../../../shared/types/workItem").WorkItem[]);
       useWorkItemStore.getState().setWorkItemsError(null);
       seedOpenPrsFromFactoryJobs(list);
+      try {
+        activityLog("poll factory jobs → store", {
+          count: list.length,
+        });
+      } catch {
+        // el log nunca rompe el poll
+      }
     }
   } catch (e) {
     if (alive() && !abort.signal.aborted) {

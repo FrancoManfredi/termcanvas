@@ -28,6 +28,7 @@ import {
   IconSession,
 } from "./warpIcons";
 import { useActivity } from "../hooks/useActivity";
+import { activityLog } from "../activityDebug";
 import { useIssueResolveStore } from "../../../stores/issueResolveStore";
 import {
   useIssueReviewStore,
@@ -476,6 +477,14 @@ function ColumnsLayout({
   selectedId: number | null;
   onSelect: (id: number) => void;
 }) {
+  try {
+    const counts = COLUMNS.map(
+      (col) => `${col.id}:${issues.filter((i) => i.status === col.id).length}`,
+    ).join(" ");
+    activityLog("ColumnsLayout render", { total: issues.length, counts });
+  } catch {
+    // el log nunca rompe el render
+  }
   return (
     <div
       style={{
@@ -600,7 +609,41 @@ export default function ActivityPanel({
   const selected =
     deferredIssues.find((i) => i.id === (mountedId ?? selectedId)) ?? null;
 
+  const renderCountRef = useRef(0);
+  renderCountRef.current += 1;
+  try {
+    const counts: Record<string, number> = {};
+    for (const issue of deferredIssues) {
+      counts[issue.status] = (counts[issue.status] ?? 0) + 1;
+    }
+    activityLog("ActivityPanel render", {
+      render: renderCountRef.current,
+      viaProp: issuesProp !== undefined,
+      hookIssues: hookIssues.length,
+      issues: issues.length,
+      deferredIssues: deferredIssues.length,
+      counts,
+      isFetching,
+      viewMode,
+      selectedId,
+      mountedId,
+      detailVisible,
+      selectedFound: selected !== null,
+      first: deferredIssues.slice(0, 6).map((issue) => ({
+        id: issue.id,
+        status: issue.status,
+        phase: issue.phase ?? null,
+        awaiting: issue.awaitingAction ?? null,
+        factoryStage: issue.factory?.stage ?? null,
+        title: issue.title.slice(0, 40),
+      })),
+    });
+  } catch {
+    // el log nunca rompe el render
+  }
+
   function openDetail(id: number) {
+    activityLog("ActivityPanel.openDetail", { id });
     if (closeTimer.current !== null) {
       window.clearTimeout(closeTimer.current);
       closeTimer.current = null;
@@ -612,6 +655,7 @@ export default function ActivityPanel({
   }
 
   function closeDetail() {
+    activityLog("ActivityPanel.closeDetail", { mountedId });
     setDetailVisible(false);
     setSelectedId(null);
     if (closeTimer.current !== null) {
@@ -653,7 +697,9 @@ export default function ActivityPanel({
   }, [mountedId]);
 
   useEffect(() => {
+    activityLog("ActivityPanel montado");
     return () => {
+      activityLog("ActivityPanel desmontado");
       if (closeTimer.current !== null) {
         window.clearTimeout(closeTimer.current);
       }
@@ -808,6 +854,13 @@ function KanbanColumn({
   const isAgent = status === "in-progress";
   const isAwaiting = status === "awaiting";
   const isReady = status === "ready";
+  activityLog("KanbanColumn render", {
+    status,
+    label,
+    count: issues.length,
+    collapsed,
+    firstIds: issues.slice(0, 5).map((i) => i.id),
+  });
 
   return (
     <div
@@ -2057,10 +2110,21 @@ function IssueDetail({
       triageAnswersReady,
     ],
   );
-  const defByKind = useMemo(
-    () => new Map(defs.map((d) => [d.kind, d])),
-    [defs],
-  );
+  const defByKind = useMemo(() => {
+    const map = new Map(defs.map((d) => [d.kind, d]));
+    try {
+      activityLog("IssueDetail: acciones disponibles", {
+        issue: issue.id,
+        kinds: [...map.keys()],
+        disabled: [...map.values()]
+          .filter((d) => (d as { disabled?: unknown }).disabled === true)
+          .map((d) => d.kind),
+      });
+    } catch {
+      // el log nunca rompe el render
+    }
+    return map;
+  }, [defs]);
   const reportDef = defByKind.get("view-report");
   const gitHubDef = defByKind.get("github");
 
@@ -2068,6 +2132,12 @@ function IssueDetail({
     (kind: ActivityActionKind, pr?: number, opts?: { force?: boolean }) => {
       // Returns the invoke promise so destructive CTAs can show a real busy
       // state (the daemon discard waits for the full teardown, up to 60s).
+      activityLog("IssueDetail.run → invokeActivityAction", {
+        kind,
+        issue: issue.id,
+        pr: pr ?? primaryPr ?? null,
+        force: opts?.force === true,
+      });
       return invokeActivityAction(
         kind,
         issue.id,

@@ -10,6 +10,7 @@ import { useIssueActivityStore } from "../../../stores/issueActivityStore";
 import { useProjectStore } from "../../../stores/projectStore";
 import { useIssueSyncStore } from "../../../stores/issueSyncStore";
 import { useWorkItemStore } from "../../../stores/workItemStore";
+import { activityLog } from "../activityDebug";
 
 export interface UseActivityResult {
   issues: Issue[];
@@ -116,9 +117,33 @@ export function useActivity(
   const factoryJobs = useWorkItemStore((s) => s.workItems);
   const [refreshTick, setRefreshTick] = useState(0);
 
-  const issues = useMemo<Issue[]>(
-    () => adapter.listActivityIssues(),
-    [
+  const issues = useMemo<Issue[]>(() => {
+    const list = adapter.listActivityIssues();
+    try {
+      const counts: Record<string, number> = {};
+      for (const issue of list) {
+        counts[issue.status] = (counts[issue.status] ?? 0) + 1;
+      }
+      activityLog("useActivity: snapshot recalculado", {
+        adapter: adapter === liveActivityAdapter ? "live" : "custom",
+        total: list.length,
+        counts,
+        isFetchingIssues,
+        factoryJobs: Array.isArray(factoryJobs) ? factoryJobs.length : 0,
+        activityRepos: activityByRepo ? Object.keys(activityByRepo).length : 0,
+        first: list.slice(0, 6).map((issue) => ({
+          id: issue.id,
+          status: issue.status,
+          phase: issue.phase,
+          title: issue.title.slice(0, 48),
+          factoryStage: issue.factory?.stage ?? null,
+        })),
+      });
+    } catch {
+      // el log nunca rompe la derivación
+    }
+    return list;
+  }, [
       adapter,
       issueVersion,
       prsByIssue,
@@ -156,6 +181,7 @@ export function useActivity(
   // IPC here — `requestPrLookup` dedupes and delegates to the canvas-owned
   // lookup handler.
   const refresh = useCallback((): void => {
+    activityLog("useActivity: refresh() manual", { issues: issues.length });
     const state = useIssueReviewStore.getState();
     for (const issue of issues) {
       state.requestPrLookup(
@@ -190,6 +216,11 @@ export function useActivity(
         }
       });
       const batches = splitBatches(pending, PR_LOOKUP_MOUNT_BATCH);
+      activityLog("useActivity: mount PR lookups", {
+        issues: issues.length,
+        pending: pending.length,
+        batches: batches.length,
+      });
       batches.forEach((batch, i) => {
         const run = (): void => {
           try {

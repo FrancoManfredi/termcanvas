@@ -30,6 +30,7 @@ import {
   mapIssueNodeToActivity,
   type ActivityLiveContext,
 } from "./activityDerivation";
+import { activityLog } from "../activityDebug";
 
 /**
  * Live activity adapter — canvas stores are the ONLY data source.
@@ -491,6 +492,26 @@ export class LiveActivityAdapter implements ActivityAdapter {
       () => this.deps.readNotifications(),
       [],
     );
+    activityLog("liveActivity.snapshot() input", {
+      nodes: nodes.length,
+      factoryJobs: Array.isArray(factoryJobs) ? factoryJobs.length : 0,
+      pendingNotifications: Array.isArray(pendingNotifications)
+        ? pendingNotifications.length
+        : 0,
+      activityRepos:
+        activityByRepo && typeof activityByRepo === "object"
+          ? Object.keys(activityByRepo).length
+          : 0,
+      resolving,
+      reviewLabels: Object.keys(
+        (baseReview as { labelsByIssue?: Record<string, unknown> })
+          .labelsByIssue ?? {},
+      ).length,
+      prsByIssue: Object.keys(
+        (baseReview as { prsByIssue?: Record<string, unknown> })
+          .prsByIssue ?? {},
+      ).length,
+    });
     // B3: ONE index per snapshot — every row below resolves against this
     // map (O(jobs) once) instead of rescanning the whole poll list per
     // issue (O(issues x jobs) per tick).
@@ -706,15 +727,52 @@ export class LiveActivityAdapter implements ActivityAdapter {
     }
     // Newest issues first (descending by issue number).
     issues.sort((a, b) => b.id - a.id);
+    try {
+      const counts: Record<string, number> = {};
+      for (const issue of issues) {
+        counts[issue.status] = (counts[issue.status] ?? 0) + 1;
+      }
+      activityLog("liveActivity.snapshot() output", {
+        total: issues.length,
+        counts,
+        first: issues.slice(0, 6).map((issue) => ({
+          id: issue.id,
+          status: issue.status,
+          phase: issue.phase,
+          awaiting: issue.awaitingAction ?? null,
+          factoryStage: issue.factory?.stage ?? null,
+          title: issue.title.slice(0, 48),
+        })),
+      });
+    } catch {
+      // el log nunca rompe el snapshot
+    }
     return issues;
   }
 
   listActivityIssues(): Issue[] {
-    return this.snapshot();
+    const issues = this.snapshot();
+    activityLog("adapter.listActivityIssues()", {
+      total: issues.length,
+      counts: (() => {
+        const counts: Record<string, number> = {};
+        for (const issue of issues) {
+          counts[issue.status] = (counts[issue.status] ?? 0) + 1;
+        }
+        return counts;
+      })(),
+    });
+    return issues;
   }
 
   getActivityIssue(id: number): Issue | undefined {
-    return this.snapshot().find((issue) => issue.id === id);
+    const found = this.snapshot().find((issue) => issue.id === id);
+    activityLog("adapter.getActivityIssue()", {
+      id,
+      found: found !== undefined,
+      status: found?.status ?? null,
+    });
+    return found;
   }
 }
 
