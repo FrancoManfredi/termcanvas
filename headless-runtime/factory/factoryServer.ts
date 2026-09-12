@@ -2590,7 +2590,7 @@ function getWorkflowRuntime(): WorkflowRuntime {
       runsDir: defaultRunsDir(),
       onEvent: (event) => {
         try {
-          handleRunEvent(event);
+          handleRunEvent(event, getWorkflowRuntime());
         } catch {
           // el espejo nunca rompe el run
         }

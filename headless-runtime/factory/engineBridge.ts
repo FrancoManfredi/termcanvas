@@ -18,9 +18,13 @@ import path from "node:path";
 import { workItemStore } from "../workItem/workItemStore";
 import { defaultRunsDir } from "../workflows/artifacts";
 import { notify } from "../notify/notifications";
+import { writeVerifyJsonAtomic } from "../implement/verifyEvidence";
+import { writeReviewJsonAtomic } from "../review/reviewDisk";
 import type { WorkflowRuntime } from "../workflows/runtime";
-import type { WorkflowEvent } from "../workflows/types";
+import type { WorkflowEvent, WorkflowRun } from "../workflows/types";
 import type { ApprovalRequest } from "../workflows/executor";
+import type { VerificationReport } from "../../shared/types/implement";
+import type { ReviewResult } from "../../shared/types/review";
 import type { WorkItemStatus } from "../../shared/types/workItem";
 
 export function isWorkflowEngineEnabled(): boolean {
@@ -136,8 +140,115 @@ function transitionSafe(
   }
 }
 
+/**
+ * Espeja la evidencia del run a la carpeta del job para que VerificationPanel
+ * y ReviewPanel rendericen datos reales en vez de fallbacks:
+ * - `verify.json` (VerifyJsonSchema) desde el nodo verify del run.
+ * - `review.json` (ReviewResultSchema) desde el nodo review (green/findings).
+ * Best-effort: nunca lanza y no pisa nada si el run no tiene esos nodos.
+ */
+export function mirrorRunEvidence(itemId: string, run: WorkflowRun | null): void {
+  if (!run) return;
+  try {
+    const item = workItemStore.get(itemId);
+    const dir = item?.dir;
+    if (!dir) return;
+    const nodes = Object.values(run.nodes ?? {});
+    const pick = (pattern: RegExp) =>
+      nodes
+        .filter(
+          (node) =>
+            pattern.test(node.id) &&
+            (node.status === "completed" || node.status === "failed"),
+        )
+        .at(-1);
+
+    const verifyNode = pick(/verify|verific/i);
+    const reviewNode = pick(/review|revis/i);
+    const verificationText = (verifyNode?.output ?? "").trim();
+    const reviewJson = reviewNode?.outputJson as
+      | { green?: unknown; findings?: unknown }
+      | undefined;
+    const green =
+      typeof reviewJson?.green === "boolean"
+        ? reviewJson.green
+        : /(^|\b)pass(ed)?\b/i.test(verificationText) &&
+          !/(^|\b)fail(ed)?\b/i.test(verificationText);
+    const overall: "pass" | "fail" = green ? "pass" : "fail";
+    const now = new Date().toISOString();
+
+    const report: VerificationReport = {
+      steps: [
+        {
+          name: "test",
+          command: `workflow:${run.workflow}/${verifyNode?.id ?? "verify"}`,
+          exitCode: overall === "pass" ? 0 : 1,
+          durationMs: 0,
+          status: overall === "pass" ? "pass" : "fail",
+          ...(verificationText
+            ? { logSnippet: verificationText.slice(0, 500) }
+            : {}),
+          logPath: "",
+        },
+      ],
+      overall,
+      startedAt: typeof run.startedAt === "string" ? run.startedAt : now,
+      finishedAt: typeof run.finishedAt === "string" ? run.finishedAt : now,
+      durationMs: 0,
+      ...(verificationText
+        ? {
+            evidence: [
+              {
+                kind: "note" as const,
+                status: overall,
+                summary: verificationText.slice(0, 300),
+              },
+            ],
+          }
+        : {}),
+    };
+    writeVerifyJsonAtomic(dir, {
+      workItemId: itemId,
+      verification: report,
+      createdFiles: [],
+    });
+
+    if (reviewNode) {
+      const findingsText =
+        typeof reviewJson?.findings === "string" ? reviewJson.findings : "";
+      const summary = (
+        findingsText ||
+        reviewNode.output ||
+        (green ? "Review OK" : "Review con hallazgos")
+      )
+        .trim()
+        .slice(0, 2000);
+      const result: ReviewResult = {
+        workItemId: itemId,
+        reviewerModel: { providerID: "termcanvas", modelID: "workflow-engine" },
+        verdict: green ? "accept" : "revise",
+        confidence: 0.8,
+        summary: summary.length > 0 ? summary : "Review del engine",
+        findings: [],
+        reviewAttempt: 1,
+        reviewedAt: now,
+      };
+      try {
+        writeReviewJsonAtomic(dir, result);
+      } catch {
+        // payload inválido: jamás rompe el espejo
+      }
+    }
+  } catch {
+    // evidencia best-effort
+  }
+}
+
 /** Espeja un evento del run al work item (status + timeline + logs). */
-export function handleRunEvent(event: WorkflowEvent): void {
+export function handleRunEvent(
+  event: WorkflowEvent,
+  runtime?: WorkflowRuntime,
+): void {
   const itemId = itemIdForRun(event.runId);
   if (!itemId) return;
   try {
@@ -185,6 +296,7 @@ export function handleRunEvent(event: WorkflowEvent): void {
           result: event.data?.result,
         });
       }
+      mirrorRunEvidence(itemId, runtime?.getRun(event.runId) ?? null);
       return;
     }
     if (event.type === "run_failed" || event.type === "run_cancelled") {
@@ -192,6 +304,7 @@ export function handleRunEvent(event: WorkflowEvent): void {
       transitionSafe(itemId, "Cancelled", `engine: ${reason}`, {
         workflowRunId: event.runId,
       });
+      mirrorRunEvidence(itemId, runtime?.getRun(event.runId) ?? null);
     }
   } catch {
     // el espejo es best-effort: jamás tumba el run
@@ -239,6 +352,25 @@ export function handleGate(request: ApprovalRequest): void {
       });
     } catch {
       // best-effort: la campana también ve el estado por polling
+    }
+    // Evidencia del gate: review.json ask_human para que ReviewPanel muestre
+    // el mensaje real en vez del fallback.
+    try {
+      const dir = workItemStore.get(itemId)?.dir;
+      if (dir) {
+        writeReviewJsonAtomic(dir, {
+          workItemId: itemId,
+          reviewerModel: { providerID: "termcanvas", modelID: "workflow-gate" },
+          verdict: "ask_human",
+          confidence: 1,
+          summary: `Gate ${request.nodeId}: ${request.message}`.slice(0, 2000),
+          findings: [],
+          reviewAttempt: request.attempt,
+          reviewedAt: new Date().toISOString(),
+        });
+      }
+    } catch {
+      // best-effort: el panel cae a su fallback
     }
   } catch {
     // best-effort

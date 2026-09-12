@@ -21,16 +21,19 @@ const {
   runWorkflowJob,
   tryHandleWorkflowAction,
 } = await import("../headless-runtime/factory/engineBridge.ts");
+const { VerifyJsonSchema } = await import("../headless-runtime/implement/verifyEvidence.ts");
+const { ReviewResultSchema } = await import("../shared/types/review.ts");
 type WorkflowRuntime = import("../headless-runtime/workflows/runtime.ts").WorkflowRuntime;
 
 interface FakeRuntime {
   runtime: WorkflowRuntime;
   started: Array<{ name: string; params: Record<string, unknown> }>;
   responses: Array<{ runId: string; decision: string; text?: string }>;
-  runs: Record<string, { id: string; status: string; workflow: string }>;
+  runs: Record<string, unknown>;
   setPending: (
     pending: { runId: string; nodeId: string; message: string; decisions: string[]; attempt: number } | null,
   ) => void;
+  setRun: (run: unknown) => void;
   resumed: string[];
   cancelled: string[];
 }
@@ -38,7 +41,7 @@ interface FakeRuntime {
 function fakeRuntime(runId: string): FakeRuntime {
   const started: FakeRuntime["started"] = [];
   const responses: FakeRuntime["responses"] = [];
-  const runs: FakeRuntime["runs"] = {};
+  const runs: Record<string, unknown> = {};
   const resumed: string[] = [];
   const cancelled: string[] = [];
   let pending: Parameters<FakeRuntime["setPending"]>[0] = null;
@@ -54,8 +57,9 @@ function fakeRuntime(runId: string): FakeRuntime {
     },
     async resume(id: string) {
       resumed.push(id);
-      if (runs[id]) runs[id].status = "running";
-      return runs[id];
+      const run = runs[id] as { status?: string } | undefined;
+      if (run) run.status = "running";
+      return run;
     },
     respond(id: string, response: { decision: string; text?: string }) {
       responses.push({ runId: id, decision: response.decision, text: response.text });
@@ -63,7 +67,8 @@ function fakeRuntime(runId: string): FakeRuntime {
     },
     cancel(id: string) {
       cancelled.push(id);
-      if (runs[id]) runs[id].status = "cancelled";
+      const run = runs[id] as { status?: string } | undefined;
+      if (run) run.status = "cancelled";
     },
     getPending() {
       return pending;
@@ -78,6 +83,9 @@ function fakeRuntime(runId: string): FakeRuntime {
     cancelled,
     setPending: (value) => {
       pending = value;
+    },
+    setRun: (run) => {
+      runs[runId] = run;
     },
   };
 }
@@ -129,6 +137,14 @@ test("eventos: node_started→Building, gate→Review, run_completed→Complete"
     attempt: 1,
   });
   assert.equal(workItemStore.get("job-bridge-1")?.status, "Review");
+  const gateDir = workItemStore.get("job-bridge-1")?.dir;
+  if (gateDir) {
+    const gateReview = ReviewResultSchema.parse(
+      JSON.parse(fs.readFileSync(path.join(gateDir, "review.json"), "utf-8")),
+    );
+    assert.equal(gateReview.verdict, "ask_human");
+    assert.match(gateReview.summary, /aprobar\?/);
+  }
   handleRunEvent(event("run_completed", { status: "completed" }));
   assert.equal(workItemStore.get("job-bridge-1")?.status, "Complete");
 });
@@ -184,6 +200,58 @@ test("acciones: accept→approve, reject→reject, resume y cancel", async () =>
   });
   assert.equal(cancelled.handled, true);
   assert.deepEqual(fake.cancelled, ["run-bridge-1"]);
+});
+
+test("evidencia: run_completed espeja verify.json y review.json válidos", () => {
+  if (!workItemStore.get("job-bridge-1")) makeItem("job-bridge-1");
+  const fake = fakeRuntime("run-bridge-1");
+  fake.setRun({
+    id: "run-bridge-1",
+    workflow: "factory-default",
+    status: "completed",
+    startedAt: "2026-09-11T00:00:00Z",
+    finishedAt: "2026-09-11T00:01:00Z",
+    nodes: {
+      verify: {
+        id: "verify",
+        status: "completed",
+        attempts: 1,
+        output: "PASS: pnpm typecheck ok",
+      },
+      review: {
+        id: "review",
+        status: "completed",
+        attempts: 1,
+        output: '{"green":true,"findings":""}',
+        outputJson: { green: true, findings: "" },
+      },
+    },
+  });
+  handleRunEvent(
+    {
+      ts: "",
+      type: "run_completed",
+      runId: "run-bridge-1",
+      workflow: "factory-default",
+    } as unknown as import("../headless-runtime/workflows/types.ts").WorkflowEvent,
+    fake.runtime,
+  );
+  const dir = workItemStore.get("job-bridge-1")?.dir;
+  assert.ok(dir, "el job debe tener dir");
+  const verifyRaw = JSON.parse(
+    fs.readFileSync(path.join(dir!, "verify.json"), "utf-8"),
+  ) as unknown;
+  const verify = VerifyJsonSchema.parse(verifyRaw);
+  assert.equal(verify.workItemId, "job-bridge-1");
+  assert.equal(verify.verification.overall, "pass");
+  assert.match(verify.verification.steps[0].logSnippet ?? "", /PASS/);
+
+  const reviewRaw = JSON.parse(
+    fs.readFileSync(path.join(dir!, "review.json"), "utf-8"),
+  ) as unknown;
+  const review = ReviewResultSchema.parse(reviewRaw);
+  assert.equal(review.verdict, "accept");
+  assert.equal(review.workItemId, "job-bridge-1");
 });
 
 test("jobs legacy (sin run) no son interceptados", async () => {
