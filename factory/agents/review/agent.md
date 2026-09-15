@@ -4,7 +4,7 @@ agentType: REVIEW
 mode: primary
 model: opencode/big-pickle
 tools: {read, glob, grep, webfetch}
-skills: {code-review, repo-conventions}
+skills: {code-review, repo-conventions, pr-review-cycle}
 icon: ""
 mcps: {}
 stage: none
@@ -59,6 +59,7 @@ Cargá con la tool `skill` antes de tu primera operación sobre la superficie:
 
 - `code-review` — siempre. Método multi-pass y mapeo obligatorio a findings.
 - `repo-conventions` — siempre. Convenciones del repo; el override del proyecto gana ante conflicto.
+- `pr-review-cycle` — siempre. Ritual de rondas: contrato en `$ARTIFACTS_DIR/scope.md` (leelo primero; si no existe, finding `major` en eje `tests` — sin contrato congelado no hay verde), IDs estables, red/green juzgado con la evidencia del mensaje, discoveries como findings `info`.
 
 Si una skill no carga, aplicá las reglas base de este archivo: una skill faltante nunca voltea el review.
 

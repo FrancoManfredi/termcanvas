@@ -87,6 +87,7 @@ import {
   isWorkingTreeDirty,
   removeIsolatedWorktree,
 } from "./isolation/gitWorktree";
+import { resolveExternalAnchor } from "./isolation/externalRepo";
 // B2: session cwd = isolation jail when recorded, else the anchor.
 import { resolveSessionWorktree } from "./isolation/sessionWorktree";
 import { maybeOpenPrForCompletedJob, gateAcceptOnBranchDiff, notePrMergedEqual, readPrState, checkReviewStale } from "./isolation/gitHubPr";
@@ -115,8 +116,11 @@ import {
 } from "./review/reviewRoutes";
 import {
   getDependenciesStatus,
-  installPrAgent,
 } from "./dependencies/depsService";
+import {
+  getRunnersStatus,
+} from "./github/runnersService";
+import { runnerSupervisor } from "./github/runnerSupervisor";
 import {
   acceptReviewEqual,
   getReviewById,
@@ -2330,7 +2334,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       case "notifications-ack": await handleNotificationAckRoute(pathname, res); break;
       case "definition-status": await handleDefinitionStatusRoute(res); break;
       case "dependencies-status": await handleDependenciesStatusRoute(res); break;
-      case "dependencies-install": await handleDependenciesInstallRoute(res); break;
+      case "github-runners-status": await handleRunnersStatusRoute(url, res); break;
       case "automations-list": await handleAutomationsListRoute(res); break;
       case "automations-tick": await handleAutomationsTickRoute(req, res); break;
       case "integrations-status": await handleIntegrationsStatusRoute(res); break;
@@ -2518,8 +2522,41 @@ async function runIsolationPostCreate(jobId: string): Promise<void> {
     if (ref === null) return;
     if (isPactIsolationJob({ id: wi.id, prompt: wi.prompt, worktree: wi.worktree })) return;
     const title = parseIssueTitleFromPrompt(wi.prompt, ref.issueNumber) ?? undefined;
+    // External repo: si el issue vive en otro repo que el checkout del
+    // panel, anclar en un clon local en vez de editar el repo equivocado.
+    // Best-effort: ante fallo se sigue en el ancla del panel con evento
+    // ruidoso (el job ya existía antes de este chequeo).
+    let anchor = wi.worktree;
+    if (ref.repo !== null) {
+      const resolved = await resolveExternalAnchor({
+        anchor: wi.worktree,
+        repo: ref.repo,
+      });
+      if (resolved.ok) {
+        anchor = resolved.anchor;
+        if (resolved.external) {
+          try {
+            workItemStore.appendEvent(
+              jobId,
+              "system",
+              `external repo anchor: ${ref.repo} -> ${resolved.anchor} (${resolved.reason})`,
+              { isolation: { externalAnchor: resolved.anchor } } as unknown as Record<string, unknown>,
+            );
+          } catch {}
+        }
+      } else {
+        try {
+          workItemStore.appendEvent(
+            jobId,
+            "system",
+            `external anchor unavailable: ${resolved.error} — falling back to panel anchor (verify repo before trusting this run)`,
+            { isolation: { externalError: resolved.error } } as unknown as Record<string, unknown>,
+          );
+        } catch {}
+      }
+    }
     const ensured = await ensureIsolatedWorktree({
-      repoAnchor: wi.worktree,
+      repoAnchor: anchor,
       issueNumber: ref.issueNumber,
       ...(title !== undefined ? { title } : {}),
       jobId,
@@ -3709,11 +3746,11 @@ async function handleDefinitionStatusRoute(res: http.ServerResponse): Promise<vo
 }
     // ── FIN FASE 3 E2 — Bloque Ruta definition ──
 
-    // ── Dependencies (pr-agent CLI): estado machine-global + install explícito ──
+    // ── Dependencies (machine-global CLI status) ──
     // GET /factory/dependencies/status → {tools:[{name,description,installed,version,installable,installCommand,hint}]}
-    // POST /factory/dependencies/pr-agent/install → {ok,method?,version?,log?} o {ok:false,error,log}.
-    // El install corre sincrónico con cota propia (raro y a pedido humano);
-    // el cliente pasa timeout largo. Nunca lanza fuera de estos handlers.
+    // (The former pr-agent install route is gone with pr-agent; the
+    // reviewer integration — Pullfrog — will own its route when it lands.)
+    // Nunca lanza fuera de estos handlers.
 async function handleDependenciesStatusRoute(res: http.ServerResponse): Promise<void> {
   try {
     const payload = await getDependenciesStatus();
@@ -3726,15 +3763,27 @@ async function handleDependenciesStatusRoute(res: http.ServerResponse): Promise<
     return;
   }
 }
-async function handleDependenciesInstallRoute(res: http.ServerResponse): Promise<void> {
+    // ── GitHub runners (self-hosted, Windows): solo lectura ──
+    // GET /factory/github/runners/status?repo=owner/name&folder=... → {local,remote,pinned}
+    // Instalaciones manuales (guía paso a paso en el panel Dependencies).
+    // Nunca lanza fuera de estos handlers.
+async function handleRunnersStatusRoute(url: URL, res: http.ServerResponse): Promise<void> {
   try {
-    const outcome = await installPrAgent();
+    let repo: unknown = null;
+    let folder: unknown = null;
+    try {
+      repo = url.searchParams.get("repo");
+      folder = url.searchParams.get("folder");
+    } catch {
+      // params ilegibles: el servicio degrada honesto
+    }
+    const payload = await getRunnersStatus({ repo, folder }, undefined, runnerSupervisor.getSnapshot());
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(outcome));
+    res.end(JSON.stringify(payload));
     return;
   } catch (e) {
     res.writeHead(500, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: false, error: `install failed: ${String(e instanceof Error ? e.message : e).slice(0, 160)}`, log: "" }));
+    res.end(JSON.stringify({ error: `failed to read runners: ${String(e instanceof Error ? e.message : e).slice(0, 160)}` }));
     return;
   }
 }
@@ -4216,6 +4265,15 @@ export async function ensureFactoryServer(): Promise<number> {
     // higiene best-effort: nunca frena el boot
   }
 
+  // Runner self-hosted (Windows): si hay un runner configurado, el daemon
+  // lo levanta y supervisa mientras viva (default-ON por decisión del
+  // usuario). Best-effort, no bloquea el boot; ver runnerSupervisor.ts.
+  try {
+    void runnerSupervisor.start().catch(() => undefined);
+  } catch {
+    // supervisión best-effort: nunca frena el boot
+  }
+
   // Also attempt to create opencode server on same port? No - separate service.
   // The http factory above is the source of truth for health even when opencode exists.
 
@@ -4240,6 +4298,7 @@ export function closeFactoryServer(): void {
   sseClients.clear();
   cleanupFactoryPortFile();
   try { opencodeServerManager.close(); } catch {}
+  try { runnerSupervisor.stop(); } catch {}
   // F2: liberar el lease solo si es nuestro (un daemon pasivo no lo toca).
   try {
     if (ownershipLockPath !== null) releaseOwnership(ownershipLockPath);
