@@ -3,8 +3,10 @@ import {
   IconIssue,
   IconActivity,
   IconAgents,
+  IconWorkflow,
   IconContext,
   IconDiagnostic,
+  IconTerminal,
   IconBranch,
   IconChevronDown,
   IconChevronLeft,
@@ -36,8 +38,10 @@ const NAV_ITEMS: NavItem[] = [
   { id: "issues", label: "Issues", Icon: IconIssue },
   { id: "activity", label: "Activity", Icon: IconActivity },
   { id: "agents", label: "Agents", Icon: IconAgents },
+  { id: "workflows", label: "Workflows", Icon: IconWorkflow },
   { id: "context", label: "Repository Context", Icon: IconContext },
   { id: "diagnostic", label: "Diagnostic", Icon: IconDiagnostic },
+  { id: "dependencies", label: "Dependencies", Icon: IconTerminal },
 ];
 
 /**

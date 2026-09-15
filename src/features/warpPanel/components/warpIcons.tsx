@@ -146,3 +146,40 @@ export function IconFix({ size = 13, color = "currentColor" }: { size?: number; 
     </svg>
   );
 }
+
+export function IconTrash({ size = 12, color = "currentColor" }: { size?: number; color?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <path d="M3 4.5h10M6.5 4.5V3h3v1.5M5 4.5l.6 8a1 1 0 0 0 1 .9h2.8a1 1 0 0 0 1-.9l.6-8" stroke={color} strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  );
+}
+
+export function IconWorkflow({ size = 14, color = "currentColor" }: { size?: number; color?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <circle cx="3" cy="8" r="1.7" stroke={color} strokeWidth="1.2"/>
+      <circle cx="13" cy="3.8" r="1.7" stroke={color} strokeWidth="1.2"/>
+      <circle cx="13" cy="12.2" r="1.7" stroke={color} strokeWidth="1.2"/>
+      <path d="M4.5 7.2l7-2.5M4.5 8.8l7 2.5" stroke={color} strokeWidth="1.2" strokeLinecap="round"/>
+    </svg>
+  );
+}
+
+export function IconCopy({ size = 13, color = "currentColor" }: { size?: number; color?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" stroke={color} strokeWidth="1.3"/>
+      <path d="M10.5 5.5v-2a1.5 1.5 0 0 0-1.5-1.5H4A1.5 1.5 0 0 0 2.5 3.5v5A1.5 1.5 0 0 0 4 10h1.5" stroke={color} strokeWidth="1.3" strokeLinecap="round"/>
+    </svg>
+  );
+}
+
+export function IconTerminal({ size = 14, color = "currentColor" }: { size?: number; color?: string }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 16 16" fill="none" aria-hidden="true">
+      <rect x="1.5" y="3" width="13" height="10" rx="1.5" stroke={color} strokeWidth="1.3"/>
+      <path d="M4.5 6l2.5 2-2.5 2M8 10.5h3.5" stroke={color} strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  );
+}

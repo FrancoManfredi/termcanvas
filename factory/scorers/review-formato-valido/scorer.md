@@ -5,7 +5,7 @@ agents: {review}
 labels: [{"value":"valido","score":1,"description":"veredicto accept o revise parseable, con summary y findings validos"},{"value":"infra-formato","score":0,"description":"ask_human por timeout, error de infra, cuota o JSON invalido"}]
 passingScore: 0.5
 samplingRate: 25
-model: opencode-go/muse-spark-1.2-contributor
+model: opencode-go/muse-spark-1.3-contributor
 selfImprovement: true
 ---
 # review-formato-valido — juez de formato del review

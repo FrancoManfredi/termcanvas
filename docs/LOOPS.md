@@ -267,6 +267,7 @@ cambio de yaml adelanta el armado.
 | G04 | `headless-runtime/factory/isolation/gitHubPr.ts` (`readPrState`, DELETE guard) | `gh pr view --json state` per cleanup call | `GH_PR_VIEW_TIMEOUT_MS = 15000` (1 attempt; failure = guard refuses unless `force=true` + terminal) | DELETE guards (non-terminal → 409 always; open-PR + !force → 409) |
 | G05 | `headless-runtime/factory/isolation/gitHubPr.ts` (`readWorktreeStatusPorcelain`, gate accept) | `git status --porcelain` read-only por accept/PR (1 intento) | `GIT_STATUS_TIMEOUT_MS = 10000` (fallo = null, caller fail-open) | probes de solo lectura (el gate bloquea accept solo con doble vacio probado) |
 | G06 | `headless-runtime/factory/isolation/gitHubPr.ts` (`commitWorktreeChanges` en `openPrForJob`) | `git add -A` + `git commit` con identidad `-c` local (1 intento c/u, solo con status sucio) | `GIT_COMMIT_TIMEOUT_MS = 15000` (fallo = error honesto + hint manual, sin push) | el commit canonico lo hace el orquestador; ningun prompt LLM pide commit/push/PR |
+| G07 | `headless-runtime/factory/engineBridge.ts` (`appendNodeSessionRound`) | cómputo de ronda sobre el historial de sesiones por nodo de loop (VIEW AGENT por ronda) | `NODE_SESSION_ROUNDS_MAX = 50` (`for...of` sobre array acotado con `slice(-50)`; termina por longitud) | solo nodos con `iteration` del evento (loops); dedupe por (nodo, sesión) |
 
 No new `setInterval`/`setTimeout`/loop: all execs are single-shot with the
 `timeout` option; per-job concurrency is an in-flight `Set` cleared in

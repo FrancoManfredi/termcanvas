@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { runWorkflow, type LoadedWorkflow } from "../headless-runtime/workflows/executor.ts";
 import { parseWorkflowDefinition } from "../headless-runtime/workflows/loader.ts";
+import { scriptExecEnv } from "../headless-runtime/workflows/nodes/deterministic.ts";
 
 function sandbox(): { tmp: string; runsDir: string } {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wf-exec-"));
@@ -185,4 +186,21 @@ nodes:
   const run = await runWorkflow(loaded(yaml, tmp), { cwd: tmp, runsDir });
   assert.equal(run.status, "completed");
   assert.equal(run.nodes.pause.output, "waited 5ms");
+});
+
+test("scriptExecEnv: bajo Electron fuerza ELECTRON_RUN_AS_NODE", () => {
+  assert.equal(
+    scriptExecEnv({ PATH: "x" }, false)?.ELECTRON_RUN_AS_NODE,
+    undefined,
+    "fuera de Electron el env queda intacto",
+  );
+  const electronEnv = scriptExecEnv({ PATH: "x" }, true);
+  assert.equal(electronEnv?.ELECTRON_RUN_AS_NODE, "1");
+  assert.equal(electronEnv?.PATH, "x", "no pisa otras variables");
+  assert.equal(scriptExecEnv(undefined, false), undefined, "undefined se preserva");
+  assert.equal(
+    scriptExecEnv(undefined, true)?.ELECTRON_RUN_AS_NODE,
+    "1",
+    "undefined + Electron igualmente setea la bandera",
+  );
 });

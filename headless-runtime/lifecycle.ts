@@ -114,7 +114,6 @@ export function createGracefulShutdown(
 
     shutdownPromise = (async () => {
       const label = signal ? ` (${signal})` : "";
-      console.log(`[headless] shutting down${label}...`);
 
       deps.eventBus.emit("server_stopping", {
         host: deps.host,
@@ -155,7 +154,6 @@ export function createGracefulShutdown(
         throw failures[0];
       }
 
-      console.log("[headless] shutdown complete");
       deps.exit?.(0);
     })();
 

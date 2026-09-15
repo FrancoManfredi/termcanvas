@@ -14,6 +14,7 @@ import {
   FACTORY_TRIAGE_TIMEOUT_MS,
   FACTORY_WORKTREE_DELETE_TIMEOUT_MS,
   getFactoryHealth,
+  notifyFactoryJobMerged,
   postFactoryJobDiscard,
   postFactoryReviewAccept,
   postFactoryReviewRerun,
@@ -27,6 +28,7 @@ import {
 import {
   buildFactoryJobIssueRef,
   buildFactoryResolvePrompt,
+  findAllFactoryJobsForIssue,
   findActiveFactoryJobForIssue,
   findActiveFactoryJobsForIssue,
   parseGitHubIssueRepo,
@@ -129,7 +131,9 @@ export type ActivityActionKind =
   | "approve-spec"
   | "reject-spec"
   | "resume"
+  | "rerun"
   | "discard"
+  | "discard-issue"
   | "re-review"
   | "triage-respond"
   | "review-accept"
@@ -246,6 +250,13 @@ export interface DescribeActivityActionsArgs {
    * describe (junk = no explicit target). Never throws.
    */
   mergeReadyJobId?: string | null;
+  /**
+   * Fila C1 (factory `Complete` + PR abierto): el acepto humano que produjo
+   * el `Complete` ES la aprobación (doctrina C1 de `activityDerivation`) —
+   * habilita `merge` aunque el PR no lleve `review:aprobado`. Ausente/false
+   * deja la matriz intacta (una fila N1 neutral sigue con Merge disabled).
+   */
+  factoryMergeApproved?: boolean;
 }
 
 /** Row snapshot used to build the factory prompt + `issueRef` on resolve. */
@@ -446,6 +457,31 @@ export interface ActivityInvokeDeps {
    * the result. Never throws (invocation is guarded).
    */
   onWorktreeDelete?: (result: { ok: boolean; error: string }) => void;
+  /**
+   * Fila C1 (factory Complete + PR abierto): rutea `merge` al camino
+   * factory-aware (merge contra el repo del ISSUE + close-out en el daemon)
+   * en vez del handler del canvas. Espejo del flag de describe.
+   */
+  factoryMergeApproved?: boolean;
+  /**
+   * Seam del merge PR para la fila C1 (live = `window.termcanvas.github.mergePr`
+   * — `gh pr merge --squash` en Electron main). Offline los tests inyectan
+   * un fake: cero IPC/red.
+   */
+  githubMergePr?: (
+    repoPath: string,
+    prNumber: number,
+  ) => Promise<{ ok: true } | { ok: false; error: string }>;
+  /**
+   * Seam del close-out factory (live = `notifyFactoryJobMerged` contra
+   * `POST /factory/jobs/:id/merge-notify`). Offline los tests inyectan un
+   * fake: cero red. Sin este aviso el job queda Complete sin constancia
+   * durable del merge.
+   */
+  notifyFactoryJobMerged?: (
+    jobId: string,
+    prNumber: number,
+  ) => Promise<{ ok: boolean; error?: string }>;
 }
 
 /** Structural result of a human-gate seam (approve / respond / accept). */
@@ -511,7 +547,7 @@ export function describeActivityActions(
 }
 
 /**
- * Honest-disabled nineteen-action fallback (stable order, same kinds as the
+ * Honest-disabled twenty-action fallback (stable order, same kinds as the
  * live matrix). Never throws.
  */
 function fallbackDisabledActions(): ActivityActionDef[] {
@@ -527,6 +563,7 @@ function fallbackDisabledActions(): ActivityActionDef[] {
     { kind: "approve-spec", label: "Approve Spec", enabled: false },
     { kind: "reject-spec", label: "Reject Spec", enabled: false },
     { kind: "resume", label: "Retomar trabajo", enabled: false },
+    { kind: "rerun", label: "Re-run job", enabled: false },
     { kind: "discard", label: "No retomar trabajo", enabled: false },
     { kind: "re-review", label: "Re-revisar", enabled: false },
     { kind: "triage-respond", label: "Respond", enabled: false },
@@ -549,6 +586,14 @@ function describeActivityActionsInner(
   const prState = typeof args.prState === "string" ? args.prState : "";
   const effective = typeof args.effective === "string" ? args.effective : null;
   const conflicted = args.conflicted === true;
+  // C1 (factory Complete + PR abierto): la aprobación es implícita. Guards
+  // de bloqueo: un PR con cambios pedidos, gate fallido o conflicto nunca
+  // se mergea por esta vía (la fila pide fix/resolver, no merge).
+  const factoryMergeApproved =
+    args.factoryMergeApproved === true &&
+    conflicted !== true &&
+    effective !== REVIEW_LABEL_CHANGES &&
+    effective !== REVIEW_LABEL_GATE_FAIL;
   const gateStatus = normalizeGateStatus(args.gateStatus);
   const busy = normalizeBusy(args.busy);
 
@@ -674,7 +719,7 @@ function describeActivityActionsInner(
       ? undefined
       : humanBusy
         ? "Another operation is running — wait for it to finish before approving"
-        : "Approve the spec — the job resumes in Foreman";
+        : "Approve — the job continues where it stood";
 
   // Reject mirrors Approve on the same gate: refusing the drafted spec
   // regenerates the brief (the daemon re-runs the spec agent) instead of
@@ -688,7 +733,7 @@ function describeActivityActionsInner(
       ? undefined
       : humanBusy
         ? "Another operation is running — wait for it to finish before rejecting"
-        : "Reject the spec — the agent drafts a new brief for approval";
+        : "Reject — the agent drafts a new version for approval";
 
   // Resume mirrors the human gates on its own parked-job gate: only a row
   // whose linked job needs resume (daemon marker bootInterrupted) enables.
@@ -699,9 +744,17 @@ function describeActivityActionsInner(
     awaitingKind === "resume" &&
     awaitingJobId !== null &&
     !humanBusy;
+  // Re-run (H0c): el run del engine murió o el job quedó cancelado con el run
+  // vivo — reanuda el run donde quedó (misma ruta que Retomar).
+  const rerunEnabled =
+    awaitingKind === "rerun" && awaitingJobId !== null && !humanBusy;
   const mergeReadyJobId = cleanFactoryJobId(args.mergeReadyJobId);
+  // Rerun (H0c) también habilita Discard: un job con el run muerto se puede
+  // re-lanzar O borrar completo — sin esto la fila quedaba sin forma de
+  // limpiar el job desde la UI (era el pedido del incidente #125).
   const discardEnabled =
     resumeEnabled ||
+    rerunEnabled ||
     (mergeReadyJobId !== null && !humanBusy);
   const reReviewEnabled = mergeReadyJobId !== null && !humanBusy;
   const resumeTitle =
@@ -710,11 +763,19 @@ function describeActivityActionsInner(
       : humanBusy
         ? "Another operation is running — wait for it to finish before resuming"
         : "Resume the interrupted turn — re-drives the phase worker";
+  const rerunTitle =
+    awaitingKind !== "rerun" || awaitingJobId === null
+      ? undefined
+      : humanBusy
+        ? "Another operation is running — wait for it to finish before re-running"
+        : "Re-run the stopped job — resumes the engine run where it stood";
   const discardTitle = !discardEnabled
     ? undefined
     : awaitingKind === "resume"
       ? "Cancel the parked job and clean everything it did (PR close, branch/worktree/job removed)"
-      : "Don't merge: close the PR and tear the job down completely (branch/worktree/job removed)";
+      : awaitingKind === "rerun"
+        ? "Discard the stopped job: tear it down completely (PR close, branch/worktree/job removed)"
+        : "Don't merge: close the PR and tear the job down completely (branch/worktree/job removed)";
   const reReviewTitle = !reReviewEnabled
     ? undefined
     : "Re-run the review on the current PR state without moving the job (the verdict is reported, nothing reopens alone)";
@@ -841,8 +902,8 @@ function describeActivityActionsInner(
       label: busy.merging ? "Merge PR…" : "Merge PR",
       enabled:
         !busy.merging &&
-        effective === REVIEW_LABEL_APPROVED &&
-        hasOpenPr,
+        hasOpenPr &&
+        (effective === REVIEW_LABEL_APPROVED || factoryMergeApproved === true),
       ...(pr !== null ? { title: `Merge PR #${pr}` } : {}),
     },
     {
@@ -890,6 +951,12 @@ function describeActivityActionsInner(
       label: "Retomar trabajo",
       enabled: resumeEnabled,
       ...(resumeTitle !== undefined ? { title: resumeTitle } : {}),
+    },
+    {
+      kind: "rerun",
+      label: "Re-run job",
+      enabled: rerunEnabled,
+      ...(rerunTitle !== undefined ? { title: rerunTitle } : {}),
     },
     {
       kind: "discard",
@@ -1505,6 +1572,176 @@ async function safeFactoryCreate(
  * failures are NEVER silent: they surface through the injected `notify()`
  * message (never a dead click, never a retry).
  */
+/**
+ * Shared discard runner (fila "discard" + "Discard issue" del menú):
+ * descarta TODOS los targets en secuencia (best-effort, un POST por job,
+ * cero reintentos), invalida el estado de review cacheado del issue y
+ * notifica el resultado con el resumen real del daemon. Nunca lanza.
+ */
+async function runDiscardTargets(
+  targets: string[],
+  issueNumber: number,
+  deps?: ActivityInvokeDeps,
+): Promise<void> {
+  const doDiscard =
+    deps?.discardJob !== undefined ? deps.discardJob : liveDiscard;
+  let okCount = 0;
+  let firstOkId = "";
+  let firstError = "";
+  let firstSummary = "";
+  // Secuencial sobre la lista finita (sin loops sin cota: forEach no
+  // aplica acá por el await; el for corre sobre ≤10 targets).
+  for (const targetId of targets) {
+    if (factoryHumanActionInFlight.has(targetId)) continue;
+    factoryHumanActionInFlight.add(targetId);
+    try {
+      const res = await safeHumanAction(() => doDiscard(targetId));
+      if (res.ok === true) {
+        okCount += 1;
+        if (firstOkId === "") firstOkId = targetId;
+        if (firstSummary === "" && typeof res.summary === "string") {
+          firstSummary = res.summary;
+        }
+      } else if (firstError === "") {
+        firstError = res.error;
+      }
+    } finally {
+      factoryHumanActionInFlight.delete(targetId);
+    }
+  }
+  if (okCount > 0) {
+    // The work no longer exists: drop the cached PR/verdict/labels for
+    // this issue and reconcile against GitHub. Without this the row
+    // stays merge-ready forever (cached OPEN PR) or in-review (stale
+    // verdict) even though job/branch/PR were just torn down.
+    try {
+      useIssueReviewStore.getState().invalidateIssueReviewState(issueNumber);
+      useIssueReviewStore
+        .getState()
+        .requestPrLookup(issueNumber, deps?.worktreePath, true);
+    } catch {
+      // best-effort: the notify below is still honest
+    }
+    if (okCount === 1) {
+      // With a daemon summary, report the real steps instead of the
+      // blanket "everything removed" claim (skips stay visible). El id es
+      // el del job que SÍ se descartó (no targets[0]: puede haber fallado).
+      safeNotify(
+        deps?.notify,
+        firstSummary !== ""
+          ? `Discarded job ${firstOkId} — ${firstSummary}.`
+          : `Discarded job ${firstOkId} — PR closed, branch/worktree/job removed.`,
+      );
+    } else {
+      safeNotify(
+        deps?.notify,
+        `Discarded ${okCount} jobs — PRs closed, branches/worktrees/jobs removed.`,
+      );
+    }
+  } else {
+    safeNotify(
+      deps?.notify,
+      `Could not discard job ${targets[0]}${firstError !== "" ? `: ${firstError}` : "."}`,
+    );
+  }
+}
+
+/**
+ * Live merge seam: `window.termcanvas.github.mergePr` (Electron main corre
+ * `gh pr merge --squash`). Null fuera de la app (tests/SSR) — el invoke cae
+ * a un notify honesto, nunca a un click muerto.
+ */
+function liveGithubMergePr():
+  | ((
+      repoPath: string,
+      prNumber: number,
+    ) => Promise<{ ok: true } | { ok: false; error: string }>)
+  | null {
+  try {
+    const api = (
+      globalThis as unknown as {
+        termcanvas?: { github?: { mergePr?: unknown } };
+      }
+    )?.termcanvas?.github?.mergePr;
+    if (typeof api !== "function") return null;
+    return api as (
+      repoPath: string,
+      prNumber: number,
+    ) => Promise<{ ok: true } | { ok: false; error: string }>;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Merge de una fila C1 (factory `Complete` + PR abierto): el acepto humano
+ * que produjo el Complete ES la aprobación. Corre contra el repo del ISSUE
+ * (`deps.worktreePath`, no el proyecto enfocado), avisa al daemon
+ * (`notifyFactoryJobMerged` → isolation `pr-merged`) y refresca el lookup
+ * para que la fila pase a done cuando GitHub cierre el issue (`Closes #N`).
+ * Nunca lanza.
+ */
+async function mergeFactoryCompletedPr(
+  deps: ActivityInvokeDeps | undefined,
+  issueNumber: number,
+  prNumber: number,
+): Promise<void> {
+  const repoPath =
+    typeof deps?.worktreePath === "string" && deps.worktreePath.trim() !== ""
+      ? deps.worktreePath.trim()
+      : null;
+  const jobId = cleanFactoryJobId(deps?.factoryJobId);
+  try {
+    const mergePr = deps?.githubMergePr ?? liveGithubMergePr();
+    if (mergePr === null || repoPath === null) {
+      deps?.notify?.(
+        `Merge PR #${prNumber}: falta la ruta del repo del issue — mergeá desde GitHub.`,
+      );
+      return;
+    }
+    try {
+      useIssueReviewStore.getState().setMergingIssueNumber(issueNumber);
+    } catch {
+      // Store unavailable: el busy flag nunca rompe el invoke.
+    }
+    const result = await mergePr(repoPath, prNumber);
+    if (!result?.ok) {
+      deps?.notify?.(
+        `Merge PR #${prNumber}: ${result?.error ?? "error desconocido"}`,
+      );
+      return;
+    }
+    if (jobId !== null) {
+      const notifyMerged =
+        deps?.notifyFactoryJobMerged ?? notifyFactoryJobMerged;
+      const closed = await notifyMerged(jobId, prNumber);
+      if (!closed.ok) {
+        deps?.notify?.(
+          `PR #${prNumber} mergeado; el aviso al daemon falló: ${closed.error ?? "sin detalle"}`,
+        );
+      }
+    }
+    deps?.notify?.(`PR #${prNumber} mergeado.`);
+    try {
+      useIssueReviewStore
+        .getState()
+        .requestPrLookup(issueNumber, repoPath, true);
+    } catch {
+      // Refresh best-effort: el poll siguiente reconcilia igual.
+    }
+  } catch (e) {
+    deps?.notify?.(
+      `Merge PR #${prNumber}: ${e instanceof Error ? e.message : String(e)}`,
+    );
+  } finally {
+    try {
+      useIssueReviewStore.getState().setMergingIssueNumber(null);
+    } catch {
+      // Store unavailable: limpieza best-effort.
+    }
+  }
+}
+
 export async function invokeActivityAction(
   kind: ActivityActionKind,
   issueNumber: number,
@@ -1719,6 +1956,12 @@ export async function invokeActivityAction(
     }
     case "merge": {
       if (busy.merging) return;
+      // C1 factory: merge contra el repo del issue + close-out en el daemon.
+      if (deps?.factoryMergeApproved === true) {
+        if (pr === undefined) return;
+        await mergeFactoryCompletedPr(deps, issueNumber, pr);
+        return;
+      }
       const handler =
         deps?.mergeHandler ??
         safeHandler(() => useIssueReviewStore.getState().mergeHandler);
@@ -1977,6 +2220,43 @@ export async function invokeActivityAction(
       }
       return;
     }
+    case "rerun": {
+      // H0c: el run del engine murió o el job quedó cancelado con el run
+      // vivo. Re-run reanuda el run donde quedó (misma ruta POST …/resume);
+      // best-effort + honest notify, nunca un click muerto.
+      const jobId = cleanFactoryJobId(deps?.factoryJobId);
+      if (jobId === null) return;
+      if (humanKindMismatch("rerun", deps?.factoryAwaitingKind)) {
+        return;
+      }
+      if (anyBusy) {
+        return;
+      }
+      if (factoryHumanActionInFlight.has(jobId)) return;
+      factoryHumanActionInFlight.add(jobId);
+      try {
+        const res = await safeHumanAction(() =>
+          deps?.resumeJob !== undefined
+            ? deps.resumeJob(jobId)
+            : liveResume(jobId),
+        );
+        if (res.ok === true) {
+          safeNotify(
+            deps?.notify,
+            `Re-running job ${jobId} — the engine resumes it where it stood.`,
+          );
+        } else {
+          const why =
+            typeof res.error === "string" && res.error !== ""
+              ? `: ${res.error}`
+              : "";
+          safeNotify(deps?.notify, `Could not re-run job ${jobId}${why}.`);
+        }
+      } finally {
+        factoryHumanActionInFlight.delete(jobId);
+      }
+      return;
+    }
     case "discard": {
       // Human abandons a parked turn: descarta TODOS los jobs activos
       // linkeados al issue en un click (un issue puede acumular varios
@@ -1985,7 +2265,12 @@ export async function invokeActivityAction(
       // fuera). Best-effort + honest notify, como los otros gates: nunca
       // un click muerto, nunca un retry. El panel confirma ANTES de
       // invocar (destructivo) — a esta altura ya confirmó.
-      if (humanKindMismatch("resume", deps?.factoryAwaitingKind)) {
+      // H0c: la fila rerun (run muerto) también puede descartarse, no solo
+      // re-lanzarse — el job del gate es el target de respaldo.
+      if (
+        humanKindMismatch("resume", deps?.factoryAwaitingKind) &&
+        humanKindMismatch("rerun", deps?.factoryAwaitingKind)
+      ) {
         return;
       }
       if (anyBusy) {
@@ -2005,64 +2290,36 @@ export async function invokeActivityAction(
       }
       if (targets.length === 0 && gateJobId !== null) targets = [gateJobId];
       if (targets.length === 0) return;
-      const doDiscard =
-        deps?.discardJob !== undefined ? deps.discardJob : liveDiscard;
-      let okCount = 0;
-      let firstError = "";
-      let firstSummary = "";
-      // Secuencial sobre la lista finita (sin loops sin cota: forEach no
-      // aplica acá por el await; el for corre sobre ≤10 targets).
-      for (const targetId of targets) {
-        if (factoryHumanActionInFlight.has(targetId)) continue;
-        factoryHumanActionInFlight.add(targetId);
-        try {
-          const res = await safeHumanAction(() => doDiscard(targetId));
-          if (res.ok === true) {
-            okCount += 1;
-            if (firstSummary === "" && typeof res.summary === "string") {
-              firstSummary = res.summary;
-            }
-          } else if (firstError === "") {
-            firstError = res.error;
-          }
-        } finally {
-          factoryHumanActionInFlight.delete(targetId);
-        }
+      await runDiscardTargets(targets, issueNumber, deps);
+      return;
+    }
+    case "discard-issue": {
+      // "Descartar issue" (menú contextual de la fila): elimina TODO lo que
+      // el issue creó — todos los jobs linkeados (activos, con run muerto y
+      // Complete), con su teardown completo (cancela el run en curso, cierra
+      // PR, borra rama/worktree/job). El issue NO se toca: al quedar sin
+      // jobs/PR, la derivación lo devuelve a Pending para ser retomado.
+      // Sin guard de kind ni de busy: es la válvula de escape destructiva
+      // del humano; el daemon cancela y limpia en el mismo POST.
+      const gateJobId = cleanFactoryJobId(deps?.factoryJobId);
+      let targets: string[] = [];
+      try {
+        const list = Array.isArray(deps?.factoryJobs) ? deps.factoryJobs : [];
+        const repo =
+          typeof deps?.issueUrl === "string" ? parseGitHubIssueRepo(deps.issueUrl) : null;
+        targets = findAllFactoryJobsForIssue(list, issueNumber, repo);
+      } catch {
+        targets = [];
       }
-      if (okCount > 0) {
-        // The work no longer exists: drop the cached PR/verdict/labels for
-        // this issue and reconcile against GitHub. Without this the row
-        // stays merge-ready forever (cached OPEN PR) or in-review (stale
-        // verdict) even though job/branch/PR were just torn down.
-        try {
-          useIssueReviewStore.getState().invalidateIssueReviewState(issueNumber);
-          useIssueReviewStore
-            .getState()
-            .requestPrLookup(issueNumber, deps?.worktreePath, true);
-        } catch {
-          // best-effort: the notify below is still honest
-        }
-        if (okCount === 1) {
-          // With a daemon summary, report the real steps instead of the
-          // blanket "everything removed" claim (skips stay visible).
-          safeNotify(
-            deps?.notify,
-            firstSummary !== ""
-              ? `Discarded job ${targets[0]} — ${firstSummary}.`
-              : `Discarded job ${targets[0]} — PR closed, branch/worktree/job removed.`,
-          );
-        } else {
-          safeNotify(
-            deps?.notify,
-            `Discarded ${okCount} jobs — PRs closed, branches/worktrees/jobs removed.`,
-          );
-        }
-      } else {
+      if (targets.length === 0 && gateJobId !== null) targets = [gateJobId];
+      if (targets.length === 0) {
         safeNotify(
           deps?.notify,
-          `Could not discard job ${targets[0]}${firstError !== "" ? `: ${firstError}` : "."}`,
+          `Nothing to discard for #${issueNumber}: no linked factory job.`,
         );
+        return;
       }
+      await runDiscardTargets(targets, issueNumber, deps);
       return;
     }
     case "re-review": {

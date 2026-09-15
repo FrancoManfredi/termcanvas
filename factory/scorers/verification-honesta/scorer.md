@@ -5,7 +5,7 @@ agents: {verification}
 labels: [{"value":"honesta","score":1,"description":"suite real corrida (pass o fail trazado) o skip/cuarentena con evidencia citada"},{"value":"dudosa","score":0,"description":"pass sin sustento, suite no corrida, o skip sin evidencia"}]
 passingScore: 0.5
 samplingRate: 25
-model: opencode-go/muse-spark-1.2-contributor
+model: opencode-go/muse-spark-1.3-contributor
 selfImprovement: false
 ---
 # verification-honesta — juez de honestidad de la verificación

@@ -20,7 +20,7 @@
  */
 
 import http from "node:http";
-import { execSync } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -29,6 +29,12 @@ import { getTermCanvasDataDir } from "../../shared/termcanvas-instance";
 import { getFactoryPorts, getRunner } from "./agentLoader";
 import { SESSION_CREATE_FUSE_MS, withTransportRetry } from "../llm/agentTransport";
 import { isPipelineLive, markPipelineLive } from "./pipelineLive";
+import {
+  buildOwnershipLockPath,
+  claimOwnership,
+  maybeHeartbeatOwnership,
+  releaseOwnership,
+} from "./ownership";
 import { allSessionsExtras, hookRunsExtras, roleSessionExtras } from "../workItem/jobView";
 import { hookStagesExtras } from "./agents/agentHooks";
 import { probarBind } from "../interview/puerto-libre";
@@ -37,7 +43,6 @@ import { appendWorkItemLog, readJobIndexBases, readJobIndexDirs, shouldRestoreJo
 // FASE 2 E1: la vista única la aplica jobs/jobService (este cascarón ya no
 // proyecta directo; el import se mudó al dominio dueño).
 import * as resultStore from "../workItem/resultStore";
-import { foremanService } from "../foreman/foreman";
 import { foremanLogStore } from "../foreman/foremanLog";
 import { runnerService } from "../runner/runnerService";
 import { opencodeServerManager } from "../opencodeServerManager";
@@ -45,7 +50,7 @@ import type {
   WorkItem,
   WorkItemStatus,
 } from "../../shared/types/workItem";
-import { BOOT_INTERRUPTED_META_KEY, PARKABLE_STATUSES, mapStatusToLegacyState, needsResume } from "../../shared/types/workItem";
+import { BOOT_INTERRUPTED_AT_META_KEY, BOOT_INTERRUPTED_META_KEY, PARKABLE_STATUSES, mapStatusToLegacyState, needsResume } from "../../shared/types/workItem";
 // FASE 2 E1: el MATCH por tabla vive en los dominios dueños (jobs/jobRoutes,
 // verify/verifyRoutes); este cascarón ya no matchea directo.
 // ── FASE 2 E1 — Dominios jobs + verify (delegación delgada, C5 aditivo) ──
@@ -56,14 +61,12 @@ import { BOOT_INTERRUPTED_META_KEY, PARKABLE_STATUSES, mapStatusToLegacyState, n
 import {
   parseJobLogsRoute as parseJobLogsRouteT2,
 } from "./jobs/jobRoutes";
-import { applyDashboardUrls as applyDashboardUrlsTA, getJobDetail, getJobEventsSnapshot, getJobLogs as getJobLogsT2, listJobs, listJobSummaries, readJobBuildLog, readJobResultRaw as readJobResultRawTA, requestJobCancel as requestJobCancelTA, requestJobResume as requestJobResumeTA, resolveDashboardMigration as resolveDashboardMigrationTA, type JobExtrasFor } from "./jobs/jobService";
+import { applyDashboardUrls as applyDashboardUrlsTA, getJobDetail, getJobEventsSnapshot, getJobLogs as getJobLogsT2, listJobs, listJobSummaries, readJobBuildLog, readJobResultRaw as readJobResultRawTA, requestJobCancel as requestJobCancelTA, resolveDashboardMigration as resolveDashboardMigrationTA, type JobExtrasFor } from "./jobs/jobService";
 import { createJobRequest as createJobRequestT2, getIssueRef } from "./jobs/jobCreate";
 import { consumeAgentsDirty, markAgentsDirty } from "./agents/agentDirty";
 import {
-  clearWorkerActive,
   hasActiveWorkers,
   isWorkerActive,
-  markWorkerActive,
 } from "../workItem/workerActivity";
 // ── T01 factory isolation (daemon core; panel surface reads timeline meta) ──
 // Dueños: isolation/gitWorktree (jail), isolation/gitHubPr (handoff PR),
@@ -86,7 +89,11 @@ import {
 } from "./isolation/gitWorktree";
 // B2: session cwd = isolation jail when recorded, else the anchor.
 import { resolveSessionWorktree } from "./isolation/sessionWorktree";
-import { maybeOpenPrForCompletedJob, gateAcceptOnBranchDiff, notePrMergedEqual, readPrState } from "./isolation/gitHubPr";
+import { maybeOpenPrForCompletedJob, gateAcceptOnBranchDiff, notePrMergedEqual, readPrState, checkReviewStale } from "./isolation/gitHubPr";
+import {
+  cleanupMergedJobWorktree,
+  reconcileMergedPrsForJobs,
+} from "./isolation/mergeReconcile";
 import {
   parseVerifyGetPath as parseVerifyGetPathE1,
   parseVerifyRetryPath as parseVerifyRetryPathE1,
@@ -94,9 +101,6 @@ import {
 import {
   checkVerifyRetryGuards as checkVerifyRetryGuardsE1,
   readVerifyById,
-  requestVerifyRetry as requestVerifyRetryT2,
-  runVerifyRetryWorker as runVerifyRetryWorkerT2,
-  scheduleVerifyRetryRun,
 } from "./verify/verifyService";
 // ── FIN FASE 2 E1 — imports de dominios ──
 // ── FASE 2 E2 — Dominios review + triageSpec (delegación delgada, C5 aditivo) ──
@@ -107,15 +111,16 @@ import {
 import {
   parseReviewAcceptPath,
   parseReviewPath,
-  parseReviewRetryPath,
-  parseReviewRetryReviewPath,
+  parseReviewStalePath,
 } from "./review/reviewRoutes";
+import {
+  getDependenciesStatus,
+  installPrAgent,
+} from "./dependencies/depsService";
 import {
   acceptReviewEqual,
   getReviewById,
   readReviewRawById,
-  requestReviewRetryOnly,
-  requestReviewRetryToBuilding,
 } from "./review/reviewActions";
 import {
   parseSpecApprovePath as parseSpecApprovePathE2,
@@ -123,13 +128,8 @@ import {
   parseTriageRespondPath as parseTriageRespondPathE2,
 } from "./triageSpec/triageSpecRoutes";
 import {
-  applySpecApproveTransition,
-  applySpecRejectTransition,
   applyTriageRespondTransition as applyTriageRespondTransitionE2,
-  checkSpecApproveGuards as checkSpecApproveGuardsE2,
-  checkSpecRejectGuards as checkSpecRejectGuardsE2,
   checkTriageRespondGuards as checkTriageRespondGuardsE2,
-  parseSpecRejectBody as parseSpecRejectBodyE2,
   parseTriageRespondBody as parseTriageRespondBodyE2,
   triageSpecExtras as triageSpecExtrasE2,
 } from "./triageSpec/triageSpecService";
@@ -173,7 +173,7 @@ import {
   collectRestoreBases as collectRestoreBasesB,
   decideRestoreJob as decideRestoreJobB,
   formatPortFile as formatPortFileB,
-  shouldKickManager as shouldKickManagerB,
+  shouldKickManagerWithBackoff as shouldKickManagerBackoffB,
   shouldRetryBind as shouldRetryBindB,
 } from "./startup/startupService";
 import {
@@ -211,6 +211,8 @@ import {
   WORKFLOW_ACTION_DOMAINS,
 } from "./engineBridge";
 import { createAgentFile, deleteAgentFile, listAgents, parseAgentFilePath, readAgentFull, writeAgentBody, writeAgentFull } from "./agents/agentFileRoutes";
+import { listFactorySkills } from "./opencodeAgentSync";
+import { createMcpBundle, deleteMcpBundle, listMcpBundles, parseMcpBundlePath, readMcpBundle, writeMcpBundle } from "./mcps/mcpFileRoutes";
 import { handleAutomationsListRoute, handleAutomationsTickRoute } from "./automations/automationRoutes";
 import { handleIntegrationsStatusRoute, handleIntegrationsTestPostRoute, handleIntegrationsWebhookInRoute, handleIntegrationsPostBackRoute } from "./integrations/integrationRoutes";
 import { isPactTriageJob } from "../../shared/types/triage";
@@ -357,6 +359,23 @@ function effectivePortRange(): { start: number; end: number } {
 
 // Debounce para self-heal del opencode manager desde GET /factory/health
 let lastManagerKickMs = 0;
+// Kicks consecutivos sin URL (backoff exponencial; se resetea al volver healthy)
+let managerKickStreak = 0;
+
+/**
+ * True si el store tiene trabajo no terminal. El server efímero de opencode
+ * (y su fan-out de MCPs) recién se justifica con trabajo real: en una app
+ * idle sin jobs no se levanta ni se auto-recupera. Nunca lanza.
+ */
+function hasNonTerminalJobs(): boolean {
+  try {
+    return workItemStore
+      .list()
+      .some((wi) => wi.status !== "Complete" && wi.status !== "Cancelled");
+  } catch {
+    return false;
+  }
+}
 
 // ── Repo root & opencode directory helpers ──
 function getRepoRoot(): string {
@@ -422,6 +441,10 @@ function resolveOpencodeDirectory(worktree: string): string {
 let server: http.Server | null = null;
 let factoryPort: number | null = null;
 let startedAt: number | null = null;
+// F2: lease de ownership del pipeline. Evita que un daemon nuevo (standalone
+// de dev, smoke, segunda instancia) parkee los jobs de un dueño vivo.
+let ownsPipeline = true;
+let ownershipLockPath: string | null = null;
 // ── Ola 5: buildId visible (qué código corre el daemon) ──
 let factoryBuildId: string | null = null;
 function ensureFactoryBuildId(): string {
@@ -666,16 +689,22 @@ function getAllJobsForList(view?: unknown): Array<Record<string, unknown>> {
       ...hookRunsExtras(wi, buildDashboardUrl),
       ...hookStagesExtras(),
     });
+    let list: Array<Record<string, unknown>>;
     if (view === "summary") {
       try {
-        return listJobSummaries({ extrasFor });
+        list = listJobSummaries({ extrasFor });
       } catch {
-        return [];
+        list = [];
       }
+    } else {
+      list = listJobs({ extrasFor });
     }
-    return listJobs({
-      extrasFor,
-    });
+    // Close-out externo (GitHub UI): cada enumeración del daemon reconcilia
+    // PRs mergeados en el forge (fire-and-forget, TTL por job) — el próximo
+    // poll del renderer ya trae `isolation.state="pr-merged"` + worktree
+    // limpio. Sin intervalos nuevos; nunca bloquea la lista.
+    void reconcileMergedPrsForJobs(list);
+    return list;
   } catch {
     return [];
   }
@@ -1039,410 +1068,17 @@ function triageSpecExtras(timeline: unknown, status: unknown): Record<string, un
  * Llamadores: worker post-201 de POST /factory/jobs y POST .../spec/approve.
  */
 /**
- * Worker en vuelo (Agents tiempo-real): marca el job durante TODO el
- * orquestador Foreman/Triage/Spec para que el reciclado del server opencode
- * no lo pise a mitad de turno. Además intenta el reciclado al entrar: cubre
- * los caminos que re-empujan el pipeline sin un intake nuevo (aprobar spec,
- * responder triage, rerun) además del intake. Nunca lanza.
+ * Lanza el workflow oficial para un job desde el intake (engine único).
+ * El pipeline legacy (Foreman/Triage/Spec in-process) fue eliminado: el
+ * engine elige el workflow y corre sus nodos; los guards de status legacy
+ * quedan solo como compat de lectura para jobs históricos. Nunca lanza.
  */
 export async function runForemanDecisionAndDispatch(
   id: string,
-  opts?: { skipTriageSpec?: boolean },
+  _opts?: { skipTriageSpec?: boolean },
 ): Promise<void> {
-  if (isWorkflowEngineEnabled()) {
-    await runWorkflowJob(id, getWorkflowRuntime());
-    return;
-  }
-  try {
-    maybeRecycleOpencodeForAgentUpdate(id);
-  } catch {
-    // noop: el reciclado nunca frena el worker
-  }
-  markWorkerActive(id);
-  try {
-    return await runForemanDecisionAndDispatchInner(id, opts);
-  } finally {
-    clearWorkerActive(id);
-  }
+  await runWorkflowJob(id, getWorkflowRuntime());
 }
-
-async function runForemanDecisionAndDispatchInner(id: string, opts?: { skipTriageSpec?: boolean }): Promise<void> {
-  const wi0 = workItemStore.get(id);
-  if (!wi0 || wi0.status !== "Foreman") return;
-  // Reconcilia sesión huérfana sin bloquear el foreman (caso attach
-  // post-201 caído: el panel queda en "attaching…" eterno).
-  try {
-    void ensureJobSessionAttached(id).catch(() => {});
-  } catch {}
-  const prompt = wi0.prompt;
-  const worktree = wi0.worktree;
-  const modelRef = wi0.modelRef;
-
-  // ── T2 triage on-demand: pre-pasos Triage-agent → Spec-agent extraídos ──
-  // Régimen según `triageMode` (yaml, default auto):
-  // - always: pre-triage siempre antes del foreman (régimen anterior exacto).
-  // - auto: el foreman decide primero con el issue completo; el triage-agent
-  //   corre SOLO si el foreman pide más input (on-demand, más abajo). Un
-  //   issue claro cuesta 1 llamada LLM en vez de 2.
-  // - never: jamás corre el triage-agent.
-  // Pact jobs ni tocan este código (bypass total) y el re-dispatch
-  // post-approve pasa skipTriageSpec. decision=building → sigue al Foreman.
-  // decision=triage → Foreman decide como hoy. decision=spec → Spec-agent;
-  // trivial sigue a Foreman, no-trivial va a Triage con gate.
-  // Retorna parked=true cuando transicionó a Triage (el caller corta).
-  const runPreTriageAndSpec = async (): Promise<{
-    parked: boolean;
-    triageFindings?: TriageFindings;
-    specBrief?: SpecBrief;
-  }> => {
-    let outTriageFindings: TriageFindings | undefined;
-    let outSpecBrief: SpecBrief | undefined;
-    try {
-      const preWI = workItemStore.get(id);
-      if (preWI && preWI.status === "Foreman") {
-        const tri = await runTriageForJob(preWI);
-        outTriageFindings = tri.findings;
-        try {
-          persistTriage(id, tri.findings);
-        } catch {}
-        // TANDA 1: tienda única (log sin timeline; el store ya tiene
-        // los findings vía persistTriage en disco + meta en dispatch).
-        try {
-          appendSingleStoreLog(
-            id,
-            `[${new Date().toISOString()}] triage: ${tri.findings.decision} (${tri.findings.complexity}) conf=${tri.findings.confidence}${tri.findings.fallback ? " fallback" : ""}`,
-          );
-        } catch {}
-        if (tri.findings.decision === "spec") {
-          const specRes = await runSpecForJob(preWI, tri.findings);
-          if (specRes.brief) {
-            outSpecBrief = specRes.brief;
-            try {
-              persistSpec(id, specRes.brief);
-            } catch {}
-            if (!specRes.brief.trivial) {
-              // Spec no-trivial → Triage con gate de aprobación humana. FIN: no corre foreman.
-              try {
-                const gated = workItemStore.transition(
-                  id,
-                  "Triage",
-                  "system",
-                  `spec no-trivial: espera aprobación humana — ${specRes.brief.summary.slice(0, 120)}`,
-                  buildSpecApprovalMeta(specRes.brief.summary),
-                );
-                void gated;
-                // TANDA 1: tienda única (la transición ya persistió;
-                // acá solo el log sin timeline).
-                try {
-                  appendSingleStoreLog(id, `[${new Date().toISOString()}] spec: brief no-trivial → Triage (espera aprobación POST /spec/approve)`);
-                } catch {}
-                try {
-                  foremanLogStore.info(`[Spec] ${id} → Triage espera aprobación (no-trivial)`, id);
-                } catch {}
-                // Ola 19 (b) spec pendiente de aprobación → centro de
-                // notificaciones (1 línea best-effort, espeja el summary ya
-                // construido, jamás bloquea el gate).
-                try { notify({ kind: "spec-approval", workItemId: id, title: "Spec pendiente de aprobación", body: specRes.brief.summary.slice(0, 500) }); } catch {}
-              } catch (e) {
-                console.warn(`[Factory] Spec gate transition failed for ${id}: ${String(e)}`);
-              }
-              return { parked: true };
-            }
-            try {
-              workItemStore.appendEvent(
-                id,
-                "system",
-                `spec trivial: continúa a Foreman — ${specRes.brief.summary.slice(0, 120)}`,
-                { specAutoApproved: true } as unknown as Record<string, unknown>,
-              );
-              // TANDA 1: tienda única (el appendEvent ya persistió).
-              try {
-                persistSingleStore(id);
-              } catch {}
-            } catch {}
-          } else {
-            // Spec-agent falló o fue omitido: evento trazado y sigue al Foreman actual.
-            try {
-              workItemStore.appendEvent(
-                id,
-                "system",
-                `spec omitido (${(specRes.skipReason ?? "sin brief").slice(0, 120)}): sigue a Foreman`,
-                { specSkipped: true } as unknown as Record<string, unknown>,
-              );
-              // TANDA 1: tienda única (el appendEvent ya persistió).
-              try {
-                persistSingleStore(id);
-              } catch {}
-            } catch {}
-          }
-        }
-      }
-    } catch (e) {
-      console.warn(`[Factory] Triage/Spec pre-paso fallo ${id} (sigue a Foreman): ${String(e).slice(0, 120)}`);
-    }
-    return { parked: false, triageFindings: outTriageFindings, specBrief: outSpecBrief };
-  };
-
-  const triageMode = resolveTriageMode();
-  const pactTriage = isPactTriageJob({ id, prompt, worktree });
-  let triageFindings: TriageFindings | undefined;
-  let specBrief: SpecBrief | undefined;
-  if (shouldRunPreTriage(triageMode, opts?.skipTriageSpec === true, pactTriage)) {
-    const pre = await runPreTriageAndSpec();
-    if (pre.parked) return;
-    triageFindings = pre.triageFindings;
-    specBrief = pre.specBrief;
-  }
-
-  // Decide con LLM real (timeout 10s, zod, fallback). Distingue triage (prompt ambiguo) vs error (infra/model no disponible).
-  // Extraído a closure: en modo auto con needs_triage se pide segunda
-  // opinión ya con el contexto triage en el timeline.
-  const decideForemanOnce = async (): Promise<import("../../shared/types/foreman").ForemanDecision> => {
-    try {
-      const currentWI = workItemStore.get(id);
-      if (!currentWI) throw new Error("workItem gone");
-      return await foremanService.decideWithLLM(currentWI);
-    } catch (e) {
-      const { buildFallbackDecision, buildErrorDecision, isInfraErrorMessage } = await import("../../shared/types/foreman");
-      const msg = e instanceof Error ? e.message : String(e);
-      if (isInfraErrorMessage(msg)) {
-        return buildErrorDecision(msg.slice(0, 160), 0.5);
-      }
-      return buildFallbackDecision(msg.slice(0, 80), 0.5);
-    }
-  };
-  let decision = await decideForemanOnce();
-
-  // T2 on-demand: el foreman habló SIN contexto triage y pide más input —
-  // recién ahí corre el triage-agent (para formular preguntas) + spec, y el
-  // foreman da su segunda opinión ya con ese contexto en el timeline
-  // (persistTriage). Un issue claro nunca llega acá: 1 sola llamada.
-  if (!opts?.skipTriageSpec && !pactTriage && needsOnDemandTriage(triageMode, decision.decision)) {
-    try {
-      appendSingleStoreLog(
-        id,
-        `[${new Date().toISOString()}] triage on-demand: foreman pidió más input (${decision.decision}) — corre triage-agent`,
-      );
-    } catch {}
-    const pre = await runPreTriageAndSpec();
-    if (pre.parked) return;
-    triageFindings = pre.triageFindings;
-    specBrief = pre.specBrief;
-    decision = await decideForemanOnce();
-  }
-
-  const triageMeta = triageFindings ? { triage: triageFindings } : {};
-  const specMeta = specBrief ? { spec: specBrief } : {};
-
-  // Persistir decision en ForemanLog + timeline meta
-  try {
-    foremanLogStore.logDecision({
-      workItemId: id,
-      prompt,
-      worktree,
-      modelRef,
-      decision,
-    });
-  } catch {}
-
-  const isBuilding = decision.decision === "building";
-  const isError = decision.decision === "error";
-
-  if (isBuilding) {
-    // Foreman → Building
-    try {
-      const built = workItemStore.transition(id, "Building", "foreman", `decided building: ${decision.reason}`, { foremanDecision: decision, ...triageMeta, ...specMeta } as unknown as Record<string, unknown>);
-      // TANDA 1: tienda única (la transición ya persistió; acá solo el log).
-      void built;
-      try {
-        appendSingleStoreLog(id, `[${new Date().toISOString()}] foreman: decided building (runner linux-build) reason="${decision.reason.slice(0, 80)}"`);
-      } catch {}
-    } catch (e) {
-      console.warn(`[Factory] Building transition failed for ${id}: ${String(e)}`);
-      return;
-    }
-    // Runner prepare
-    try {
-      const runnerSpec = runnerService.loadSpecSync("linux-build");
-      // C3 (E1 remate): imagen REAL del yaml vía loader; el spec legacy ya no
-      // trae dockerImage (undefined tras el saneo). Fallback honesto local.
-      // Best-effort, nunca lanza (el outer try ya avisa ante fallo de resolve).
-      let runnerRealImage = "(sin imagen: local)";
-      try {
-        const yamlImage = getRunner("linux-build")?.platform?.dockerImage?.trim();
-        if (yamlImage) runnerRealImage = yamlImage;
-      } catch {}
-      workItemStore.appendEvent(id, "runner", `runner:prepared ${runnerSpec.id} ${runnerRealImage} ${runnerSpec.instanceShape.cpu}/${runnerSpec.instanceShape.memory} setup=${runnerSpec.setupCommands.join(",")}`, { runnerSpec } as unknown as Record<string, unknown>);
-      foremanLogStore.info(`[Runner] ${id} prepared ${runnerSpec.id} ${runnerRealImage}`, id);
-      // TANDA 1: tienda única (el appendEvent ya persistió).
-      try {
-        persistSingleStore(id);
-      } catch {}
-    } catch (e) {
-      console.warn(`[Factory] runner resolve failed for ${id}: ${String(e)}`);
-    }
-
-    // Ola 3: set job running for UI, then launch real implement pipeline
-    // TANDA 1: tienda única (sin Map; los 3 logs quedan en el store).
-    setTimeout(() => {
-      try {
-        const w = workItemStore.get(id);
-        if (w && w.status === "Building") {
-          appendSingleStoreLog(id, `[${new Date().toISOString()}] worker picked job - state -> running`);
-          appendSingleStoreLog(id, `[${new Date().toISOString()}] implement: runner linux-build accepted`);
-          try {
-            workItemStore.appendEvent(id, "runner", "worker picked job - state -> running");
-          } catch {}
-          persistSingleStore(id);
-        }
-      } catch {}
-    }, 700);
-
-    // Ola 4 pipeline real: Building → Implement → Review (fire-and-forget) → Complete|Building|stay
-    // Pact jobs (job-abc123/F10/F11/...) van directo Complete sin Review (isPactJob en implementService).
-    setImmediate(() => {
-      void (async () => {
-        try {
-          const w = workItemStore.get(id);
-          if (!w || w.status !== "Building") return;
-          try {
-            void ensureJobSessionAttached(id).catch(() => {});
-          } catch {}
-          const { implementService } = await import("../implement/implementService");
-          const result = await implementService.handleBuilding(w);
-          // TANDA 1: tienda única (implementService ya transicionó + persistió
-          // vía la tienda; acá solo los logs sin timeline + SSE done).
-          const updated = workItemStore.get(id);
-          if (updated) {
-            const isComplete = updated.status === "Complete";
-            const isTriage = updated.status === "Triage";
-            const isReview = updated.status === "Review";
-            if (isComplete) {
-              appendSingleStoreLog(id, `[${new Date().toISOString()}] implement: verification pass → Complete (.done created)`);
-              // T01 isolation: Complete directo del pipeline (vía pact-legado);
-              // un job aislado abre acá su PR de handoff, una vez, best-effort.
-              setImmediate(() => {
-                void maybeOpenPrForCompletedJob(id);
-              });
-              const clients = sseClients.get(id);
-              if (clients) {
-                const donePayload = `event: done\ndata: ${JSON.stringify({ state: "done", status: "Complete", ts: new Date().toISOString() })}\n\n`;
-                for (const c of clients) { try { c.write(donePayload); } catch {} }
-              }
-            } else if (isTriage) {
-              appendSingleStoreLog(id, `[${new Date().toISOString()}] implement: verification fail → Triage`);
-            } else if (isReview) {
-              appendSingleStoreLog(id, `[${new Date().toISOString()}] implement: verification pass → Review (await review)`);
-            } else {
-              persistSingleStore(id);
-            }
-          }
-          void result;
-        } catch (e) {
-          console.warn(`[Factory] Ola3 implement pipeline failed for ${id}: ${String(e)}`);
-          try {
-            const w2 = workItemStore.get(id);
-            if (w2 && w2.status === "Building") {
-              const failVerif = {
-                steps: [{ name: "test" as const, command: "pnpm test", exitCode: 1 as number | null, durationMs: 0, status: "fail" as const, logPath: "logs/build.log", logSnippet: String(e).slice(0, 500) }],
-                overall: "fail" as const,
-                startedAt: new Date().toISOString(),
-                finishedAt: new Date().toISOString(),
-                durationMs: 0,
-              };
-              try {
-                workItemStore.transitionWithVerification(id, "Triage", failVerif as unknown as import("../../shared/types/implement").VerificationReport, [], `implement pipeline error: ${String(e).slice(0, 80)}`);
-              } catch {}
-              // TANDA 1: tienda única (la transición ya persistió; solo el log).
-              try {
-                appendSingleStoreLog(id, `[${new Date().toISOString()}] implement: pipeline error → Triage`);
-              } catch {}
-              // T3: el parking queda esperando humano en silencio si no se
-              // avisa (mismo helper que los parkings de implementService).
-              try {
-                const { notifyTriageParking } = await import("../implement/implementService");
-                notifyTriageParking(id, `implement pipeline error: ${String(e).slice(0, 160)}`);
-              } catch {}
-            }
-          } catch {}
-        }
-      })();
-    });
-
-  } else if (isError) {
-    // infra/model/LLM no disponible (401, 429, payment, timeout) → Cancelled/error, NO triage
-    try {
-      workItemStore.transition(id, "Cancelled", "foreman", `error: ${decision.reason}`, { foremanDecision: decision } as unknown as Record<string, unknown>);
-      // TANDA 1: tienda única (la transición ya persistió; solo el log).
-      try {
-        appendSingleStoreLog(id, `[${new Date().toISOString()}] foreman: error infra/model no disponible reason="${decision.reason.slice(0, 120)}" confidence=${decision.confidence}`);
-      } catch {}
-      try {
-        foremanLogStore.logDecision({
-          workItemId: id,
-          prompt,
-          worktree,
-          modelRef,
-          decision,
-        });
-      } catch {}
-    } catch (e) {
-      console.warn(`[Factory] Cancelled (error) transition failed for ${id}: ${String(e)}`);
-      try {
-        const w = workItemStore.get(id);
-        if (w && w.status === "Foreman") {
-          workItemStore.transition(id, "Cancelled", "foreman", `fallback error: ${String(e).slice(0, 80)}`, { foremanDecision: decision } as unknown as Record<string, unknown>);
-          // TANDA 1: tienda única (la transición ya persistió).
-          try {
-            persistSingleStore(id);
-          } catch {}
-        }
-      } catch {}
-    }
-    // TANDA 1: tienda única (el Cancelled ya persistió vía transición).
-    try {
-      persistSingleStore(id);
-    } catch {}
-  } else {
-    // needs_triage / needs_input → Triage (prompt ambiguo, confidence 0.8-0.9).
-    // P1c: si venimos de un approve humano (skipTriageSpec), la ambigüedad YA
-    // la resolvió un humano: volver a Triage silencioso re-armaría el gate de
-    // spec (loop approve→Triage→approve). Se va a Triage con evento honesto +
-    // notificación ask-human para que decida el humano (la derivación H4 la
-    // muestra como "Waiting on your decision").
-    const postApproval = opts?.skipTriageSpec === true;
-    try {
-      workItemStore.transition(id, "Triage", "foreman", postApproval ? `post-approve: foreman pide más contexto — ${decision.reason}` : `triaged: ${decision.reason}`, { foremanDecision: decision, ...triageMeta } as unknown as Record<string, unknown>);
-      // TANDA 1: tienda única (la transición ya persistió; solo el log).
-      try {
-        appendSingleStoreLog(id, `[${new Date().toISOString()}] foreman: triaged needs_triage reason="${decision.reason.slice(0, 80)}" confidence=${decision.confidence}`);
-      } catch {}
-      foremanLogStore.info(`[Foreman] ${id} → Triage reason="${decision.reason.slice(0, 80)}"`, id);
-      if (postApproval) {
-        try { notify({ kind: "ask_human", workItemId: id, title: "Se aprobó la spec pero falta contexto", body: decision.reason.slice(0, 500) }); } catch {}
-      }
-    } catch (e) {
-      console.warn(`[Factory] Triage transition failed for ${id}: ${String(e)}`);
-      // Ensure at least Triage via fallback if Foreman was lost
-      try {
-        const w = workItemStore.get(id);
-        if (w && w.status === "Foreman") {
-          workItemStore.transition(id, "Triage", "foreman", `fallback triaged: ${String(e).slice(0, 80)}`);
-          // TANDA 1: tienda única (la transición ya persistió).
-          try {
-            persistSingleStore(id);
-          } catch {}
-        }
-      } catch {}
-    }
-    // Triage no crea .done, queda en queued para retry futuro (Ola 3)
-    // TANDA 1: tienda única (el Triage ya persistió vía transición).
-    try {
-      persistSingleStore(id);
-    } catch {}
-  }
-}
-
 // ── opencode SDK cableado MVP - hook async no bloqueante ──
 // No rompe pacts: POST responde 201 inmediato (queued), y GET sigue
 // devolviendo queued->running->done via stub. Esta funcion solo anade
@@ -2533,31 +2169,6 @@ function dispatchJobPostCreateT2(
   }
 }
 
-// ── TANDA 2 — Worker verify-retry con efectos del cascarón (1 llamada desde el handler) ──
-function runVerifyWithServerEffectsT2(jid: string): Promise<void> {
-  return runVerifyRetryWorkerT2(jid, {
-    log: (a, b) => { try { appendSingleStoreLog(a, b); } catch {} },
-    onNoted: (a, m) => { try { foremanLogStore.info(m, a); } catch {} },
-    onPassReview: (a) => {
-      setImmediate(() => {
-        void (async () => {
-          try {
-            const w = workItemStore.get(a);
-            if (!w || w.status !== "Review") return;
-            try {
-              void ensureJobSessionAttached(a).catch(() => {});
-            } catch {}
-            const { reviewService } = await import("../review/reviewService");
-            await reviewService.handleReview(w);
-          } catch (e) {
-            console.warn(`[Factory] verify-retry review trigger fail ${a}: ${String(e).slice(0, 120)}`);
-          }
-        })();
-      });
-    },
-  });
-}
-
 // ── Workflows engine (Fase 4b): runtime en background + rutas pre-tabla ──
 let workflowRuntime: WorkflowRuntime | null = null;
 const workflowRepoRoot = (): string => {
@@ -2633,6 +2244,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     // delgada al dominio `agents/agentFileRoutes`). GET devuelve solo el body,
     // PUT escribe solo el body preservando el frontmatter byte por byte.
     if (await tryHandleAgentFileRoute(req, res, pathname)) return;
+    // ── Catálogos de agentes (pre-tabla): skills disponibles + bundles MCP ──
+    if (await tryHandleAgentCatalogRoute(req, res, pathname)) return;
     // ── Workflows engine (pre-tabla): lista, run, gates y cancel ──
     if (await tryHandleWorkflowRoute(req, res, pathname)) return;
     // ── TANDA C — Dispatch por tabla (C8): UN match + switch por dominio ──
@@ -2665,7 +2278,16 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       }
     }
     switch (routed.domain) {
-      case "health": await handleHealthRoute(res); break;
+      case "health": {
+        // F2: el poll de health del panel mantiene fresco el lease.
+        try {
+          if (ownsPipeline && ownershipLockPath !== null) {
+            maybeHeartbeatOwnership(ownershipLockPath);
+          }
+        } catch {}
+        await handleHealthRoute(res);
+        break;
+      }
       case "jobs-list": await handleJobsListRoute(pathname, res, url); break;
       case "foreman-logs": await handleForemanLogsRoute(url, res); break;
       case "jobs-create": await handleJobsCreateRoute(req, res); break;
@@ -2676,6 +2298,7 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       case "job-build-log": await handleResultBuildLogRoute(pathname, res); break;
       case "job-review": await handleJobReviewRoute(method, pathname, res); break;
       case "job-review-raw": await handleReviewRawRoute(pathname, res); break;
+      case "job-review-stale": await handleReviewStaleRoute(method, pathname, res); break;
       case "job-review-accept": await handleReviewAcceptRoute(method, pathname, res); break;
       case "job-merge-notify": await handleMergeNotifyRoute(pathname, req, res); break;
       case "job-review-retry": await handleReviewRetryRoute(method, pathname, res); break;
@@ -2706,6 +2329,8 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
       case "notifications-list": await handleNotificationsListRoute(res); break;
       case "notifications-ack": await handleNotificationAckRoute(pathname, res); break;
       case "definition-status": await handleDefinitionStatusRoute(res); break;
+      case "dependencies-status": await handleDependenciesStatusRoute(res); break;
+      case "dependencies-install": await handleDependenciesInstallRoute(res); break;
       case "automations-list": await handleAutomationsListRoute(res); break;
       case "automations-tick": await handleAutomationsTickRoute(req, res); break;
       case "integrations-status": await handleIntegrationsStatusRoute(res); break;
@@ -2751,14 +2376,18 @@ async function handleHealthRoute(res: http.ServerResponse): Promise<void> {
   // Self-heal: si nunca hubo url, patear ensure en background (debounced 15s) para recuperarse solo.
   const mgrHasUrl = !!opencodeServerManager.getUrl();
   const opencodeStatus = mgrHasUrl ? "healthy" : "not_started";
-  if (!mgrHasUrl) {
+  if (mgrHasUrl) {
+    // Volvió healthy: el próximo corte arranca sin backoff.
+    managerKickStreak = 0;
+  } else if (hasNonTerminalJobs()) {
     const nowMs = Date.now();
-    // TANDA B: debounce del self-heal en startup/startupService (misma
-    // regla 15s; el efecto vivo `ensureClient` queda en el cascarón).
-    if (shouldKickManagerB(lastManagerKickMs, nowMs)) {
+    // TANDA B: debounce del self-heal en startup/startupService (base 15s +
+    // backoff exponencial hasta 5min; el efecto vivo `ensureClient` queda en
+    // el cascarón). Sin trabajo no-terminal no se patea: idle no spawnea.
+    if (shouldKickManagerBackoffB(lastManagerKickMs, nowMs, managerKickStreak)) {
       lastManagerKickMs = nowMs;
+      managerKickStreak += 1;
       void opencodeServerManager.ensureClient().then(() => {
-        console.log(`[Factory] opencode manager self-heal ready ${opencodeServerManager.getUrl()}`);
       }).catch((e) => {
         console.warn(`[Factory] opencode manager self-heal failed: ${String(e).slice(0, 120)}`);
       });
@@ -3068,6 +2697,122 @@ async function tryHandleAgentFileRoute(
     try {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "no se pudo procesar el agente" }));
+    } catch {}
+    return true;
+  }
+}
+
+/**
+ * Catálogos del tab Agents (pre-tabla, mismo PIN que los agentes):
+ * - GET    /factory/skills            → { skills: [{ name, description, path }] }
+ * - GET    /factory/mcps              → { bundles: [{ name, serverCount, servers }] }
+ * - GET    /factory/mcps/:name        → { name, servers }
+ * - POST   /factory/mcps { name, mcpServers } → 201 { name, servers }
+ * - PUT    /factory/mcps/:name { mcpServers } → 200 { name, servers }
+ * - DELETE /factory/mcps/:name        → 200 { deleted } (409 si un agente lo usa)
+ * Nunca lanza: `true` = respondido.
+ */
+async function tryHandleAgentCatalogRoute(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  pathname: string,
+): Promise<boolean> {
+  try {
+    if (req.method !== "GET" && req.method !== "PUT" && req.method !== "POST" && req.method !== "DELETE") return false;
+    if (pathname === "/factory/skills" || pathname === "/factory/skills/") {
+      if (req.method !== "GET") return false;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ skills: listFactorySkills() }));
+      return true;
+    }
+    if (!pathname.startsWith("/factory/mcps")) return false;
+    if (req.method === "POST" && (pathname === "/factory/mcps" || pathname === "/factory/mcps/")) {
+      let payload: Record<string, unknown> | null = null;
+      try {
+        const { parsed } = await readBody(req);
+        payload = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+          ? (parsed as Record<string, unknown>)
+          : null;
+      } catch {
+        payload = null;
+      }
+      if (!payload) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "body JSON requerido: { name, mcpServers }" }));
+        return true;
+      }
+      const created = createMcpBundle(payload.name, payload.mcpServers);
+      if (!created.ok) {
+        const status = created.code === "duplicate" ? 409 : 400;
+        res.writeHead(status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: created.error }));
+        return true;
+      }
+      res.writeHead(201, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ name: created.value.name, servers: created.value.servers }));
+      return true;
+    }
+    if (req.method === "GET" && (pathname === "/factory/mcps" || pathname === "/factory/mcps/")) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ bundles: listMcpBundles() }));
+      return true;
+    }
+    if (!pathname.startsWith("/factory/mcps/")) return false;
+    const parsedPath = parseMcpBundlePath(pathname);
+    if ("error" in parsedPath) {
+      res.writeHead(404, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: parsedPath.error }));
+      return true;
+    }
+    const name = parsedPath.name;
+    if (req.method === "DELETE") {
+      const deleted = deleteMcpBundle(name);
+      if (!deleted.ok) {
+        const status = deleted.code === "not-found" ? 404 : deleted.code === "referenced" ? 409 : 400;
+        res.writeHead(status, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: deleted.error }));
+        return true;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ deleted: deleted.value.name }));
+      return true;
+    }
+    if (req.method === "GET") {
+      const found = readMcpBundle(name);
+      if (!found.ok) {
+        res.writeHead(404, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: found.error }));
+        return true;
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ name: found.value.name, servers: found.value.servers }));
+      return true;
+    }
+    if (req.method !== "PUT") return false;
+    let putServers: unknown = undefined;
+    try {
+      const { parsed } = await readBody(req);
+      const rec = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : null;
+      if (rec !== null) putServers = rec.mcpServers;
+    } catch {
+      putServers = undefined;
+    }
+    const saved = writeMcpBundle(name, putServers);
+    if (!saved.ok) {
+      const status = saved.code === "not-found" ? 404 : 400;
+      res.writeHead(status, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: saved.error }));
+      return true;
+    }
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ name: saved.value.name, servers: saved.value.servers }));
+    return true;
+  } catch {
+    try {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: "no se pudo procesar el catálogo de agentes" }));
     } catch {}
     return true;
   }
@@ -3387,6 +3132,38 @@ async function handleReviewRawRoute(pathname: string, res: http.ServerResponse):
   res.writeHead(200, { "Content-Type": "text/plain; charset=utf-8" }); res.end(outRaw.text); return;
 }
 
+    // ── Fix L: GET /factory/jobs/:id/review/stale (+ alias; veredicto vencido ante head nuevo) ──
+    // On-demand (cero polling, cero timers): compara el head actual del PR
+    // contra el reviewed_head del último reporte canónico. 200 con
+    // {checked, stale,...}; 404 ante job desconocido; 400 sin id.
+    // TANDA C: match en el loop (dominio "job-review-stale").
+async function handleReviewStaleRoute(method: string, pathname: string, res: http.ServerResponse): Promise<void> {
+  const parsed = parseReviewStalePath(method, pathname);
+  if (parsed === null) {
+    return;
+  }
+  if ("error" in parsed) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: parsed.error }));
+    return;
+  }
+  const outcome = await checkReviewStale(parsed.id).catch(() => null);
+  if (outcome === null) {
+    res.writeHead(500, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: "stale check failed" }));
+    return;
+  }
+  if (!outcome.checked) {
+    const code = outcome.reason === "unknown-job" ? 404 : 200;
+    res.writeHead(code, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ workItemId: parsed.id, ...outcome }));
+    return;
+  }
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ workItemId: parsed.id, ...outcome }));
+  return;
+}
+
     // ── Ola 4 P1: POST /factory/jobs/:id/review/accept (+ alias; humano acepta igual) ──
     // FASE 2 E2: transición en review/reviewActions (Review→Complete con
     // `.done`, misma forma 200); el aviso (log + auto-score) lo aporta el
@@ -3484,6 +3261,9 @@ async function handleMergeNotifyRoute(pathname: string, req: http.IncomingMessag
       res.end(JSON.stringify({ error: out.error }));
       return;
     }
+    // Close-out físico: el worktree aislado ya cumplió (PR mergeado en el
+    // forge). Fire-and-forget; solo borra si está limpio.
+    void cleanupMergedJobWorktree(id);
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, id: out.id, prNumber: out.prNumber, duplicate: out.duplicate }));
     return;
@@ -3494,337 +3274,45 @@ async function handleMergeNotifyRoute(pathname: string, req: http.IncomingMessag
   }
 }
 
-    // ── Ola 4 P1: POST /factory/jobs/:id/review/retry (+ alias; humano manda a Building) ──
-    // FASE 2 E2: transición en review/reviewActions (Review→Building sin
-    // budget, misma forma 200); el re-disparo de implement lo agenda el
-    // caller (vive acá).
-    // TANDA C: match en el loop (dominio "job-review-retry"); cuerpo intacto.
-    // (El descarte de `.../review/retry-review` que hacía el gate sobra acá:
-    // la tabla distingue ambos sufijos por longitud+sufijo exactos.)
-async function handleReviewRetryRoute(method: string, pathname: string, res: http.ServerResponse): Promise<void> {
-  const parsedRetry = parseReviewRetryPath(method, pathname);
-  if (parsedRetry === null) {
-    // Defensa: sin match se cae a los handlers siguientes (C2).
-  } else {
-    const outRetry = requestReviewRetryToBuilding(parsedRetry.id, {
-      onAccepted: (rid, _count) => {
-        try {
-          appendSingleStoreLog(rid, `[${new Date().toISOString()}] review: reintento humano → Building (re-corre implement)`);
-        } catch {}
-        setImmediate(() => {
-          void (async () => {
-            try {
-              const w = workItemStore.get(rid);
-              if (!w || w.status !== "Building") return;
-              try {
-                void ensureJobSessionAttached(rid).catch(() => {});
-              } catch {}
-              const { implementService } = await import("../implement/implementService");
-              await implementService.handleBuilding(w);
-            } catch (e) {
-              console.warn(`[Factory] review-retry implement re-dispatch failed for ${rid}: ${String(e).slice(0, 120)}`);
-            }
-          })();
-        });
-      },
-    });
-    if (!outRetry.ok) {
-      res.writeHead(outRetry.code, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: outRetry.error }));
-      return;
-    }
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, id: outRetry.id, status: outRetry.status }));
-    return;
-  }
-}
-
-    // ── Ola 5: POST /factory/jobs/:id/review/retry-review (+ alias; solo-review sin re-correr implement) ──
-    // FASE 2 E2: guards en review/reviewActions (misma forma 200 sin
-    // re-correr implement); el `run` y su agenda se inyectan (viven acá).
-    // TANDA C: match en el loop (dominio "job-review-retry-review"); cuerpo intacto.
-async function handleReviewRetryReviewRoute(method: string, pathname: string, res: http.ServerResponse): Promise<void> {
-  const parsedRR = parseReviewRetryReviewPath(method, pathname);
-  if (parsedRR === null) {
-    // Defensa: sin match se cae a los handlers siguientes (C2).
-  } else {
-    const outRR = requestReviewRetryOnly(parsedRR.id, {
-      run: async (jid: string) => {
-        const { reviewService } = await import("../review/reviewService");
-        const w = workItemStore.get(jid);
-        if (!w || w.status !== "Review") return;
-        try {
-          void ensureJobSessionAttached(jid).catch(() => {});
-        } catch {}
-        await reviewService.handleReview(w);
-      },
-      schedule: (fn: () => void) => setImmediate(fn),
-      onAccepted: (jid) => {
-        try {
-          appendSingleStoreLog(jid, `[${new Date().toISOString()}] review: reintento solo-review (sin re-correr implement)`);
-        } catch {}
-      },
-    });
-    if (!outRR.ok) {
-      res.writeHead(outRR.code, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ error: outRR.error }));
-      return;
-    }
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ ok: true, id: parsedRR.id, status: outRR.status }));
-    return;
-  }
-}
-
-    // ── H-002 E2: POST .../triage/respond (delegación a triageSpec/; Triage→Foreman sin estados nuevos) ──
-    // TANDA C: match en el loop (dominio "job-triage-respond"); cuerpo intacto.
-async function handleTriageRespondRoute(pathname: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-  const parsedTR = parseTriageRespondPath(pathname);
-  if ("error" in parsedTR) {
-    res.writeHead(400, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: parsedTR.error }));
-    return;
-  }
-  const guardsTR = checkTriageRespondGuards(workItemStore.get(parsedTR.id) ?? null, parsedTR.id);
-  if (!guardsTR.ok) {
-    res.writeHead(guardsTR.code, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: guardsTR.error }));
-    return;
-  }
-  const { parsed: bodyTR } = await readBody(req);
-  const validTR = parseTriageRespondBody(bodyTR);
-  if (!validTR.ok) {
-    res.writeHead(400, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: validTR.error }));
-    return;
-  }
-  try {
-    applyTriageRespondTransition(parsedTR.id, validTR.answers);
-  } catch (e) {
-    const codeTR = (e as { status?: unknown })?.status === 404 ? 404 : 409;
-    const msgTR = e instanceof Error ? e.message : String(e);
-    res.writeHead(codeTR, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: msgTR.slice(0, 160) }));
-    return;
-  }
-  res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ ok: true, id: parsedTR.id, status: "Foreman" }));
-  // Re-disparo del foreman con las respuestas humanas (sin estados nuevos).
-  setImmediate(() => {
-    void runForemanDecisionAndDispatch(parsedTR.id);
-  });
+    // ── Handlers legacy retirados (engine): 410 honesto ──
+    // El engine intercepta estos dominios cuando el job tiene run; un job
+    // sin run ya no tiene pipeline legacy que correr. 410 con los strings
+    // que pinea dispatch-table (RETIRED_LEGACY_OPS).
+async function handleReviewRetryRoute(_method: string, _pathname: string, res: http.ServerResponse): Promise<void> {
+  res.writeHead(410, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "review retry legacy retirado: usá Retomar del panel (engine)" }));
   return;
 }
 
-    // ── Ola 8: POST .../spec/approve (delegación a triageSpec/; Triage→Foreman con skipTriageSpec) ──
-    // TANDA C: match en el loop (dominio "job-spec-approve"); cuerpo intacto.
-async function handleSpecApproveRoute(pathname: string, res: http.ServerResponse): Promise<void> {
-  const parsedSA = parseSpecApprovePathE2(pathname);
-  if ("error" in parsedSA) {
-    res.writeHead(400, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: parsedSA.error }));
-    return;
-  }
-  const guardsSA = checkSpecApproveGuardsE2(workItemStore.get(parsedSA.id) ?? null, parsedSA.id);
-  if (!guardsSA.ok) {
-    res.writeHead(guardsSA.code, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: guardsSA.error }));
-    return;
-  }
-  try {
-    applySpecApproveTransition(parsedSA.id);
-  } catch (e) {
-    const codeSA = (e as { status?: unknown })?.status === 404 ? 404 : 409;
-    const msgSA = e instanceof Error ? e.message : String(e);
-    res.writeHead(codeSA, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: msgSA.slice(0, 160) }));
-    return;
-  }
-  res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ ok: true, id: parsedSA.id, status: "Foreman" }));
-  // Re-disparo del foreman con la spec ya aprobada (skipTriageSpec: no
-  // re-corre triage/spec; la spec trazada viaja en el timeline).
-  setImmediate(() => {
-    void runForemanDecisionAndDispatch(parsedSA.id, { skipTriageSpec: true });
-  });
+async function handleReviewRetryReviewRoute(_method: string, _pathname: string, res: http.ServerResponse): Promise<void> {
+  res.writeHead(410, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "review retry legacy retirado: usá Retomar del panel (engine)" }));
   return;
 }
 
-    // ── POST .../spec/reject (delegación a triageSpec/; queda en Triage y
-    // re-corre el spec agent con el motivo humano) ──
-    // TANDA C: match en el loop (dominio "job-spec-reject"); cuerpo espejo
-    // de approve con worker propio de regeneración.
-async function handleSpecRejectRoute(pathname: string, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-  const parsedSR = parseSpecRejectPathE2(pathname);
-  if ("error" in parsedSR) {
-    res.writeHead(400, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: parsedSR.error }));
-    return;
-  }
-  const guardsSR = checkSpecRejectGuardsE2(workItemStore.get(parsedSR.id) ?? null, parsedSR.id);
-  if (!guardsSR.ok) {
-    res.writeHead(guardsSR.code, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: guardsSR.error }));
-    return;
-  }
-  const { parsed: bodySR } = await readBody(req);
-  const validSR = parseSpecRejectBodyE2(bodySR);
-  if (!validSR.ok) {
-    res.writeHead(400, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: validSR.error }));
-    return;
-  }
-  try {
-    applySpecRejectTransition(parsedSR.id, validSR.feedback);
-  } catch (e) {
-    const codeSR = (e as { status?: unknown })?.status === 404 ? 404 : 409;
-    const msgSR = e instanceof Error ? e.message : String(e);
-    res.writeHead(codeSR, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: msgSR.slice(0, 160) }));
-    return;
-  }
-  res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ ok: true, id: parsedSR.id, status: "Triage" }));
-  // Regeneración del brief con el motivo humano (queda en Triage; si el
-  // brief nuevo es trivial o el spec falla, continúa a Foreman).
-  const rejectFeedback = validSR.feedback;
-  setImmediate(() => {
-    void runSpecRejectWorker(parsedSR.id, rejectFeedback);
-  });
+async function handleTriageRespondRoute(_pathname: string, _req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  res.writeHead(410, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "triage respond legacy retirado: usá el gate del panel (engine)" }));
   return;
 }
 
-/**
- * Worker post-reject: re-corre el Spec-agent con el motivo humano y reabre
- * el gate con el brief nuevo. Sin estados nuevos, sin loops escritos:
- * - brief no-trivial → evento con pedido NUEVO (queda en Triage, notifica).
- * - brief trivial o spec omitido → Triage→Foreman + foreman completo (sin
- *   skip: evaluación fresca, como el skip del flujo principal).
- * Si el job ya no está en Triage (el humano avanzó meanwhile), no hace nada.
- * Nunca lanza (el caller es setImmediate).
- */
-async function runSpecRejectWorker(id: string, feedback: string | null): Promise<void> {
-  try {
-    const wi = workItemStore.get(id);
-    if (!wi || wi.status !== "Triage") return;
-    let triageCtx: TriageFindings | undefined;
-    try {
-      const { getLatestTriage } = await import("../triage/triageFlow");
-      triageCtx = getLatestTriage(wi) ?? undefined;
-    } catch {
-      triageCtx = undefined;
-    }
-    const specRes = await runSpecForJob(wi, triageCtx, feedback ?? undefined);
-    const cur = workItemStore.get(id);
-    if (!cur || cur.status !== "Triage") return;
-    if (specRes.brief) {
-      try {
-        persistSpec(id, specRes.brief);
-      } catch {}
-      if (!specRes.brief.trivial) {
-        try {
-          workItemStore.appendEvent(
-            id,
-            "system",
-            `spec regenerada tras rechazo: espera aprobación — ${specRes.brief.summary.slice(0, 120)}`,
-            buildSpecApprovalMeta(specRes.brief.summary),
-          );
-        } catch {}
-        try {
-          appendSingleStoreLog(id, `[${new Date().toISOString()}] spec: brief regenerado tras rechazo → Triage (espera aprobación POST /spec/approve)`);
-        } catch {}
-        try {
-          foremanLogStore.info(`[Spec] ${id} → Triage espera aprobación (brief regenerado)`, id);
-        } catch {}
-        try { notify({ kind: "spec-approval", workItemId: id, title: "Spec pendiente de aprobación", body: specRes.brief.summary.slice(0, 500) }); } catch {}
-        return;
-      }
-    } else {
-      try {
-        workItemStore.appendEvent(
-          id,
-          "system",
-          `spec omitida tras rechazo (${(specRes.skipReason ?? "sin brief").slice(0, 120)}): sigue a Foreman`,
-          { specSkipped: true } as unknown as Record<string, unknown>,
-        );
-      } catch {}
-    }
-    try {
-      workItemStore.transition(id, "Foreman", "system", "spec tras rechazo: re-corre foreman");
-    } catch {
-      return;
-    }
-    await runForemanDecisionAndDispatch(id);
-  } catch (e) {
-    console.warn(`[Factory] Spec reject worker fallo ${id}: ${String(e).slice(0, 120)}`);
-  }
-}
-
-    // ── P3d: POST /factory/jobs/:id/resume (+ alias; humano retoma un turno
-    // parqueado por reinicio) ──
-    // TANDA C: match en el loop (dominio "job-resume"). Guards + marca en
-    // jobs/jobService (404/409 honestos, marca `resumed` sincrónica anti
-    // doble disparo); el worker de la fase lo agenda el caller (vive acá).
-async function handleJobResumeRoute(pathname: string, res: http.ServerResponse): Promise<void> {
-  const partsR = pathname.split("/").filter(Boolean);
-  const aliasR = partsR[0] === "work-items";
-  const idR = aliasR ? partsR[1] : partsR[2];
-  const outR = requestJobResumeTA(idR);
-  if (!outR.ok) {
-    res.writeHead(outR.code, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ error: outR.error }));
-    return;
-  }
-  appendSingleStoreLog(outR.id, `[${new Date().toISOString()}] resume: ${outR.id} retomado por humano en ${outR.status}`);
-  try { foremanLogStore.info(`[Resume] ${outR.id} retomado en ${outR.status} (humano)`, outR.id); } catch {}
-  res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify({ ok: true, id: outR.id, status: outR.status }));
-  const resumeStatus = outR.status;
-  setImmediate(() => {
-    void runResumeWorker(outR.id, resumeStatus);
-  });
+async function handleSpecApproveRoute(_pathname: string, res: http.ServerResponse): Promise<void> {
+  res.writeHead(410, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "spec approve legacy retirado: usá el gate del panel (engine)" }));
   return;
 }
 
-/**
- * Worker post-resume: re-dispara el worker de la fase donde quedó el turno
- * (Foreman decide de cero; Building corre implement; Review corre review con
- * sus locks). Si el job se movió meanwhile, no hace nada. Marca el job en
- * vuelo (Agents tiempo-real: el reciclado del server no debe pisarlo) e
- * intenta el reciclado al entrar (prompt guardado mientras estaba parado).
- * Nunca lanza.
- */
-async function runResumeWorker(id: string, status: string): Promise<void> {
-  try {
-    maybeRecycleOpencodeForAgentUpdate(id);
-  } catch {
-    // noop: el reciclado nunca frena el worker
-  }
-  markWorkerActive(id);
-  try {
-    const w = workItemStore.get(id);
-    if (!w || w.status !== status) return;
-    if (status === "Foreman") {
-      await runForemanDecisionAndDispatch(id);
-      return;
-    }
-    if (status === "Building") {
-      const { implementService } = await import("../implement/implementService");
-      await implementService.handleBuilding(w);
-      return;
-    }
-    if (status === "Review") {
-      const { reviewService } = await import("../review/reviewService");
-      await reviewService.handleReview(w);
-      return;
-    }
-  } catch (e) {
-    console.warn(`[Factory] resume worker fallo ${id}: ${String(e).slice(0, 120)}`);
-  } finally {
-    clearWorkerActive(id);
-  }
+async function handleSpecRejectRoute(_pathname: string, _req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  res.writeHead(410, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "spec reject legacy retirado: usá el gate del panel (engine)" }));
+  return;
 }
 
+async function handleJobResumeRoute(_pathname: string, res: http.ServerResponse): Promise<void> {
+  res.writeHead(410, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "resume legacy retirado: usá Retomar del panel (engine)" }));
+  return;
+}
     // ── DISCARD: POST /factory/jobs/:id/discard + alias (NO RETOMAR TRABAJO: cancela y limpia lo que hizo) ──
     // TANDA C: match en el loop (dominio "job-discard"); delega en jobs/jobDiscard (single-shot humano, sin reintentos).
 async function handleJobDiscardRoute(pathname: string, res: http.ServerResponse): Promise<void> {
@@ -3839,31 +3327,21 @@ async function handleJobDiscardRoute(pathname: string, res: http.ServerResponse)
   res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ ok: true, id: outD.id, state: outD.state, status: outD.status, cleaned: outD.cleaned })); return;
 }
 
-    // ── RERUN: POST /factory/jobs/:id/review/rerun + alias (re-revisa un Complete sin mover status) ──
-    // TANDA C: match en el loop (dominio "job-review-rerun"); delega en review/reviewRerun (single-shot humano, sin reintentos).
-async function handleReviewRerunRoute(pathname: string, res: http.ServerResponse): Promise<void> {
-  const partsR = pathname.split("/").filter(Boolean);
-  const aliasR = partsR[0] === "work-items";
-  const idR = aliasR ? partsR[1] : partsR[2];
-  if (!idR || idR === "review" || idR === "rerun") { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "missing id for review rerun" })); return; }
-  const { runReviewRerun } = await import("../review/reviewRerun");
-  const outR = await runReviewRerun(idR);
-  if (!outR.ok) { res.writeHead(outR.code, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: outR.error })); return; }
-  appendSingleStoreLog(outR.id, `[${new Date().toISOString()}] review-rerun: ${outR.id} ${outR.verdict} (intento ${outR.attempt}, sin mover status) (pedido humano)`);
-  try { foremanLogStore.info(`[ReviewRerun] ${outR.id} ${outR.verdict} (humano)`, outR.id); } catch {}
-  res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ ok: true, id: outR.id, status: outR.status, verdict: outR.verdict, summary: outR.summary, findings: outR.findings, attempt: outR.attempt })); return;
+    // ── RERUN / VERIFY-RETRY legacy retirados (engine) ──
+    // El engine intercepta estos dominios cuando el job tiene run; un job
+    // sin run ya no tiene worker legacy que re-disparar (pipeline borrado).
+    // 410 honesto, mismos strings que pinea dispatch-table.
+async function handleReviewRerunRoute(_pathname: string, res: http.ServerResponse): Promise<void> {
+  res.writeHead(410, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "review rerun legacy retirado: usá Re-revisar del panel (engine)" }));
+  return;
 }
 
-    // ── Ola 9: POST .../verify-retry (TANDA 2: handler .../review/verify-retry, 1 llamada, forma intacta) ──
-    // TANDA C: match en el loop (dominio "job-verify-retry"); cuerpo intacto.
-async function handleVerifyRetryRoute(pathname: string, res: http.ServerResponse): Promise<void> {
-  const parsedV = parseVerifyRetryPath(pathname);
-  if (!parsedV || "error" in parsedV) { res.writeHead(400, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: "invalid path" })); return; }
-  const outV = requestVerifyRetryT2(parsedV.id, { run: (jid: string) => runVerifyWithServerEffectsT2(jid), schedule: (fn: () => void) => setImmediate(fn) });
-  if (!outV.ok) { res.writeHead(outV.code, { "Content-Type": "application/json" }); res.end(JSON.stringify({ error: outV.error })); return; }
-  res.writeHead(200, { "Content-Type": "application/json" }); res.end(JSON.stringify({ ok: true, id: outV.id, status: "Triage" })); return;
+async function handleVerifyRetryRoute(_pathname: string, res: http.ServerResponse): Promise<void> {
+  res.writeHead(410, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "verify-retry legacy retirado: usá Resume del panel (engine)" }));
+  return;
 }
-
     // ── Ola 9: GET .../verify (sirve verify.json; TANDA 2: lectura en verify/) ──
     // TANDA C: match en el loop (dominio "job-verify"); cuerpo intacto.
 async function handleVerifyGetRoute(pathname: string, res: http.ServerResponse): Promise<void> {
@@ -4230,6 +3708,36 @@ async function handleDefinitionStatusRoute(res: http.ServerResponse): Promise<vo
   }
 }
     // ── FIN FASE 3 E2 — Bloque Ruta definition ──
+
+    // ── Dependencies (pr-agent CLI): estado machine-global + install explícito ──
+    // GET /factory/dependencies/status → {tools:[{name,description,installed,version,installable,installCommand,hint}]}
+    // POST /factory/dependencies/pr-agent/install → {ok,method?,version?,log?} o {ok:false,error,log}.
+    // El install corre sincrónico con cota propia (raro y a pedido humano);
+    // el cliente pasa timeout largo. Nunca lanza fuera de estos handlers.
+async function handleDependenciesStatusRoute(res: http.ServerResponse): Promise<void> {
+  try {
+    const payload = await getDependenciesStatus();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(payload));
+    return;
+  } catch (e) {
+    res.writeHead(500, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: `failed to read dependencies: ${String(e instanceof Error ? e.message : e).slice(0, 160)}` }));
+    return;
+  }
+}
+async function handleDependenciesInstallRoute(res: http.ServerResponse): Promise<void> {
+  try {
+    const outcome = await installPrAgent();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(outcome));
+    return;
+  } catch (e) {
+    res.writeHead(500, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ ok: false, error: `install failed: ${String(e instanceof Error ? e.message : e).slice(0, 160)}`, log: "" }));
+    return;
+  }
+}
   } catch (err) {
     console.error("[Factory] handleRequest error", err);
     if (!res.headersSent) {
@@ -4267,7 +3775,14 @@ export function parkInterruptedJobs(): number {
           wi.id,
           "system",
           `daemon reiniciado: turno interrumpido en ${status} — retomalo con Retomar cuando quieras`,
-          { [BOOT_INTERRUPTED_META_KEY]: true, fromStatus: status } as unknown as Record<string, unknown>,
+          {
+            [BOOT_INTERRUPTED_META_KEY]: true,
+            [BOOT_INTERRUPTED_AT_META_KEY]:
+              typeof wi.updatedAt === "string" && wi.updatedAt.length > 0
+                ? wi.updatedAt
+                : new Date().toISOString(),
+            fromStatus: status,
+          } as unknown as Record<string, unknown>,
         );
         parked++;
       } catch {}
@@ -4624,51 +4139,82 @@ export async function ensureFactoryServer(): Promise<number> {
 
   factoryPort = port;
   startedAt = Date.now();
-  // Espejos de agentes al día en cada arranque (proyecto + global): la
-  // fuente es factory/agents/*. Un espejo rancio serviría instrucciones
-  // viejas a los jobs (caso punto-12). Best-effort, nunca frena el boot.
-  try {
-    const sync = await import("./opencodeAgentSync");
-    try {
-      const local = sync.syncFactoryAgentsToOpencode();
-      console.log(`[Factory] agents sync proyecto: ${local.written.length} escritos, ${local.skipped.length} skips`);
-    } catch (e) {
-      console.warn(`[Factory] agents sync proyecto fail: ${String(e).slice(0, 120)}`);
-    }
-    try {
-      const global = sync.syncFactoryAgentsGlobal();
-      console.log(`[Factory] agents sync global: ${global.written.length} escritos, ${global.skipped.length} skips`);
-    } catch (e) {
-      console.warn(`[Factory] agents sync global fail: ${String(e).slice(0, 120)}`);
-    }
-  } catch {}
+  // F14: los agentes viajan INLINE en el config del server efímero
+  // (`buildBaseServerConfig` → `Config.agent`). No se escriben espejos en
+  // disco: el opencode del usuario no los ve, y el reciclado por agentDirty
+  // reconstruye los agentes al editar. Nada que sincronizar en el boot.
   try {
     ensureFactoryBuildId();
   } catch {}
   writeFactoryPortFile(port);
   console.log(`[Factory] listening on http://127.0.0.1:${port} (health: /factory/health)`);
+  // F2: lease de ownership. Si OTRO proceso vivo ya es dueño del pipeline
+  // (ej. app + standalone de dev, o un smoke corriendo), este daemon arranca
+  // pasivo: no marca live ni parkea jobs ajenos. Si el dueño anterior murió,
+  // se reclama y el parqueo honesto sigue igual.
+  try {
+    ownershipLockPath = buildOwnershipLockPath();
+    const claim = claimOwnership(ownershipLockPath);
+    ownsPipeline = claim.claimed;
+    if (!claim.claimed) {
+      console.warn(
+        `[Factory] pipeline con dueño vivo (pid ${claim.lock?.pid ?? "?"}) — arranco pasivo (sin park ni markPipelineLive)`,
+      );
+    }
+  } catch {
+    ownsPipeline = true;
+    ownershipLockPath = null;
+  }
   // Arma los efectos best-effort con LLM/procesos (reconciliación de
   // sesión, refresh de triage): fuera del boot quedan inertes para que
   // los tests que importan handlers no spawneen nada real.
-  try {
-    markPipelineLive();
-  } catch {}
+  if (ownsPipeline) {
+    try {
+      markPipelineLive();
+    } catch {}
+  }
 
   // P3d: parqueo honesto (SOLO acá, cuando este proceso toma ownership del
   // pipeline — nunca en las rutas de reutilización/caché de arriba, donde
   // otro daemon puede seguir corriendo los workers). Ningún worker
   // sobrevivió al reinicio: todo job en estado obrero sin marca pendiente
   // quedó interrumpido y se marca UNA vez (ya marcado → skip, sin spam).
-  try {
-    parkInterruptedJobs();
-  } catch {}
+  if (ownsPipeline) {
+    try {
+      parkInterruptedJobs();
+    } catch {}
+  }
 
-  // Levantar OpencodeServerManager efímero en background (no bloquea 201 ni health)
-  void opencodeServerManager.ensureClient().then(() => {
-    console.log(`[Factory] opencode manager ready ${opencodeServerManager.getUrl()}`);
-  }).catch((e) => {
-    console.warn(`[Factory] opencode manager ensure failed (fallback a 4096 discovery): ${String(e).slice(0, 120)}`);
-  });
+  // Levantar OpencodeServerManager efímero solo con trabajo real: en una app
+  // idle el server + su fan-out de MCPs no se justifica (kill switch para
+  // forzar el warm-up histórico: TERMCANVAS_FACTORY_WARM_OPENCODE=1).
+  if (process.env.TERMCANVAS_FACTORY_WARM_OPENCODE === "1" || hasNonTerminalJobs()) {
+    void opencodeServerManager.ensureClient().then(() => {
+    }).catch((e) => {
+      console.warn(`[Factory] opencode manager ensure failed (fallback a 4096 discovery): ${String(e).slice(0, 120)}`);
+    });
+  }
+
+  // Higiene anti-huérfanos: los opencode.exe con padre muerto (restarts sucios
+  // de dev, cierres forzados) retienen cientos de MB sin hacer nada (deuda
+  // medida: 11 huérfanos ≈ 3GB). Reusa el reaper probado del repo: solo mata
+  // padre muerto + re-verifica nombre/PID. Best-effort, no bloquea el boot.
+  // Kill switch: TERMCANVAS_NO_REAP_ORPHANS=1.
+  try {
+    if ((process.env.TERMCANVAS_NO_REAP_ORPHANS ?? "") !== "1") {
+      const reaper = path.join(getRepoRoot(), "scripts", "reap-opencode-orphans.mjs");
+      if (fs.existsSync(reaper)) {
+        const reaperChild = spawn(process.execPath, [reaper, "--kill"], {
+          detached: true,
+          stdio: "ignore",
+          windowsHide: true,
+        });
+        (reaperChild as unknown as { unref?: () => void }).unref?.();
+      }
+    }
+  } catch {
+    // higiene best-effort: nunca frena el boot
+  }
 
   // Also attempt to create opencode server on same port? No - separate service.
   // The http factory above is the source of truth for health even when opencode exists.
@@ -4694,6 +4240,11 @@ export function closeFactoryServer(): void {
   sseClients.clear();
   cleanupFactoryPortFile();
   try { opencodeServerManager.close(); } catch {}
+  // F2: liberar el lease solo si es nuestro (un daemon pasivo no lo toca).
+  try {
+    if (ownershipLockPath !== null) releaseOwnership(ownershipLockPath);
+  } catch {}
+  ownershipLockPath = null;
   factoryPort = null;
   startedAt = null;
   console.log("[Factory] closed");

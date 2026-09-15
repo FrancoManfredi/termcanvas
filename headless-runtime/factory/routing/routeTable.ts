@@ -77,6 +77,7 @@ export type RouteDomain =
   | "job-merge-notify"
   | "job-review-retry"
   | "job-review-retry-review"
+  | "job-review-stale"
   | "job-triage-respond"
   | "job-spec-approve"
   | "job-spec-reject"
@@ -103,6 +104,8 @@ export type RouteDomain =
   | "notifications-list"
   | "notifications-ack"
   | "definition-status"
+  | "dependencies-status"
+  | "dependencies-install"
   | "automations-list"
   | "automations-tick"
   | "integrations-status"
@@ -134,7 +137,7 @@ export interface RouteTableEntry {
 }
 
 /**
- * Tabla completa: 48 filas → 47 dominios (job-build-log comparte dominio en
+ * Tabla completa: 51 filas → 50 dominios (job-build-log comparte dominio en
  * dos filas). Orden: exactas primero, luego sufijos largos antes que cortos
  * (defensa, aunque el MATCH exige sufijo+longitud exactos y el orden no
  * cambia el resultado).
@@ -154,6 +157,8 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
   { method: "GET", domain: "improve-proposals-list", kind: "exact", canonical: "/factory/improve/proposals", canonicalLen: 3 },
   { method: "GET", domain: "notifications-list", kind: "exact", canonical: "/factory/notifications", canonicalLen: 2 },
   { method: "GET", domain: "definition-status", kind: "exact", canonical: "/factory/definition/status", canonicalLen: 3 },
+  { method: "GET", domain: "dependencies-status", kind: "exact", canonical: "/factory/dependencies/status", canonicalLen: 3 },
+  { method: "POST", domain: "dependencies-install", kind: "exact", canonical: "/factory/dependencies/pr-agent/install", canonicalLen: 4 },
   { method: "GET", domain: "automations-list", kind: "exact", canonical: "/factory/automations", canonicalLen: 2 },
   { method: "POST", domain: "automations-tick", kind: "exact", canonical: "/factory/automations/tick", canonicalLen: 3 },
   { method: "GET", domain: "integrations-status", kind: "exact", canonical: "/factory/integrations/status", canonicalLen: 3 },
@@ -170,6 +175,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
   // ── Job-scoped con alias dual factory/jobs ↔ work-items ──
   { method: "POST", domain: "job-verify-retry", kind: "job", canonical: "/factory/jobs/:id/review/verify-retry", alias: "/work-items/:id/review/verify-retry", canonicalLen: 5, aliasLen: 4, canonicalPrefix: "/factory/jobs/", aliasPrefix: "/work-items/", suffix: "/review/verify-retry" },
   { method: "POST", domain: "job-review-retry-review", kind: "job", canonical: "/factory/jobs/:id/review/retry-review", alias: "/work-items/:id/review/retry-review", canonicalLen: 5, aliasLen: 4, canonicalPrefix: "/factory/jobs/", aliasPrefix: "/work-items/", suffix: "/review/retry-review" },
+  { method: "GET", domain: "job-review-stale", kind: "job", canonical: "/factory/jobs/:id/review/stale", alias: "/work-items/:id/review/stale", canonicalLen: 5, aliasLen: 4, canonicalPrefix: "/factory/jobs/", aliasPrefix: "/work-items/", suffix: "/review/stale" },
   { method: "POST", domain: "job-triage-respond", kind: "job", canonical: "/factory/jobs/:id/triage/respond", alias: "/work-items/:id/triage/respond", canonicalLen: 5, aliasLen: 4, canonicalPrefix: "/factory/jobs/", aliasPrefix: "/work-items/", suffix: "/triage/respond" },
   { method: "POST", domain: "job-spec-approve", kind: "job", canonical: "/factory/jobs/:id/spec/approve", alias: "/work-items/:id/spec/approve", canonicalLen: 5, aliasLen: 4, canonicalPrefix: "/factory/jobs/", aliasPrefix: "/work-items/", suffix: "/spec/approve" },
   { method: "POST", domain: "job-spec-reject", kind: "job", canonical: "/factory/jobs/:id/spec/reject", alias: "/work-items/:id/spec/reject", canonicalLen: 5, aliasLen: 4, canonicalPrefix: "/factory/jobs/", aliasPrefix: "/work-items/", suffix: "/spec/reject" },

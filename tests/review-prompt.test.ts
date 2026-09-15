@@ -55,7 +55,7 @@ test("buildReviewPrompt lleva solo datos: id, issue, worktree (turno flaco)", ()
   assert.ok(!prompt.includes("Sos el REVISOR"), "sin rol (vive en el espejo)");
   assert.ok(!prompt.includes("Ejes obligatorios"), "sin ejes (viven en el espejo)");
   assert.ok(!prompt.includes("Severidades:"), "sin severidades (viven en el espejo)");
-  assert.ok(!prompt.includes('"verdict"'), "sin schema en el turno (va por format)");
+  assert.ok(prompt.includes('"verdict"'), "el shape del cierre vive en el turno (una sola fuente)");
 });
 
 function slimReviewCtx() {

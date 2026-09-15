@@ -21,7 +21,9 @@ import { WarpSidePanel } from "./components/WarpSidePanel";
 import { KanbanBoard } from "./components/KanbanBoard";
 import { IssueDrawer } from "./components/IssueDrawer";
 import ActivityPanel from "./components/ActivityPanel";
-import AgentsPanel from "./components/AgentsPanel";
+import { AgentsConsole } from "./agents/AgentsConsole";
+import { WorkflowsPanel } from "./workflows/components/WorkflowsPanel";
+import { DependenciesPanel } from "./components/DependenciesPanel";
 import { WarpPanelBoundary } from "./components/WarpPanelBoundary";
 
 /**
@@ -48,7 +50,7 @@ export function WarpPanelShell() {
   // this shell in App.tsx. Without this mount the poll list stays empty
   // while the panel is open and resolved rows never reach In Progress.
   // Perf Ola 1: paused in Agents (config-only, user-approved stale) so the
-  // 2.5s setWorkItems storm stops re-rendering AgentConfig while typing.
+  // 2.5s setWorkItems storm stops re-rendering the Agents editor while typing.
   const [activeSection, setActiveSectionState] = useState<NavSection>(() => {
     try {
       return loadPersistedPanelSection();
@@ -223,18 +225,24 @@ export function WarpPanelShell() {
   const showDeferredIssues = deferredSection === "issues";
   const showDeferredActivity = deferredSection === "activity";
   const showDeferredAgents = deferredSection === "agents";
+  const showDeferredWorkflows = deferredSection === "workflows";
+  const showDeferredDependencies = deferredSection === "dependencies";
   // Perf P2: keep-alive por sección (React 19 `<Activity>`): volver a una
   // sección ya no remonta (scroll, selección y draft se conservan) y los
   // effects se destruyen al ocultar (sin trabajo fantasma). Las secciones
   // se montan LAZY en la primera visita para no pagar 3 snapshots en la
   // apertura; los memos + guards absorben los re-renders depriorizados en
   // oculto. Memoria extra: 3 listas en DOM (asumido por el usuario).
+  // Workflows queda fuera del keep-alive: React Flow mide mal su contenedor
+  // bajo `display:none` y el estado de la sección es barato de recrear.
   const [seenSections, setSeenSections] = useState<Record<NavSection, boolean>>(() => ({
     issues: activeSection === "issues",
     activity: activeSection === "activity",
     agents: activeSection === "agents",
+    workflows: activeSection === "workflows",
     context: activeSection === "context",
     diagnostic: activeSection === "diagnostic",
+    dependencies: activeSection === "dependencies",
   }));
   useEffect(() => {
     setSeenSections((seen) =>
@@ -287,10 +295,16 @@ export function WarpPanelShell() {
           )}
           {seenSections.agents && (
             <Activity mode={showDeferredAgents ? "visible" : "hidden"}>
-              <AgentsPanel />
+              <AgentsConsole />
             </Activity>
           )}
-          {!showDeferredIssues && !showDeferredActivity && !showDeferredAgents && (
+          {showDeferredWorkflows && <WorkflowsPanel />}
+          {seenSections.dependencies && (
+            <Activity mode={showDeferredDependencies ? "visible" : "hidden"}>
+              <DependenciesPanel />
+            </Activity>
+          )}
+          {!showDeferredIssues && !showDeferredActivity && !showDeferredAgents && !showDeferredWorkflows && !showDeferredDependencies && (
             <div
               style={{
                 flex: 1,

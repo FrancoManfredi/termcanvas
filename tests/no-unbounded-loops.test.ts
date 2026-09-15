@@ -213,6 +213,9 @@ const BOUNDED: readonly Bounded[] = [
   // No BOUNDED / CONSTANTS / exemption entry needed.
   // E1-A pre-verify late-flush rescan (H-013 extended to first verify):
   // bounded `for` + short sleeps, only on empty/H-012 shape (see LOOPS P05).
+  // Rondas de sesión por nodo de loop (VIEW AGENT por ronda, LOOPS G07):
+  // `for...of` sobre el historial acotado (las viejas se descartan).
+  { file: "headless-runtime/factory/engineBridge.ts", kind: "for", needle: "for (const entry of rounds)", capText: "NODE_SESSION_ROUNDS_MAX", doc: "NODE_SESSION_ROUNDS_MAX = 50" },
 ];
 
 /**

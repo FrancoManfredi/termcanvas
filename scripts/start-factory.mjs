@@ -19,8 +19,10 @@
  */
 
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { FACTORY_WATCH_EXCLUDES } from "./factory-watch-excludes.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -54,12 +56,38 @@ console.log(
 console.log(`[start-factory] entry: ${tsEntry}`);
 console.log("[start-factory] tip: curl http://127.0.0.1:17680/factory/health");
 
-const args = ["--import", "tsx"];
-if (watch) args.push("--watch");
-args.push(tsEntry);
+// Watch explícito de tsx (subcomando `watch`): el alias `--watch` lo maneja
+// NODE (sin soporte de excludes) y `--exclude` revienta con "bad option".
+const tsxCli = path.join(root, "node_modules", "tsx", "dist", "cli.mjs");
+const args = watch
+  ? [
+      tsxCli,
+      "watch",
+      ...FACTORY_WATCH_EXCLUDES.flatMap((glob) => ["--exclude", glob]),
+      tsEntry,
+    ]
+  : ["--import", "tsx", tsEntry];
+// F1b: log persistente del daemon (sin esto un exit/crash no deja rastro).
+let stdio = "inherit";
+try {
+  const logDir = path.join(root, ".agents", "factory");
+  fs.mkdirSync(logDir, { recursive: true });
+  const logPath = path.join(logDir, "daemon-dev.log");
+  const fd = fs.openSync(logPath, "a");
+  fs.appendFileSync(
+    logPath,
+    `\n=== daemon start ${new Date().toISOString()} (watch=${watch ? "on" : "off"}) ===\n`,
+    "utf-8",
+  );
+  stdio = ["ignore", fd, fd];
+  console.log(`[start-factory] log: ${logPath}`);
+} catch {
+  stdio = "inherit";
+}
 const child = spawn(process.execPath, args, {
   cwd: root,
-  stdio: "inherit",
+  stdio,
+  windowsHide: true,
   env: { ...process.env },
 });
 

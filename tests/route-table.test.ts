@@ -11,10 +11,10 @@ const ID = "job-abc123";
 
 // ── 0. Tabla cerrada: 35 dominios / 36 filas ──
 
-test("tabla cerrada: 47 dominios únicos en 48 filas (build-log comparte dominio)", () => {
-  assert.equal(ROUTE_TABLE.length, 48);
+test("tabla cerrada: 50 dominios únicos en 51 filas (build-log comparte dominio)", () => {
+  assert.equal(ROUTE_TABLE.length, 51);
   const domains = new Set(ROUTE_TABLE.map((r) => r.domain));
-  assert.equal(domains.size, 47);
+  assert.equal(domains.size, 50);
   assert.ok(domains.has("health"));
   assert.ok(domains.has("job-detail"));
   assert.ok(domains.has("definition-status"));

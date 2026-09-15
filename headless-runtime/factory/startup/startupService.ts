@@ -417,3 +417,31 @@ export function shouldKickManager(lastKickMs: unknown, nowMs: unknown): boolean 
     return false;
   }
 }
+
+/**
+ * Backoff exponencial del self-heal: base 15s y luego 15s·2^streak con techo
+ * de 5min. Evita que un binario de opencode faltante/roto convierta cada
+ * poll de /factory/health en un burst de spawns (3 retries por intento).
+ * `streak` = kicks consecutivos sin URL (se resetea al volver healthy).
+ * Puro, nunca lanza.
+ */
+export function shouldKickManagerWithBackoff(
+  lastKickMs: unknown,
+  nowMs: unknown,
+  streak: unknown,
+): boolean {
+  try {
+    if (!shouldKickManager(lastKickMs, nowMs)) return false;
+    const s =
+      typeof streak === "number" && Number.isFinite(streak) && streak > 0
+        ? Math.floor(streak)
+        : 0;
+    if (s === 0) return true;
+    const last = typeof lastKickMs === "number" && Number.isFinite(lastKickMs) ? lastKickMs : 0;
+    const now = typeof nowMs === "number" && Number.isFinite(nowMs) ? nowMs : Date.now();
+    const interval = Math.min(15_000 * Math.pow(2, s), 300_000);
+    return now - last >= interval;
+  } catch {
+    return false;
+  }
+}

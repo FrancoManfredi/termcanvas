@@ -31,7 +31,7 @@ import {
   type AgentStage,
 } from "../agentLoader";
 import { resolveFactoryAgentsDir } from "./agentFileRoutes";
-import { opencodeServerManager } from "../../opencodeServerManager";
+import { opencodeServerManager, ensureAgentTurnClient } from "../../opencodeServerManager";
 import { toolsetFromList, type Toolset } from "../../runner/toolPolicy";
 import { workItemStore } from "../../workItem/workItemStore";
 import { promptInSessionWithCost } from "../../cost/promptWithCost";
@@ -378,6 +378,9 @@ async function runHookLlm(agent: HookAgentDef, ctx: HookContext): Promise<HookRe
     ...(sessionId ? { sessionId } : {}),
     ...(detail ? { detail: detail.slice(0, 500) } : {}),
   });
+  // Turno con config fresca: singleton si sigue vigente; server scopeado
+  // recién nacido si la config de agentes cambió (fix PLATANO fuera del engine).
+  let closeTurn: () => void = () => {};
   try {
     let client: {
       session: {
@@ -386,13 +389,15 @@ async function runHookLlm(agent: HookAgentDef, ctx: HookContext): Promise<HookRe
       };
     };
     try {
-      client = (await opencodeServerManager.ensureClient()) as unknown as typeof client;
+      const turn = await ensureAgentTurnClient();
+      client = turn.client as unknown as typeof client;
+      closeTurn = turn.close;
     } catch {
       const existing = opencodeServerManager.getClient() as unknown as typeof client | null;
       if (!existing) return done("error", "opencode server no disponible");
       client = existing;
     }
-    const model = agent.model ?? ctx.modelRef ?? { providerID: "opencode-go", modelID: "muse-spark-1.2-contributor" };
+    const model = agent.model ?? ctx.modelRef ?? { providerID: "opencode-go", modelID: "muse-spark-1.3-contributor" };
     const promptText = buildHookPrompt(agent, ctx);
     const directory = path.resolve(ctx.worktreePath);
     const title = `Hook ${agent.stage}/${agent.name} ${ctx.workItemId}`;
@@ -478,6 +483,13 @@ async function runHookLlm(agent: HookAgentDef, ctx: HookContext): Promise<HookRe
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return done("error", `hook throw: ${msg.slice(0, 160)}`);
+  } finally {
+    // Teardown del server efímero del turno (no-op si corrió en el singleton).
+    try {
+      closeTurn();
+    } catch {
+      // best-effort
+    }
   }
 }
 

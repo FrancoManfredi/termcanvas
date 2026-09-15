@@ -73,13 +73,74 @@ export class WorkflowRuntime {
     return this.launch(loaded, params);
   }
 
+  /** Raíz del proyecto con la que este runtime resuelve workflows. */
+  get repoRoot(): string {
+    return this.opts.repoRoot;
+  }
+
+  /**
+   * Orden real de nodos del workflow (para el stepper del panel). Tolerante:
+   * workflow inexistente/roto → [] (el panel cae al stepper legacy).
+   */
+  getWorkflowNodeIds(name: string): string[] {
+    try {
+      const loaded = loadWorkflow(name, { repoRoot: this.opts.repoRoot });
+      // F16: los hijos de loop_group se proyectan APLANADOS con su id
+      // namespaced (`build.implement`), igual que `run.nodes` y los eventos:
+      // el stepper y Agent Sessions muestran las etapas reales del loop.
+      const ids: string[] = [];
+      for (const node of loaded.def.nodes) {
+        if (node.loop_group) {
+          for (const sub of node.loop_group.nodes) {
+            ids.push(`${node.id}.${sub.id}`);
+            if (ids.length >= 50) break;
+          }
+        } else {
+          ids.push(node.id);
+        }
+        if (ids.length >= 50) break;
+      }
+      return ids.slice(0, 50);
+    } catch {
+      return [];
+    }
+  }
+
   async resume(runId: string): Promise<WorkflowRun> {
     const existing = this.store.load(runId);
     if (!existing) throw new Error(`run "${runId}" no existe`);
     const loaded = loadWorkflow(existing.workflow, {
       repoRoot: this.opts.repoRoot,
     });
-    return this.launch(loaded, {}, runId);
+    // El cwd persistido del run manda sobre el default del runtime: un resume
+    // no debe re-caer al proyecto del daemon (bug run #125: implementer
+    // resumido arrancó en termcanvas en vez del worktree del issue).
+    const persistedCwd =
+      typeof existing.cwd === "string" && existing.cwd.trim().length > 0
+        ? existing.cwd
+        : undefined;
+    return this.launch(loaded, persistedCwd ? { cwd: persistedCwd } : {}, runId);
+  }
+
+  /**
+   * Reanuda un run que quedó `running`/`pending` huérfano tras un reinicio
+   * del daemon (la promesa del gate/abort murió con el proceso). Marca el
+   * estado persistido como interrumpido y delega en `resume` (el executor
+   * salta nodos completados y re-levanta el gate pendiente). Un run
+   * efectivamente activo en ESTE proceso se devuelve tal cual (no-op).
+   */
+  async resumeInterrupted(runId: string): Promise<WorkflowRun> {
+    const existing = this.store.load(runId);
+    if (!existing) throw new Error(`run "${runId}" no existe`);
+    if (this.active.has(runId)) return existing;
+    if (existing.status === "running" || existing.status === "pending") {
+      this.store.save({
+        ...existing,
+        status: "failed",
+        error: "interrumpido por reinicio del daemon",
+      });
+    }
+    return this.resume(runId);
   }
 
   private async launch(

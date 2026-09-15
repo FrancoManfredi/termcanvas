@@ -185,7 +185,6 @@ export class ImplementService {
 
     // Acquire lock
     if (!workItemStore.acquireBuildingLock(id)) {
-      console.log(`[ImplementService] ${id} already handling Building — skip duplicate`);
       return null;
     }
 
@@ -295,15 +294,12 @@ export class ImplementService {
       } catch {}
 
       if (isF04) {
-        console.log(`[ImplementService] pact F04 ${id} keeping at Building for cancel window (mock, no auto-Complete)`);
         await new Promise((r) => setTimeout(r, 8000));
         const cur = workItemStore.get(id);
         if (!cur || cur.status !== "Building") {
-          console.log(`[ImplementService] pact F04 ${id} status changed to ${cur?.status} during hold, skip`);
           workItemStore.releaseBuildingLock(id);
           return cur ?? null;
         }
-        console.log(`[ImplementService] pact F04 ${id} still Building after hold — leaving for cancel`);
         workItemStore.releaseBuildingLock(id);
         return cur;
       } else {

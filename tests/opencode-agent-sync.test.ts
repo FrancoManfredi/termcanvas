@@ -1,5 +1,5 @@
-// P4/P5: factory/agents/<name>/agent.md → agentes opencode reales.
-// El generador es puro y determinista; el sync a disco se prueba en temp.
+// F14: agentes INLINE en el config del server efímero (sin espejos en disco).
+// El builder es puro y determinista; la inyección se verifica por shape.
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -7,24 +7,26 @@ import os from "node:os";
 import path from "node:path";
 import { loadAgentDef } from "../headless-runtime/factory/agentLoader.ts";
 import {
-  buildOpencodeAgentMarkdown,
-  checkFactoryGlobalMirrorsInSync,
-  checkFactoryMirrorsInSync,
+  buildFactoryAgentsConfig,
+  buildOpencodeAgentConfig,
+  factoryAgentExists,
   isOpencodeModelRef,
-  mirrorExists,
+  listFactorySkills,
   parseAgentSkills,
   resetServerAgentsMemoForTests,
-  resolveGlobalAgentsDir,
-  resolveGlobalSkillsDir,
-  resolveOpencodeAgentPath,
+  resolveAgentModel,
+  resolveFactorySkillsDir,
+  resolveSessionAgent,
   serverKnowsAgent,
   sessionAgentArgs,
-  syncFactoryAgentsGlobal,
-  syncFactoryAgentsToOpencode,
-  syncFactorySkillsGlobal,
-  syncFactorySkillsToOpencode,
-  toolsToPermissionLines,
+  toolsToPermissionConfig,
 } from "../headless-runtime/factory/opencodeAgentSync.ts";
+import {
+  buildBaseServerConfig,
+  getRunningAgentsRevision,
+  mergeServerConfig,
+} from "../headless-runtime/opencodeServerManager.ts";
+import { getAgentDefsRevision } from "../headless-runtime/factory/agentLoader.ts";
 
 test("isOpencodeModelRef: provider/model sí, internos no", () => {
   assert.equal(isOpencodeModelRef("opencode-go/muse-spark-1.2-contributor"), true);
@@ -34,138 +36,168 @@ test("isOpencodeModelRef: provider/model sí, internos no", () => {
   assert.equal(isOpencodeModelRef("con espacios/x"), false);
 });
 
-test("toolsToPermissionLines: default-deny primero, allows después", () => {
-  assert.deepEqual(toolsToPermissionLines({}), [`  "*": deny`]);
-  assert.deepEqual(toolsToPermissionLines([]), [`  "*": deny`]);
-  assert.deepEqual(toolsToPermissionLines({ glob: true, grep: true }), [
-    `  "*": deny`,
-    "  glob: allow",
-    "  grep: allow",
-  ]);
-  // write se pliega en edit (opencode edit cubre write/edit/apply_patch), sin duplicar
-  assert.deepEqual(toolsToPermissionLines(["glob", "grep", "webfetch"]), [
-    `  "*": deny`,
-    "  glob: allow",
-    "  grep: allow",
-    "  webfetch: allow",
-  ]);
+test("toolsToPermissionConfig: default-deny, allows, write→edit, denies anidados", () => {
+  const empty = toolsToPermissionConfig({});
+  assert.equal(empty["*"], "deny");
+
+  const readOnly = toolsToPermissionConfig(["glob", "grep", "webfetch", "rayos-x"]);
+  assert.equal(readOnly["*"], "deny");
+  assert.equal(readOnly.glob, "allow");
+  assert.equal(readOnly.grep, "allow");
+  assert.equal(readOnly.webfetch, "allow");
+  assert.equal("rayos-x" in readOnly, false, "desconocida descartada");
+
+  const writer = toolsToPermissionConfig({ read: true, write: true, bash: true });
+  assert.equal(writer["*"], "deny");
+  const edit = writer.edit as Record<string, string>;
+  assert.equal(edit["*"], "allow", "write se pliega en edit");
+  assert.equal(edit["pnpm-lock.yaml"], "deny");
+  assert.equal("write" in writer, false, "sin allow plano duplicado");
+  const read = writer.read as Record<string, string>;
+  assert.equal(read["*"], "allow");
+  assert.equal(read[".env"], "deny");
+  const bash = writer.bash as Record<string, string>;
+  assert.equal(bash["*--watch*"], "deny");
+
+  assert.deepEqual(toolsToPermissionConfig(42), { "*": "deny" });
 });
 
-test("toolsToPermissionLines: edit/read/bash salen anidados con denies canónicos", () => {
-  const lines = toolsToPermissionLines(["read", "write", "edit", "bash", "glob", "grep", "webfetch"]);
-  assert.equal(lines[0], `  "*": deny`);
-  // read anidado: allow primero, denies después (en opencode gana la última)
-  const readIdx = lines.indexOf("  read:");
-  assert.ok(readIdx > 0, "read sale como mapa anidado");
-  assert.equal(lines[readIdx + 1], `    "*": allow`);
-  assert.ok(lines.includes(`    ".env": deny`), "secretos denegados en lectura");
-  // edit anidado con lockfiles y estado del orquestador
-  const editIdx = lines.indexOf("  edit:");
-  assert.ok(editIdx > readIdx, "orden de input preservado");
-  assert.equal(lines[editIdx + 1], `    "*": allow`);
-  assert.ok(lines.includes(`    "pnpm-lock.yaml": deny`));
-  assert.ok(lines.includes(`    ".agents/factory/**": deny`));
-  assert.ok(!lines.includes("  edit: allow"), "sin allow plano duplicado");
-  // bash anidado con patrones anti-cuelgue
-  const bashIdx = lines.indexOf("  bash:");
-  assert.ok(bashIdx > editIdx);
-  assert.ok(lines.includes(`    "*--watch*": deny`));
-  assert.ok(lines.includes(`    "npm run dev*": deny`));
-  // planos sin denies
-  assert.ok(lines.includes("  glob: allow"));
-  assert.ok(lines.includes("  webfetch: allow"));
-});
+test("buildOpencodeAgentConfig: primary, prompt=body, task deny, modelo válido", () => {
+  const def = {
+    name: "foreman",
+    frontmatter: {
+      description: "Decide el workflow.",
+      agentType: "FOREMAN",
+      mode: "primary",
+      model: "opencode-go/muse-spark-1.3-contributor",
+      tools: [],
+    },
+    body: "FOREMAN: reglas del rol.",
+  };
+  const cfg = buildOpencodeAgentConfig(def);
+  assert.ok(cfg);
+  assert.equal(cfg.mode, "primary");
+  assert.ok(String(cfg.description).length > 0);
+  assert.ok(String(cfg.prompt).includes("FOREMAN"), "el body viaja verbatim");
+  const permission = cfg.permission as Record<string, unknown>;
+  assert.equal(permission["*"], "deny");
+  assert.deepEqual(permission.task, { "*": "deny" });
+  assert.equal(cfg.model, "opencode-go/muse-spark-1.3-contributor");
 
-test("foreman: espejo deny-all con modelo válido y sin keys de factory", () => {
-  const def = loadAgentDef("foreman");
-  assert.ok(def);
-  const out = buildOpencodeAgentMarkdown(def);
-  assert.match(out, /^---\n/);
-  assert.ok(out.includes("mode: all"));
-  assert.ok(out.includes("model: opencode-go/muse-spark-1.2-contributor"));
-  assert.ok(out.includes(`"*": deny`));
-  assert.ok(!out.includes("agentType"), "agentType es vocabulario factory, no opencode");
-  assert.ok(!out.includes("tools:"), "tools crudo no se filtra al espejo (va permission)");
-  assert.ok(out.includes("building"), "el body viaja verbatim");
-  assert.ok(out.endsWith("\n"));
-});
-
-test("deny-all va ANTES que los allows (en opencode gana la última regla)", () => {
-  const def = loadAgentDef("triage");
-  assert.ok(def);
-  const out = buildOpencodeAgentMarkdown(def);
-  const denyIdx = out.indexOf(`"*": deny`);
-  const allowIdx = out.indexOf(`"*": allow`);
-  assert.ok(denyIdx >= 0 && allowIdx > denyIdx);
-});
-
-test("implement: espejo con webfetch + denies anidados (guardrails en el mirror)", () => {
-  const def = loadAgentDef("implement");
-  assert.ok(def);
-  const out = buildOpencodeAgentMarkdown(def);
-  assert.ok(out.includes("  webfetch: allow"), "webfetch llega al espejo");
-  assert.ok(out.includes(`    ".env": deny`), "secretos denegados");
-  assert.ok(out.includes(`    "**/result.json": deny`), "estado del orquestador denegado");
-  assert.ok(out.includes(`    "*--watch*": deny`), "anti-cuelgue en el espejo");
-  assert.ok(!out.includes("tools:"), "tools crudo no se filtra (regla existente)");
-});
-
-test("foreman: sin allows no hay bloques anidados (el deny-all ya cubre)", () => {
-  const def = loadAgentDef("foreman");
-  assert.ok(def);
-  const out = buildOpencodeAgentMarkdown(def);
-  assert.ok(out.includes(`"*": deny`));
-  assert.ok(!out.includes("  edit:"), "sin bloque edit sin allow");
-  assert.ok(!out.includes("  bash:"), "sin bloque bash sin allow");
-});
-
-test("review: modelo interno auto-disjoint se omite (opencode usaría su default)", () => {
-  const def = loadAgentDef("review");
-  assert.ok(def);
-  const out = buildOpencodeAgentMarkdown(def);
-  assert.ok(!out.match(/^model:/m), "la key model no debe emitirse para modelos internos");
-  assert.ok(out.includes("mode: all"), "review directo en picker");
-});
-
-test("buildOpencodeAgentMarkdown inválido → vacío, nunca lanza", () => {
-  assert.equal(buildOpencodeAgentMarkdown(null as never), "");
+  assert.equal(buildOpencodeAgentConfig(null as never), null);
   assert.equal(
-    buildOpencodeAgentMarkdown({ name: "x", frontmatter: { description: "", agentType: "FOREMAN", model: "", tools: {} }, body: "" } as never),
-    "",
+    buildOpencodeAgentConfig({
+      name: "x",
+      frontmatter: { description: "", agentType: "FOREMAN", model: "", tools: {} },
+      body: "b",
+    }),
+    null,
   );
 });
 
-test("resolveOpencodeAgentPath apunta a .opencode/agents/<name>.md", () => {
-  const p = resolveOpencodeAgentPath("foreman", "/repo");
-  assert.equal(p, path.join("/repo", ".opencode", "agents", "foreman.md"));
+test("review inline: skill allowlist deny-first y modelo fijo explícito", () => {
+  const def = loadAgentDef("review");
+  assert.ok(def);
+  const cfg = buildOpencodeAgentConfig(def);
+  assert.ok(cfg);
+  const permission = cfg.permission as Record<string, unknown>;
+  const skill = permission.skill as Record<string, string>;
+  assert.equal(skill["*"], "deny");
+  assert.equal(skill["code-review"], "allow");
+  assert.equal(skill["repo-conventions"], "allow");
+  assert.equal("ui-verification" in skill, false);
+  assert.equal(cfg.model, "opencode/big-pickle", "modelo fijo explícito");
 });
 
-test("sync a root temp: escribe válidos, skipea rotos, nunca lanza", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agents-sync-"));
+test("buildFactoryAgentsConfig: lee factory/agents real, todos primary", () => {
+  const agents = buildFactoryAgentsConfig();
+  for (const name of ["foreman", "triage", "spec", "implement", "review"]) {
+    const cfg = agents[name];
+    assert.ok(cfg, `${name} presente`);
+    assert.equal(cfg.mode, "primary", `${name} primary`);
+    assert.ok((cfg.permission as Record<string, unknown>).task, `${name} task deny`);
+  }
+});
+
+test("buildFactoryAgentsConfig: root temp con agente válido y roto", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agents-config-"));
   try {
-    const goodDir = path.join(root, "factory", "agents", "demo");
-    fs.mkdirSync(goodDir, { recursive: true });
+    const demo = path.join(root, "factory", "agents", "demo");
+    const roto = path.join(root, "factory", "agents", "roto");
+    fs.mkdirSync(demo, { recursive: true });
+    fs.mkdirSync(roto, { recursive: true });
     fs.writeFileSync(
-      path.join(goodDir, "agent.md"),
-      "---\ndescription: Demo agent\nagentType: VERIFY\nmode: subagent\nmodel: opencode-go/muse-spark-1.2-contributor\ntools: {read}\n---\n\nHace demo.\n",
+      path.join(demo, "agent.md"),
+      [
+        "---",
+        'description: "Hace demo."',
+        "agentType: VERIFY",
+        "mode: primary",
+        "model: opencode-go/muse-spark-1.2-contributor",
+        "tools: {read,glob,grep}",
+        "---",
+        "",
+        "Reglas de demo.",
+        "",
+      ].join("\n"),
       "utf-8",
     );
-    const badDir = path.join(root, "factory", "agents", "roto");
-    fs.mkdirSync(badDir, { recursive: true });
-    fs.writeFileSync(path.join(badDir, "agent.md"), "sin frontmatter", "utf-8");
-    const report = syncFactoryAgentsToOpencode(root);
-    assert.deepEqual(report.written, ["demo"]);
-    assert.equal(report.skipped.length, 1);
-    assert.equal(report.skipped[0].name, "roto");
-    const mirror = fs.readFileSync(path.join(root, ".opencode", "agents", "demo.md"), "utf-8");
-    assert.ok(mirror.includes("mode: subagent"));
-    assert.ok(mirror.includes("  read:"), "read sale anidado con denies");
-    assert.ok(mirror.includes(`    "*": allow`));
-    assert.ok(mirror.includes(`    ".env": deny`));
-    assert.ok(mirror.includes("Hace demo."));
+    fs.writeFileSync(path.join(roto, "agent.md"), "sin frontmatter", "utf-8");
+    const agents = buildFactoryAgentsConfig(root);
+    assert.ok(agents.demo, "demo entra");
+    assert.equal(agents.demo.mode, "primary");
+    assert.equal("roto" in agents, false, "roto se saltea sin romper");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("factoryAgentExists/sessionAgentArgs/resolveSessionAgent sin mirrors", () => {
+  assert.equal(factoryAgentExists("foreman"), true);
+  assert.equal(factoryAgentExists("no-existe-agent"), false);
+  assert.equal(factoryAgentExists("../foreman"), false, "anti-traversal");
+
+  assert.deepEqual(sessionAgentArgs("foreman"), { agent: "foreman" });
+  assert.deepEqual(sessionAgentArgs("no-existe-agent"), {});
+  assert.deepEqual(resolveSessionAgent("review"), { agent: "review" });
+  assert.equal(resolveSessionAgent("no-existe-agent"), null);
+});
+
+test("resolveFactorySkillsDir: factory/skills del repo o null", () => {
+  const real = resolveFactorySkillsDir();
+  assert.equal(typeof real, "string");
+  assert.ok(real !== null && fs.existsSync(real));
+  const vacio = fs.mkdtempSync(path.join(os.tmpdir(), "skills-dir-"));
+  try {
+    assert.equal(resolveFactorySkillsDir(vacio), null);
+    fs.mkdirSync(path.join(vacio, "factory", "skills"), { recursive: true });
+    assert.equal(resolveFactorySkillsDir(vacio), path.join(vacio, "factory", "skills"));
+  } finally {
+    fs.rmSync(vacio, { recursive: true, force: true });
+  }
+});
+
+test("buildBaseServerConfig inyecta agentes + skills; mergeServerConfig conserva agentes", () => {
+  const base = buildBaseServerConfig();
+  const agents = base.agent as Record<string, Record<string, unknown>>;
+  assert.ok(agents.foreman, "foreman inline");
+  assert.equal(agents.foreman.mode, "primary");
+  const basePermission = base.permission as Record<string, unknown>;
+  assert.ok(basePermission.bash, "guardrails base presentes");
+  assert.ok(basePermission.glob, "allow operativo del daemon presente");
+  const skills = base.skills as { paths?: string[] };
+  assert.ok(Array.isArray(skills.paths) && skills.paths.length > 0, "skills.paths inyectado");
+
+  const merged = mergeServerConfig({
+    permission: { skill: { "*": "deny", "code-review": "allow" } },
+    mcp: "demo",
+  });
+  const mergedAgents = merged.agent as Record<string, Record<string, unknown>>;
+  assert.ok(mergedAgents.foreman, "el server scopeado conserva los agentes");
+  const mergedPermission = merged.permission as Record<string, unknown>;
+  assert.ok(mergedPermission.bash, "guardrail base conservado");
+  assert.ok(mergedPermission.skill, "permission del scope fusionada");
+  assert.equal(merged.mcp, "demo");
 });
 
 test("serverKnowsAgent: confirma por app.agents, memoiza, nunca lanza", async () => {
@@ -199,234 +231,57 @@ test("parseAgentSkills: lista plana, solo nombres válidos", () => {
   assert.deepEqual(parseAgentSkills(42), []);
 });
 
-test("review: espejo emite permission.skill deny-first + allows (sin ui-verification)", () => {
-  const def = loadAgentDef("review");
-  assert.ok(def);
-  const out = buildOpencodeAgentMarkdown(def);
-  assert.ok(out.includes("  skill:"), "mapa skill presente");
-  const denyIdx = out.indexOf(`"*": deny`);
-  const skillIdx = out.indexOf("  skill:");
-  const allowIdx = out.indexOf('"code-review": allow');
-  assert.ok(skillIdx > denyIdx, "el mapa va después del deny top-level");
-  assert.ok(allowIdx > skillIdx, "allows dentro del mapa");
-  assert.ok(out.includes('"repo-conventions": allow'));
-  assert.ok(!out.includes('"ui-verification": allow'), "ui-verification removida del frontmatter");
+test("mergeServerConfig: skills.paths une scopeDir + factory/skills sin duplicar", () => {
+  const merged = mergeServerConfig({ skills: { paths: ["/scope/node-a"] } });
+  const paths = (merged.skills as { paths: string[] }).paths;
+  assert.equal(paths[0], "/scope/node-a", "el scope primero");
+  assert.ok(paths.length >= 2, "factory/skills presente");
+  assert.equal(new Set(paths).size, paths.length, "sin duplicados");
+  const onlyBase = mergeServerConfig({ permission: { skill: { "*": "deny" } } });
+  const basePaths = (onlyBase.skills as { paths: string[] }).paths;
+  assert.ok(basePaths.length >= 1, "sin scope de skills, la base no se pierde");
 });
 
-test("foreman: espejo sin mapa skill (deny top-level alcanza)", () => {
-  const def = loadAgentDef("foreman");
-  assert.ok(def);
-  const out = buildOpencodeAgentMarkdown(def);
-  assert.ok(!out.match(/^\s+skill:/m), "sin mapa skill");
-  assert.ok(out.includes("  task:"), "task deny presente");
-});
-
-test("los 5 agentes espejan mode all (picker directo)", () => {
-  for (const name of ["foreman", "triage", "spec", "implement", "review"]) {
-    const def = loadAgentDef(name);
-    assert.ok(def, name);
-    assert.equal(def.frontmatter.mode, "all", name);
-    const out = buildOpencodeAgentMarkdown(def);
-    assert.ok(out.includes("mode: all"), name);
-    assert.ok(out.includes("  task:"), `${name}: task deny presente`);
+test("listFactorySkills: catálogo real ordenado con nombre y descripción", () => {
+  const skills = listFactorySkills();
+  const names = skills.map((s) => s.name);
+  assert.ok(names.includes("code-review"), "code-review presente");
+  assert.ok(names.includes("repo-conventions"), "repo-conventions presente");
+  for (const skill of skills) {
+    assert.equal(typeof skill.description, "string");
+    assert.ok(skill.path.includes("factory"), "path dentro de factory");
   }
-});
-
-test("checkFactoryMirrorsInSync: detecta falta, drift y huérfanos", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agents-sync-check-"));
+  const emptyRoot = fs.mkdtempSync(path.join(os.tmpdir(), "skills-empty-"));
   try {
-    const agDir = path.join(root, "factory", "agents", "demo");
-    fs.mkdirSync(agDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(agDir, "agent.md"),
-      "---\ndescription: Demo\nagentType: VERIFY\nmode: all\nmodel: x/y\ntools: {read}\n---\n\nHace demo.\n",
-      "utf-8",
-    );
-    const skDir = path.join(root, "factory", "skills", "demo");
-    fs.mkdirSync(skDir, { recursive: true });
-    fs.writeFileSync(path.join(skDir, "SKILL.md"), "---\nname: demo\ndescription: d\n---\n\ncuerpo\n", "utf-8");
-    const r1 = checkFactoryMirrorsInSync(root);
-    assert.equal(r1.ok, false);
-    assert.ok(r1.diffs.some((d) => d.includes("falta")), "reporta faltantes");
-    syncFactoryAgentsToOpencode(root);
-    syncFactorySkillsToOpencode(root);
-    const r2 = checkFactoryMirrorsInSync(root);
-    assert.deepEqual(r2, { ok: true, diffs: [] });
-    fs.writeFileSync(path.join(root, ".opencode", "agents", "demo.md"), "tampered", "utf-8");
-    fs.writeFileSync(path.join(root, ".opencode", "agents", "fantasma.md"), "x", "utf-8");
-    const r3 = checkFactoryMirrorsInSync(root);
-    assert.equal(r3.ok, false);
-    assert.ok(r3.diffs.some((d) => d.includes("difiere")), "reporta drift");
-    assert.ok(r3.diffs.some((d) => d.includes("huérfano")), "reporta huérfanos");
+    assert.deepEqual(listFactorySkills(emptyRoot), []);
   } finally {
-    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(emptyRoot, { recursive: true, force: true });
   }
 });
 
-test("checkFactoryMirrorsInSync nunca lanza ante root inexistente", () => {
-  const r = checkFactoryMirrorsInSync(path.join(os.tmpdir(), "no-existe-def-xyz"));
-  assert.equal(r.ok, false);
-  assert.ok(r.diffs.length >= 1);
-});
-
-test("review real: mode all + task deny (picker directo, sin delegación)", () => {
-  const def = loadAgentDef("review");
-  assert.ok(def);
-  assert.equal(def.frontmatter.mode, "all");
-  const out = buildOpencodeAgentMarkdown(def);
-  assert.ok(out.includes("mode: all"));
-  assert.ok(out.includes("  task:"), "task deny presente");
-  assert.ok(out.includes("No delegués lectura en subagentes"), "anti-delegación en el body");
-});
-
-test("sync skills a dirs temp: escribe, respeta clobber y mismatch", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agents-sync-skills-"));
-  const out = fs.mkdtempSync(path.join(os.tmpdir(), "agents-sync-skills-out-"));
-  try {
-    const mk = (name: string, frontmatterName: string, body: string) => {
-      const dir = path.join(root, "factory", "skills", name);
-      fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(path.join(dir, "SKILL.md"), `---\nname: ${frontmatterName}\ndescription: d\n---\n\n${body}\n`, "utf-8");
-    };
-    mk("buena", "buena", "cuerpo");
-    mk("mala", "otro-nombre", "cuerpo");
-    const r1 = syncFactorySkillsToOpencode(root, out);
-    assert.deepEqual(r1.written, ["buena"]);
-    assert.ok(r1.skipped.some((s) => s.name === "mala"), "name≠dir se skipea");
-    assert.equal(
-      fs.readFileSync(path.join(out, "buena", "SKILL.md"), "utf-8").includes("cuerpo"),
-      true,
-      "espejo verbatim",
-    );
-    // Idempotente: segunda vez ya sincronizado.
-    const r2 = syncFactorySkillsToOpencode(root, out);
-    assert.deepEqual(r2.written, []);
-    // No-clobber: contenido ajeno se preserva y se reporta.
-    fs.writeFileSync(path.join(out, "buena", "SKILL.md"), "contenido ajeno", "utf-8");
-    const r3 = syncFactorySkillsToOpencode(root, out);
-    assert.ok(r3.skipped.some((s) => s.name === "buena" && s.reason.includes("no se pisa")));
-    assert.equal(fs.readFileSync(path.join(out, "buena", "SKILL.md"), "utf-8"), "contenido ajeno");
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-    fs.rmSync(out, { recursive: true, force: true });
+test("toolsToPermissionConfig v2: list/websearch/todowrite/lsp + write legacy plegado", () => {
+  const cfg = toolsToPermissionConfig(["read", "list", "websearch", "todowrite", "lsp", "write", "task"]);
+  assert.equal(cfg["*"], "deny");
+  for (const key of ["list", "websearch", "todowrite", "lsp"]) {
+    assert.equal(cfg[key], "allow", key);
   }
+  const editRule = cfg.edit as Record<string, string>;
+  assert.equal(editRule["*"], "allow", "write viejo pliega en edit");
+  assert.equal("task" in cfg, false, "task nunca se otorga a un agente factory");
+  assert.equal("write" in cfg, false, "write no queda como key propia");
 });
 
-test("resolveGlobalSkillsDir cuelga de .config/opencode/skills", () => {
-  assert.equal(
-    resolveGlobalSkillsDir("/home/falso"),
-    path.join("/home/falso", ".config", "opencode", "skills"),
-  );
+test("resolveAgentModel: provider/model v�lido s�, internos/ausentes/traversal no", () => {
+  const foreman = resolveAgentModel("foreman");
+  assert.ok(typeof foreman === "string" && foreman.includes("/"), "foreman pinea provider/model");
+  assert.equal(resolveAgentModel("review"), "opencode/big-pickle");
+  assert.equal(resolveAgentModel("no-existe-agent"), null);
+  assert.equal(resolveAgentModel("../foreman"), null);
+  assert.equal(resolveAgentModel(""), null);
+  assert.equal(resolveAgentModel(42), null);
 });
 
-test("sync skills global a home temp escribe", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agents-sync-skills-r-"));
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "agents-sync-skills-h-"));
-  try {
-    const dir = path.join(root, "factory", "skills", "demo");
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, "SKILL.md"), "---\nname: demo\ndescription: d\n---\n\ncuerpo\n", "utf-8");
-    const report = syncFactorySkillsGlobal(root, home);
-    assert.deepEqual(report.written, ["demo"]);
-    assert.ok(fs.existsSync(path.join(home, ".config", "opencode", "skills", "demo", "SKILL.md")));
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-    fs.rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("sync a root inexistente: skip, nunca lanza", () => {
-  const report = syncFactoryAgentsToOpencode(path.join(os.tmpdir(), "no-existe-xyz-123"));
-  assert.deepEqual(report.written, []);
-  assert.ok(report.skipped.length >= 1);
-});
-
-test("resolveGlobalAgentsDir apunta a ~/.config/opencode/agents", () => {
-  const dir = resolveGlobalAgentsDir("/home/falso");
-  assert.equal(dir, path.join("/home/falso", ".config", "opencode", "agents"));
-});
-
-test("checkFactoryGlobalMirrorsInSync: en sync, drift y raíz rota", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agents-sync-g-"));
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "agents-sync-gh-"));
-  try {
-    const dir = path.join(root, "factory", "agents", "demo");
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(
-      path.join(dir, "agent.md"),
-      "---\ndescription: Demo agent\nagentType: VERIFY\nmode: subagent\nmodel: x/y\ntools: {read}\n---\n\nHace demo.\n",
-      "utf-8",
-    );
-    // Vacío = todo falta.
-    const missing = checkFactoryGlobalMirrorsInSync(root, home);
-    assert.equal(missing.ok, false);
-    assert.ok(missing.diffs.some((d) => d.includes("demo.md") && d.includes("falta")));
-    // Tras sync global → en sync.
-    syncFactoryAgentsGlobal(root, home);
-    const synced = checkFactoryGlobalMirrorsInSync(root, home);
-    assert.deepEqual(synced, { ok: true, diffs: [] });
-    // Drift (el caso punto-12: edición a mano del espejo) → difiere.
-    fs.appendFileSync(path.join(home, ".config", "opencode", "agents", "demo.md"), "\n12. Cerrá con JSON.\n");
-    const drifted = checkFactoryGlobalMirrorsInSync(root, home);
-    assert.equal(drifted.ok, false);
-    assert.ok(drifted.diffs.some((d) => d.includes("difiere") && d.includes("sync:agents --global")));
-    // Huérfano se reporta.
-    fs.writeFileSync(path.join(home, ".config", "opencode", "agents", "huerfano.md"), "x\n");
-    const orphan = checkFactoryGlobalMirrorsInSync(root, home);
-    assert.ok(orphan.diffs.some((d) => d.includes("huérfano")));
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-    fs.rmSync(home, { recursive: true, force: true });
-  }
-});
-
-test("checkFactoryGlobalMirrorsInSync nunca lanza ante root inexistente", () => {
-  const out = checkFactoryGlobalMirrorsInSync(path.join(os.tmpdir(), "no-existe-xyz-123"));
-  assert.equal(out.ok, false);
-});
-
-test("mirrorExists: true con espejo en root temp, false sin él, nunca lanza", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agents-mirror-"));
-  try {
-    assert.equal(mirrorExists("demo", root), false);
-    const dir = path.join(root, ".opencode", "agents");
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(path.join(dir, "demo.md"), "---\ndescription: x\n---\nbody\n", "utf-8");
-    assert.equal(mirrorExists("demo", root), true);
-    assert.equal(mirrorExists("../demo", root), false);
-    assert.equal(mirrorExists("", root), false);
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("sessionAgentArgs: {} sin espejo (create queda byte-idéntico), nunca lanza", () => {
-  assert.deepEqual(sessionAgentArgs("agente-que-no-existe-xyz"), {});
-  assert.deepEqual(sessionAgentArgs(""), {});
-  assert.deepEqual(sessionAgentArgs(null as never), {});
-});
-
-test("sync global a home temp: escribe espejos, nunca lanza", () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), "agents-sync-root-"));
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "agents-sync-home-"));
-  try {
-    const goodDir = path.join(root, "factory", "agents", "demo");
-    fs.mkdirSync(goodDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(goodDir, "agent.md"),
-      "---\ndescription: Demo agent\nagentType: VERIFY\nmode: subagent\nmodel: x/y\ntools: {}\n---\n\nHace demo.\n",
-      "utf-8",
-    );
-    const report = syncFactoryAgentsGlobal(root, home);
-    assert.deepEqual(report.written, ["demo"]);
-    const mirror = fs.readFileSync(
-      path.join(home, ".config", "opencode", "agents", "demo.md"),
-      "utf-8",
-    );
-    assert.ok(mirror.includes("mode: subagent"));
-    assert.ok(mirror.includes(`"*": deny`));
-  } finally {
-    fs.rmSync(root, { recursive: true, force: true });
-    fs.rmSync(home, { recursive: true, force: true });
-  }
+test("revision de agentes: n�mero vigente y null sin singleton", () => {
+  assert.equal(typeof getAgentDefsRevision(), "number");
+  assert.equal(getRunningAgentsRevision(), null, "sin singleton no hay revisi�n sellada");
 });

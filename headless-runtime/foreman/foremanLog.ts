@@ -1,6 +1,6 @@
 /**
  * ForemanLogStore — ring buffer 500 + subscribe.
- * First-class log, no console.log suelto. Exposed via GET /foreman/logs.
+ * First-class log, sin salida suelta a consola. Exposed via GET /foreman/logs.
  */
 
 import type { ForemanLog, ForemanDecision } from "../../shared/types/foreman";

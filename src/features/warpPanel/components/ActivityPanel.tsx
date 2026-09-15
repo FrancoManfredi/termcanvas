@@ -6,6 +6,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from "react";
 import type {
@@ -26,6 +27,7 @@ import {
   IconPlay,
   IconRefresh,
   IconSession,
+  IconTrash,
 } from "./warpIcons";
 import { useActivity } from "../hooks/useActivity";
 import { activityLog } from "../activityDebug";
@@ -57,6 +59,14 @@ import {
   type ActivityActionKind,
 } from "./activityActions";
 import { openIssueInGitHub } from "./KanbanBoard";
+import {
+  IssueDiscardMenu,
+  type IssueDiscardTarget,
+} from "./IssueDiscardMenu";
+import { useNotificationStore } from "../../../stores/notificationStore";
+import { AgentProgressStages } from "./AgentProgressStages";
+import { AgentSessionsPanel } from "./AgentSessionsPanel";
+import { buildAgentTimeline } from "../adapters/agentTimeline";
 import { renderMarkdown } from "../../../utils/markdownClass";
 import { resolveBlockedGate } from "../adapters/liveIssues";
 
@@ -185,6 +195,14 @@ const AWAIT: Record<
     btnBg: "#065f46",
     btnHover: "#064e3b",
   },
+  "rerun": {
+    accent: "var(--wp-status-awaiting)",
+    bg: "rgba(168,85,247,0.07)",
+    border: "rgba(168,85,247,0.22)",
+    label: "#a855f7",
+    btnBg: "#065f46",
+    btnHover: "#064e3b",
+  },
 };
 
 const COL_COLOR: Record<IssueStatus, string> = {
@@ -220,10 +238,11 @@ const AWAITING_LABELS: Record<AwaitingAction, string> = {
   "review-ready": "Review Issue",
   "changes-requested": "Implement Fix",
   "merge-ready": "Merge PR",
-  "spec-approval": "Approve Spec",
+  "spec-approval": "Approve & Continue",
   "triage-respond": "Answer Questions",
   "ask-human": "Accept Review",
   "resume": "Retomar trabajo",
+  "rerun": "Re-run job",
 };
 
 // Markdown body styling for the always-dark detail pane (same GitHub-dark
@@ -258,13 +277,56 @@ export interface ActivityCardProps {
   issue: Issue;
   selected: boolean;
   onSelect: (id: number) => void;
+  /**
+   * Basura de la fila ("Descartar issue"): recibe el issue y las
+   * coordenadas del click; la fila no decide nada — el panel abre el
+   * popover solo para las secciones habilitadas.
+   */
+  onDiscardRequest?: (issue: Issue, x: number, y: number) => void;
 }
 
-/** Verbatim daemon stage text shown on in-progress rows (badge only). */
+/**
+ * Etapa EXACTA del engine (nodo actual, o el nodo del gate pendiente) con
+ * label corto de loop_group (`build.review` → `review`). Null sin engineRun:
+ * los jobs queued (routing) o legacy caen al stageLabel del daemon.
+ */
+export function factoryEngineStageText(factory: unknown): string | null {
+  try {
+    if (factory === null || typeof factory !== "object" || Array.isArray(factory)) {
+      return null;
+    }
+    const f = factory as { engineRun?: unknown; engineGateNodeId?: unknown };
+    const run = f.engineRun;
+    if (run === null || typeof run !== "object" || Array.isArray(run)) {
+      return null;
+    }
+    const gate =
+      typeof f.engineGateNodeId === "string" && f.engineGateNodeId.trim() !== ""
+        ? f.engineGateNodeId.trim()
+        : null;
+    const current = (run as { currentNodeId?: unknown }).currentNodeId;
+    const currentNode =
+      typeof current === "string" && current.trim() !== "" ? current.trim() : null;
+    const raw = gate ?? currentNode;
+    if (raw === null) return null;
+    const leaf = raw.includes(".") ? raw.slice(raw.lastIndexOf(".") + 1) : raw;
+    return leaf !== "" ? leaf : raw;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Stage text de la fila in-progress: el nodo EXACTO del engine manda (el
+ * daemon legacy queda en "Building" todo el loop); sin engineRun cae al
+ * stageLabel/stage verbatim del daemon.
+ */
 export function activityFactoryStageText(issue: Issue): string | null {
   try {
     const v = (issue as { factory?: unknown }).factory;
     if (v === null || typeof v !== "object" || Array.isArray(v)) return null;
+    const engine = factoryEngineStageText(v);
+    if (engine !== null) return engine;
     const label = (v as { stageLabel?: unknown }).stageLabel;
     if (typeof label === "string" && label.trim() !== "") return label.trim();
     const stage = (v as { stage?: unknown }).stage;
@@ -272,6 +334,29 @@ export function activityFactoryStageText(issue: Issue): string | null {
     return null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Secciones donde la fila muestra la basura de "Descartar issue": In
+ * Progress, Awaiting You y Ready to Merge. En Pending no hay nada que
+ * descartar y en Done el trabajo ya se mergeó (borrarlo destruiría
+ * evidencia). Exportado para tests offline.
+ */
+export const DISCARDABLE_SECTIONS: readonly IssueStatus[] = [
+  "in-progress",
+  "awaiting",
+  "ready",
+];
+
+export function isDiscardableSection(status: unknown): boolean {
+  try {
+    return (
+      typeof status === "string" &&
+      (DISCARDABLE_SECTIONS as readonly string[]).includes(status)
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -296,6 +381,7 @@ export function isSameActivityCardProps(
   try {
     if (prev.selected !== next.selected) return false;
     if (prev.onSelect !== next.onSelect) return false;
+    if (prev.onDiscardRequest !== next.onDiscardRequest) return false;
     const a = prev.issue;
     const b = next.issue;
     if (a === b) return true;
@@ -472,10 +558,12 @@ function ColumnsLayout({
   issues,
   selectedId,
   onSelect,
+  onDiscardRequest,
 }: {
   issues: Issue[];
   selectedId: number | null;
   onSelect: (id: number) => void;
+  onDiscardRequest?: (issue: Issue, x: number, y: number) => void;
 }) {
   try {
     const counts = COLUMNS.map(
@@ -564,6 +652,7 @@ function ColumnsLayout({
                   issue={issue}
                   selected={selectedId === issue.id}
                   onSelect={onSelect}
+                  onDiscardRequest={onDiscardRequest}
                 />
               ))}
               {colIssues.length === 0 && (
@@ -608,6 +697,84 @@ export default function ActivityPanel({
   const closeTimer = useRef<number | null>(null);
   const selected =
     deferredIssues.find((i) => i.id === (mountedId ?? selectedId)) ?? null;
+
+  // ── Descartar issue (basura de la fila) ─────────────────────────────────
+  // Icono de basura en In Progress / Awaiting You / Ready to Merge: cancela
+  // todo lo que esté en curso y borra cada job linkeado (PR, rama, worktree,
+  // jobs + artefactos del run). El ISSUE no se elimina — al quedar sin
+  // jobs/PR la derivación lo devuelve a Pending para ser retomado.
+  const [menuTarget, setMenuTarget] = useState<IssueDiscardTarget | null>(
+    null,
+  );
+  const [menuBusy, setMenuBusy] = useState(false);
+  const closeIssueMenu = useCallback(() => {
+    setMenuTarget(null);
+    setMenuBusy(false);
+  }, []);
+  const handleDiscardRequest = useCallback(
+    (issue: Issue, x: number, y: number) => {
+      if (!isDiscardableSection(issue.status)) return;
+      setMenuBusy(false);
+      setMenuTarget({
+        issueNumber: issue.id,
+        title: issue.title,
+        x,
+        y,
+        ...(typeof issue.url === "string" ? { url: issue.url } : {}),
+        ...(typeof issue.worktreePath === "string"
+          ? { worktreePath: issue.worktreePath }
+          : {}),
+      });
+    },
+    [],
+  );
+  const handleDiscardIssue = useCallback(() => {
+    const target = menuTarget;
+    if (target === null || menuBusy) return;
+    // Lista fresca al momento de la acción (sin suscripción del panel al
+    // poll: el snapshot pudo cambiar desde que se abrió el menú).
+    let jobs: unknown[] = [];
+    try {
+      const items = useWorkItemStore.getState().workItems;
+      jobs = Array.isArray(items) ? items : [];
+    } catch {
+      jobs = [];
+    }
+    setMenuBusy(true);
+    void invokeActivityAction("discard-issue", target.issueNumber, undefined, {
+      factoryJobs: jobs,
+      issueUrl: target.url,
+      worktreePath: target.worktreePath,
+      notify: (message: string) => {
+        try {
+          useNotificationStore
+            .getState()
+            .notify(message.startsWith("Could not") ? "error" : "info", message);
+        } catch {
+          // notify best-effort: el cierre del menú no depende del toast
+        }
+      },
+    }).finally(() => closeIssueMenu());
+  }, [menuTarget, menuBusy, closeIssueMenu]);
+  // Cierre del menú: click afuera (el menú corta su propio mousedown),
+  // Escape, scroll y resize.
+  useEffect(() => {
+    if (menuTarget === null) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") closeIssueMenu();
+    };
+    const onOutside = () => closeIssueMenu();
+    window.addEventListener("mousedown", onOutside);
+    window.addEventListener("keydown", onKeyDown);
+    window.addEventListener("scroll", onOutside, true);
+    window.addEventListener("resize", onOutside);
+    return () => {
+      window.removeEventListener("mousedown", onOutside);
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("scroll", onOutside, true);
+      window.removeEventListener("resize", onOutside);
+    };
+  }, [menuTarget, closeIssueMenu]);
 
   const renderCountRef = useRef(0);
   renderCountRef.current += 1;
@@ -789,6 +956,7 @@ export default function ActivityPanel({
             issues={deferredIssues}
             selectedId={selectedId}
             onSelect={handleSelect}
+                onDiscardRequest={handleDiscardRequest}
           />
         ) : (
           <div
@@ -807,6 +975,7 @@ export default function ActivityPanel({
                 issues={deferredIssues.filter((i) => i.status === col.id)}
                 selectedId={selectedId}
                 onSelect={handleSelect}
+            onDiscardRequest={handleDiscardRequest}
               />
             ))}
           </div>
@@ -830,6 +999,15 @@ export default function ActivityPanel({
           <IssueDetail issue={selected} onClose={closeDetail} />
         </div>
       )}
+
+      {/* ── Issue context menu (right-click en la fila) ── */}
+      {menuTarget !== null && (
+        <IssueDiscardMenu
+          target={menuTarget}
+          busy={menuBusy}
+          onDiscard={handleDiscardIssue}
+        />
+      )}
     </div>
   );
 }
@@ -842,12 +1020,14 @@ function KanbanColumn({
   issues,
   selectedId,
   onSelect,
+  onDiscardRequest,
 }: {
   status: IssueStatus;
   label: string;
   issues: Issue[];
   selectedId: number | null;
   onSelect: (id: number) => void;
+  onDiscardRequest?: (issue: Issue, x: number, y: number) => void;
 }) {
   const [collapsed, setCollapsed] = useState(status === "done");
   const accent = COL_COLOR[status];
@@ -1066,6 +1246,7 @@ function KanbanColumn({
                 issue={issue}
                 selected={selectedId === issue.id}
                 onSelect={onSelect}
+                onDiscardRequest={onDiscardRequest}
               />
             ))
           )}
@@ -1080,12 +1261,81 @@ function KanbanColumn({
 // B1-parity memo guard: the 2.5s poll rebuilds every `Issue` object, so a
 // default shallow memo would never bail. `isSameActivityCardProps` compares
 // exactly the rendered fields — unchanged rows skip the render entirely.
+/**
+ * Basura de la fila: abre el popover de descarte del issue. Es un <button>
+ * real (la fila es role=button, no <button>, para poder anidarlo) y corta
+ * la propagación para no seleccionar la fila.
+ */
+function DiscardIconButton({
+  issue,
+  hov,
+  onRequest,
+}: {
+  issue: Issue;
+  hov: boolean;
+  onRequest?: (issue: Issue, x: number, y: number) => void;
+}) {
+  return (
+    <button
+      type="button"
+      title="Descartar issue — cancela y borra TODO (PR, rama, worktree, jobs); el issue queda en Pending"
+      aria-label={`Descartar issue #${issue.id}`}
+      onClick={(e) => {
+        e.stopPropagation();
+        e.preventDefault();
+        onRequest?.(issue, e.clientX, e.clientY);
+      }}
+      onMouseEnter={(e) => {
+        e.currentTarget.style.color = "#f85149";
+        e.currentTarget.style.background = "rgba(248,81,73,0.14)";
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.color = hov ? "#8a8a8a" : "#505050";
+        e.currentTarget.style.background = "transparent";
+      }}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        width: 22,
+        height: 22,
+        padding: 0,
+        borderRadius: 4,
+        border: "none",
+        background: "transparent",
+        color: hov ? "#8a8a8a" : "#505050",
+        cursor: "pointer",
+        flexShrink: 0,
+        transition: "color 80ms, background 80ms",
+      }}
+    >
+      <IconTrash size={12} />
+    </button>
+  );
+}
+
 const IssueCard = memo(function IssueCard({
   issue,
   selected,
   onSelect,
+  onDiscardRequest,
 }: ActivityCardProps) {
   const [hov, setHov] = useState(false);
+  // Basura de la fila: solo en las secciones habilitadas (In Progress /
+  // Awaiting You / Ready to Merge) y cuando el panel ofrece la acción.
+  const canDiscard =
+    isDiscardableSection(issue.status) && onDiscardRequest !== undefined;
+  // La fila dejó de ser <button> para poder anidar la basura (button dentro
+  // de button es HTML inválido): role=button + teclado equivalente.
+  const handleRowKeyDown = useCallback(
+    (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        onSelect(issue.id);
+      }
+    },
+    [onSelect, issue.id],
+  );
   // Transition-shape guards: a junk awaiting/status arriving on the
   // review→awaiting flip degrades to honest-empty (no pill, neutral dot)
   // instead of throwing on map lookups. In-progress phase pills were
@@ -1117,10 +1367,13 @@ const IssueCard = memo(function IssueCard({
   // (green PR icon), nothing else.
   if (issue.status === "ready") {
     return (
-      <button
+      <div
+        role="button"
+        tabIndex={0}
         aria-pressed={selected}
         aria-label={`Issue #${issue.id}: ${issue.title}`}
         onClick={() => onSelect(issue.id)}
+        onKeyDown={handleRowKeyDown}
         onMouseEnter={() => setHov(true)}
         onMouseLeave={() => setHov(false)}
         style={{
@@ -1226,6 +1479,9 @@ const IssueCard = memo(function IssueCard({
               </span>
             </span>
           )}
+        {canDiscard && (
+          <DiscardIconButton issue={issue} hov={hov} onRequest={onDiscardRequest} />
+        )}
         <svg
           width="10"
           height="10"
@@ -1245,15 +1501,18 @@ const IssueCard = memo(function IssueCard({
             strokeLinejoin="round"
           />
         </svg>
-      </button>
+      </div>
     );
   }
 
   return (
-    <button
+    <div
+      role="button"
+      tabIndex={0}
       aria-pressed={selected}
       aria-label={`Issue #${issue.id}: ${issue.title}`}
       onClick={() => onSelect(issue.id)}
+      onKeyDown={handleRowKeyDown}
       onMouseEnter={() => setHov(true)}
       onMouseLeave={() => setHov(false)}
       style={{
@@ -1369,55 +1628,40 @@ const IssueCard = memo(function IssueCard({
         {issue.title}
       </span>
 
-      {/* Exact factory stage badge (in-progress only, orange section
-          styling): the verbatim daemon stage (Foreman / Triage / Building /
-          Review / …). Absent without a linked factory job (honest-empty). */}
+      {/* Exact stage badge (in-progress only, orange section styling): the
+          engine node when a run exists (implement/verify/review), else the
+          verbatim daemon stage. Absent without a linked factory job. */}
       {issue.status === "in-progress" &&
         (() => {
-          try {
-            const v = (issue as { factory?: unknown }).factory;
-            if (v === null || typeof v !== "object" || Array.isArray(v)) {
-              return null;
-            }
-            const label = (v as { stageLabel?: unknown }).stageLabel;
-            const stage = (v as { stage?: unknown }).stage;
-            const text =
-              typeof label === "string" && label.trim() !== ""
-                ? label.trim()
-                : typeof stage === "string" && stage.trim() !== ""
-                  ? stage.trim()
-                  : null;
-            if (text === null) return null;
-            return (
+          const text = activityFactoryStageText(issue);
+          if (text === null) return null;
+          return (
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+                padding: "1px 6px",
+                borderRadius: 3,
+                flexShrink: 0,
+                background: "rgba(245,158,11,0.07)",
+                border: "1px solid rgba(245,158,11,0.22)",
+                fontFamily: "var(--wp-font-mono)",
+                fontSize: 9,
+                color: "#fbbf24",
+              }}
+            >
               <span
                 style={{
-                  display: "inline-flex",
-                  alignItems: "center",
-                  gap: 4,
-                  padding: "1px 6px",
-                  borderRadius: 3,
-                  flexShrink: 0,
-                  background: "rgba(245,158,11,0.07)",
-                  border: "1px solid rgba(245,158,11,0.22)",
-                  fontFamily: "var(--wp-font-mono)",
-                  fontSize: 9,
-                  color: "#fbbf24",
+                  width: 4,
+                  height: 4,
+                  borderRadius: "50%",
+                  background: "#f59e0b",
                 }}
-              >
-                <span
-                  style={{
-                    width: 4,
-                    height: 4,
-                    borderRadius: "50%",
-                    background: "#f59e0b",
-                  }}
-                />
-                {text}
-              </span>
-            );
-          } catch {
-            return null;
-          }
+              />
+              {text}
+            </span>
+          );
         })()}
 
       {/* Awaiting pill — compact (review-ready never shows: the
@@ -1598,6 +1842,12 @@ const IssueCard = memo(function IssueCard({
         </span>
       )}
 
+      {/* Basura "Descartar issue" (secciones habilitadas): visible y sutil;
+          roja al hover. La fila ya no es <button>, así que se puede anidar. */}
+      {canDiscard && (
+        <DiscardIconButton issue={issue} hov={hov} onRequest={onDiscardRequest} />
+      )}
+
       {/* Chevron */}
       <svg
         width="10"
@@ -1618,7 +1868,7 @@ const IssueCard = memo(function IssueCard({
           strokeLinejoin="round"
         />
       </svg>
-    </button>
+    </div>
   );
 }, isSameActivityCardProps);
 
@@ -1798,6 +2048,21 @@ function IssueDetail({
       return effectiveReviewLabel(prLabels, prVerdict);
     } catch {
       return null;
+    }
+  })();
+  // C1 (fila merge-ready de un job factory Complete): el acepto humano que
+  // produjo el Complete es la aprobación; habilita Merge sin
+  // `review:aprobado` y rutea al camino factory-aware (repo del issue +
+  // close-out en el daemon). Un `Cancelled` terminal nunca aprueba.
+  const factoryMergeApproved = (() => {
+    try {
+      const v = (issue as { factory?: unknown }).factory;
+      if (v === null || typeof v !== "object" || Array.isArray(v)) {
+        return false;
+      }
+      return (v as { stage?: unknown }).stage === "Complete";
+    } catch {
+      return false;
     }
   })();
   const conflicted = (() => {
@@ -2063,6 +2328,8 @@ function IssueDetail({
           issue.awaitingAction === "merge-ready"
             ? linkedFactoryJobId(issue, factoryNeed)
             : null,
+        // C1: job Complete + PR abierto → Merge habilitado sin label.
+        factoryMergeApproved,
         // Explicit worktree cleanup (folder only, branch kept — the
         // daemon route semantics; the confirm copy must say exactly
         // that). Null = honest disabled (never a dead click). A
@@ -2178,6 +2445,8 @@ function IssueDetail({
           // delete (and the discard) target the same job when no gate
           // is waiting.
           factoryJobId: linkedFactoryJobId(issue, factoryNeed),
+          // C1: merge factory-aware (repo del issue + merge-notify al daemon).
+          factoryMergeApproved,
           factoryAwaitingKind: (() => {
             try {
               if (factoryNeed === null) return null;
@@ -2942,7 +3211,10 @@ function IssueDetail({
             fase que crea sesión nueva (foreman/triage/spec/building/review).
             Fases sin sesión aún → deshabilitadas; se habilitan solas cuando
             el daemon registra la sesión (poll 2.5s). Sin factory → nada. */}
-        <AgentSessionsBlock issue={issue} opencodeIssue={opencodeIssue} />
+              <AgentSessionsPanel
+                factory={issue.factory}
+                opencodeIssue={opencodeIssue}
+              />
       </div>
 
         {/* Factory resolve feedback — every resolve attempt leaves a
@@ -3445,6 +3717,41 @@ const FACTORY_FAMILY_BADGE: Record<string, { color: string }> = {
   cancelled: { color: "#f85149" },
 };
 
+/**
+ * Resumen honesto del run del engine: nodos completados + nodo actual
+ * (`triage ✓ → spec ✓ → approve …`), con sufijo terminal cuando el run
+ * falló/canceló. Null sin datos legibles (nunca inventa un nodo). Puro,
+ * nunca lanza.
+ */
+function engineRunSummary(factory: IssueFactoryJob): string | null {
+  try {
+    const run = factory.engineRun;
+    if (run === null || typeof run !== "object") return null;
+    const done = Array.isArray(run.completedNodes)
+      ? run.completedNodes.filter(
+          (n): n is string => typeof n === "string" && n !== "",
+        )
+      : [];
+    const current =
+      typeof run.currentNodeId === "string" && run.currentNodeId !== ""
+        ? run.currentNodeId
+        : null;
+    const parts = done.map((n) => `${n} ✓`);
+    if (current !== null && !done.includes(current)) parts.push(`${current} …`);
+    if (parts.length === 0) return null;
+    const status = typeof run.status === "string" ? run.status : "";
+    const suffix =
+      status === "failed"
+        ? " · failed"
+        : status === "cancelled"
+          ? " · cancelled"
+          : "";
+    return `${run.workflow}: ${parts.join(" → ")}${suffix}`;
+  } catch {
+    return null;
+  }
+}
+
 function FactoryStageTimeline({
   factory,
   started,
@@ -3546,13 +3853,23 @@ function FactoryStageTimeline({
     !cancelled && !factory.terminal && factory.stalled === true
       ? " · stalled — no daemon update for a while; the daemon may have restarted without resuming this job."
       : "";
+  // Etapa visible: nodo EXACTO del engine si hay run; si no, el stage legacy.
+  const stageText = factoryEngineStageText(factory) ?? factory.stageLabel;
   const caption = cancelled
     ? "Cancelled — the agent stopped without completing."
     : factory.terminal
       ? "Complete — the agent finished."
       : factory.family === "queued"
-        ? `${factory.stageLabel} · queued — waiting for the worker; the row stays here until the daemon picks it up.${stalledNote}`
-        : `${factory.stageLabel} · running.${stalledNote}`;
+        ? `${stageText} · queued — waiting for the worker; the row stays here until the daemon picks it up.${stalledNote}`
+        : `${stageText} · running.${stalledNote}`;
+  const engineSummary = engineRunSummary(factory);
+  // Panel nuevo (F2): etapas EXACTAS del workflow elegido; sin run todavía →
+  // solo Foreman (routing). Los lanes legacy quedan solo para historia
+  // terminal sin engineRun.
+  const hasEngineRun =
+    typeof factory.engineRun?.runId === "string" &&
+    factory.engineRun.runId !== "";
+  const timeline = buildAgentTimeline(factory);
   return (
     <div
       style={{
@@ -3600,6 +3917,9 @@ function FactoryStageTimeline({
           {familyText}
         </span>
       </div>
+      {hasEngineRun || !factory.terminal ? (
+        <AgentProgressStages timeline={timeline} />
+      ) : (
       <div style={{ display: "flex", alignItems: "flex-start" }}>
         {lanes.map((lane, i) => {
           const colors = FACTORY_STAGE_STYLE[lane] ?? {
@@ -3734,6 +4054,7 @@ function FactoryStageTimeline({
           );
         })}
       </div>
+      )}
       <p
         style={{
           fontFamily: "var(--wp-font-mono)",
@@ -3745,6 +4066,19 @@ function FactoryStageTimeline({
       >
         {caption}
       </p>
+      {engineSummary !== null ? (
+        <p
+          style={{
+            fontFamily: "var(--wp-font-mono)",
+            fontSize: 10,
+            color: "var(--wp-text-disabled)",
+            margin: "4px 0 0",
+            lineHeight: 1.6,
+          }}
+        >
+          engine · {engineSummary}
+        </p>
+      ) : null}
       {factory.jobId !== "" && (
         <p
           style={{
@@ -4039,14 +4373,109 @@ const AWAIT_DESC: Record<AwaitingAction, string> = {
   "merge-ready":
     "The PR has been approved and all checks pass. Merge when ready.",
   "spec-approval":
-    "The agent drafted a spec and waits for your approval before building.",
+    "The agent is waiting for your approval before continuing.",
   "triage-respond":
     "The agent needs answers before it can plan the work. Respond below.",
   "ask-human":
     "The reviewer could not decide alone. Accept to finish the job, or Reject to send it back to Building.",
   "resume":
-    "The app restarted mid-turn and the job was parked honestly. Resume re-drives the phase worker from where it stood.",
+    "The factory daemon restarted mid-turn and the job was parked honestly. Resume re-drives the phase worker from where it stood.",
+  "rerun":
+    "The engine run stopped without finishing. Re-run resumes it from where it stood (same phase, no work lost).",
 };
+
+export interface GateMessageParts {
+  /** Prosa del gate (mensaje sin el payload estructurado embebido). */
+  text: string;
+  /** `summary` del payload estructurado (si vino). */
+  summary: string | null;
+  /** `steps` del payload estructurado (strings, si vinieron). */
+  steps: string[];
+}
+
+/** Fin del objeto balanceado que abre en `start` (-1 si no cierra). Puro. */
+function balancedJsonEnd(text: string, start: number): number {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === "{") depth += 1;
+    else if (ch === "}") {
+      depth -= 1;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Los gates que interpolan `$node.output` de un nodo con `output_format`
+ * meten el JSON estructurado dentro del mensaje (ej. plan-approve-implement:
+ * `{summary, steps}`). Separa prosa + payload para renderizarlo legible en
+ * vez del JSON crudo. Junk/JSON sin summary|steps → `text` tal cual. Puro y
+ * tolerante: nunca lanza.
+ */
+export function parseGateMessage(message: unknown): GateMessageParts {
+  const plain = (text: string): GateMessageParts => ({
+    text,
+    summary: null,
+    steps: [],
+  });
+  try {
+    if (typeof message !== "string") return plain("");
+    const raw = message.trim();
+    if (raw === "") return plain("");
+    // Prueba cada `{` como inicio de payload: prosa con llaves sueltas no
+    // debe impedir parsear el objeto real que viene más adelante.
+    let searchFrom = 0;
+    for (;;) {
+      const start = raw.indexOf("{", searchFrom);
+      if (start === -1) return plain(raw);
+      const end = balancedJsonEnd(raw, start);
+      if (end !== -1) {
+        let parsed: unknown = null;
+        try {
+          parsed = JSON.parse(raw.slice(start, end + 1));
+        } catch {
+          parsed = null;
+        }
+        const obj =
+          parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+            ? (parsed as Record<string, unknown>)
+            : null;
+        const summary =
+          obj && typeof obj.summary === "string" && obj.summary.trim() !== ""
+            ? obj.summary.trim()
+            : null;
+        const steps =
+          obj && Array.isArray(obj.steps)
+            ? obj.steps
+                .filter((step): step is string => typeof step === "string")
+                .map((step) => step.trim())
+                .filter((step) => step !== "")
+            : [];
+        if (summary !== null || steps.length > 0) {
+          const text = `${raw.slice(0, start)}${raw.slice(end + 1)}`.trim();
+          return { text, summary, steps };
+        }
+      }
+      searchFrom = start + 1;
+    }
+  } catch {
+    return plain("");
+  }
+}
 
 // ─── Primary action button ────────────────────────────────────────────────────
 
@@ -4058,6 +4487,7 @@ const PRIMARY_KIND: Record<AwaitingAction, ActivityActionKind> = {
   "triage-respond": "triage-respond",
   "ask-human": "review-accept",
   "resume": "resume",
+  "rerun": "rerun",
 };
 
 function PrimaryBtn({
@@ -4114,6 +4544,7 @@ function PrimaryBtn({
       "triage-respond": <IconFix size={13} />,
       "ask-human": <IconMerge size={13} />,
       "resume": <IconAgent size={13} />,
+      "rerun": <IconAgent size={13} />,
     };
     return (
       <ActionBtn
@@ -4384,7 +4815,7 @@ function FactoryNeedBlock({
           }}
         >
           {kind === "spec-approval"
-            ? "Waiting on spec approval"
+            ? "Waiting on your approval"
             : kind === "triage-respond"
               ? "Waiting on your answers"
               : kind === "resume"
@@ -4403,20 +4834,53 @@ function FactoryNeedBlock({
             : ""}
         </span>
       </div>
-      {contextText !== "" && (
-        <p
-          style={{
+      {contextText !== "" &&
+        (() => {
+          // Mensaje con JSON estructurado embebido (plan/spec con
+          // output_format): prosa + summary + pasos como lista, nunca el JSON
+          // crudo.
+          const parts = parseGateMessage(contextText);
+          const proseStyle = {
             fontFamily: "var(--wp-font-sans)",
             fontSize: 12,
             color: "var(--wp-text-secondary)",
             lineHeight: 1.6,
             margin: "0 0 4px",
-            overflowWrap: "break-word",
-          }}
-        >
-          {contextText}
-        </p>
-      )}
+            overflowWrap: "break-word" as const,
+          };
+          return (
+            <div>
+              {parts.text !== "" && <p style={proseStyle}>{parts.text}</p>}
+              {parts.summary !== null && <p style={proseStyle}>{parts.summary}</p>}
+              {parts.steps.length > 0 && (
+                <ol
+                  style={{
+                    margin: "6px 0 0",
+                    paddingLeft: 18,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 6,
+                  }}
+                >
+                  {parts.steps.map((step, index) => (
+                    <li
+                      key={index}
+                      style={{
+                        fontFamily: "var(--wp-font-sans)",
+                        fontSize: 12,
+                        color: "var(--wp-text-secondary)",
+                        lineHeight: 1.6,
+                        overflowWrap: "break-word",
+                      }}
+                    >
+                      {step}
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </div>
+          );
+        })()}
       {kind === "triage-respond" && safeQuestions.length > 0 && (
         <ol
           style={{
@@ -4676,330 +5140,6 @@ function WorktreeCancelBtn({ onClick }: { onClick: () => void }) {
     >
       Cancel
     </button>
-  );
-}
-
-/**
- * Fases que crean una sesión nueva (espejo de `SESSION_ROLES_IN_ORDER` del
- * daemon — `headless-runtime/workItem/jobView.ts`). `implement` se muestra
- * como BUILDING para coincidir con el nombre del stage del pipeline.
- */
-const AGENT_SESSION_ROWS: readonly { role: string; label: string }[] = [
-  { role: "foreman", label: "FOREMAN" },
-  { role: "triage", label: "TRIAGE" },
-  { role: "spec", label: "SPEC" },
-  { role: "implement", label: "BUILDING" },
-  { role: "review", label: "REVIEW" },
-];
-
-/**
- * Agent sessions por fase — sección colapsable (mostrar/ocultar) con una
- * fila por fase que crea sesión nueva. Fases sin sesión aún → botón
- * deshabilitado (honesto, nunca un tab muerto); se habilita solo cuando el
- * daemon registra la sesión (poll 2.5s existente, cero polls nuevos).
- * Sin factory vinculada → nada (legacy canvas rows). Nunca lanza.
- */
-function AgentSessionsBlock({
-  issue,
-  opencodeIssue = null,
-}: {
-  issue: Issue;
-  /** Daemon opencode health when NOT healthy (why sessions are missing). */
-  opencodeIssue?: string | null;
-}) {
-  const [open, setOpen] = useState(true);
-  let hasFactory = false;
-  let byRole: Record<string, string> = {};
-  let declaredHookAgents: Array<{ name: string; stage: string }> = [];
-  try {
-    const v = (issue as { factory?: unknown }).factory;
-    if (v !== null && typeof v === "object" && !Array.isArray(v)) {
-      hasFactory = true;
-      const raw = (v as { sessions?: unknown }).sessions;
-      if (Array.isArray(raw)) {
-        const map: Record<string, string> = {};
-        for (const entry of raw) {
-          try {
-            if (entry === null || typeof entry !== "object") continue;
-            const role = (entry as { role?: unknown }).role;
-            const url = (entry as { sessionUrl?: unknown }).sessionUrl;
-            if (
-              typeof role === "string" &&
-              role.trim() !== "" &&
-              typeof url === "string" &&
-              url.trim() !== ""
-            ) {
-              map[role.trim()] = url.trim();
-            }
-          } catch {
-            // una entrada rota nunca aborta a las demás
-          }
-        }
-        byRole = map;
-      }
-      // Roster declarado (daemon `hookAgents`): agentes hook que existen
-      // aunque todavía no corrieron — fila deshabilitada desde el minuto 0.
-      const rawAgents = (v as { hookAgents?: unknown }).hookAgents;
-      if (Array.isArray(rawAgents)) {
-        for (const entry of rawAgents) {
-          try {
-            if (entry === null || typeof entry !== "object" || Array.isArray(entry)) continue;
-            const name = (entry as { name?: unknown }).name;
-            const stage = (entry as { stage?: unknown }).stage;
-            if (typeof name === "string" && name.trim() !== "") {
-              declaredHookAgents.push({
-                name: name.trim(),
-                stage: typeof stage === "string" ? stage.trim() : "",
-              });
-            }
-          } catch {
-            // una entrada rota nunca aborta a las demás
-          }
-        }
-      }
-    }
-  } catch {
-    hasFactory = false;
-    byRole = {};
-    declaredHookAgents = [];
-  }
-  if (!hasFactory) return null;
-  // Filas hook: TODOS los agentes declarados (nombre visible "Playwright
-  // Tester", deshabilitados si aún no tienen sesión) + los roles
-  // `hook:<name>` que el adapter anexa para hooks ya corridos pero que ya
-  // no están declarados (agente borrado). Detrás de las fijas, sin duplicar.
-  let hookRows: Array<{ role: string; label: string }> = [];
-  try {
-    const seen = new Set<string>();
-    for (const agent of declaredHookAgents) {
-      const role = `hook:${agent.name}`;
-      if (seen.has(role)) continue;
-      seen.add(role);
-      if (hookRows.length >= 10) break;
-      hookRows.push({
-        role,
-        label: (humanizeAgentName(agent.name) || agent.name).slice(0, 32),
-      });
-    }
-    const executedOnly = Object.keys(byRole)
-      .filter((role) => role.startsWith("hook:") && role.length > 5 && !seen.has(role))
-      .sort()
-      .slice(0, Math.max(0, 10 - hookRows.length))
-      .map((role) => ({
-        role,
-        label: (humanizeAgentName(role.slice(5)) || role.slice(5)).slice(0, 32),
-      }));
-    hookRows = [...hookRows, ...executedOnly];
-  } catch {
-    hookRows = [];
-  }
-  const allRows = [...AGENT_SESSION_ROWS, ...hookRows];
-  const available = allRows.filter(
-    (row) => byRole[row.role] !== undefined,
-  ).length;
-  return (
-    <div
-      style={{
-        marginTop: 12,
-        borderRadius: 7,
-        background: "var(--wp-bg-elevated)",
-        border: "1px solid var(--wp-border-subtle)",
-        overflow: "hidden",
-      }}
-    >
-      <button
-        type="button"
-        aria-expanded={open}
-          aria-label={`Agent sessions — ${available} of ${allRows.length} available`}
-        onClick={() => setOpen((v) => !v)}
-        style={{
-          width: "100%",
-          display: "flex",
-          alignItems: "center",
-          gap: 8,
-          padding: "10px 13px",
-          background: "transparent",
-          border: "none",
-          cursor: "pointer",
-        }}
-      >
-        <span
-          style={{
-            fontFamily: "var(--wp-font-mono)",
-            fontSize: 10,
-            fontWeight: 600,
-            color: "var(--wp-text-disabled)",
-            letterSpacing: "0.06em",
-            textTransform: "uppercase",
-            flex: 1,
-            textAlign: "left",
-          }}
-        >
-          Agent sessions
-        </span>
-        <span
-          style={{
-            fontFamily: "var(--wp-font-mono)",
-            fontSize: 10,
-            color: "var(--wp-text-disabled)",
-          }}
-        >
-          {`${available}/${allRows.length}`}
-        </span>
-        <span
-          style={{
-            display: "flex",
-            color: "var(--wp-text-disabled)",
-            transform: open ? "rotate(0deg)" : "rotate(-90deg)",
-            transition: "transform 140ms",
-          }}
-        >
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-            <path
-              d="M2 3.5L5 6.5L8 3.5"
-              stroke="currentColor"
-              strokeWidth="1.4"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </span>
-      </button>
-      {open && (
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 8,
-            padding: "4px 13px 12px",
-          }}
-        >
-          {available === 0 &&
-          typeof opencodeIssue === "string" &&
-          opencodeIssue !== "" ? (
-            <p
-              style={{
-                margin: 0,
-                padding: "7px 9px",
-                borderRadius: 5,
-                background: "rgba(248,81,73,0.07)",
-                border: "1px solid rgba(248,81,73,0.25)",
-                fontFamily: "var(--wp-font-mono)",
-                fontSize: 10,
-                lineHeight: 1.5,
-                color: "#f0a8a2",
-                wordBreak: "break-word",
-              }}
-            >
-              {`No live sessions — ${opencodeIssue}. The daemon starts the agent server on demand; fix the daemon/opencode binary and the sessions appear here.`}
-            </p>
-          ) : null}
-          {allRows.map((row) => {
-            const url = byRole[row.role];
-            const enabled =
-              typeof url === "string" && url !== "" && /^https?:\/\//i.test(url);
-            return (
-              <div
-                key={row.role}
-                style={{ display: "flex", alignItems: "center", gap: 12 }}
-              >
-                <span
-                  style={{
-                    fontFamily: "var(--wp-font-mono)",
-                    fontSize: 10,
-                    fontWeight: 600,
-                    color: enabled
-                      ? "var(--wp-text-secondary)"
-                      : "var(--wp-text-disabled)",
-                    letterSpacing: "0.06em",
-                    flex: 1,
-                  }}
-                >
-                  {row.label}
-                </span>
-                <button
-                  type="button"
-                  disabled={!enabled}
-                  title={
-                    enabled
-                      ? `Open the ${row.label} agent session in a new tab`
-                      : `The ${row.label} session is not available yet — it appears when the agent reaches this phase`
-                  }
-                  aria-label={
-                    enabled
-                      ? `View ${row.label} agent session`
-                      : `${row.label} agent session not available yet`
-                  }
-                  onClick={() => {
-                    if (!enabled) return;
-                    try {
-                      openIssueInGitHub(url);
-                    } catch {
-                      // apertura best-effort
-                    }
-                  }}
-                  style={{
-                    height: 28,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    gap: 6,
-                    padding: "0 12px",
-                    borderRadius: 6,
-                    border: "1px solid var(--wp-border)",
-                    background: enabled
-                      ? "var(--wp-bg)"
-                      : "transparent",
-                    color: enabled
-                      ? "var(--wp-text-secondary)"
-                      : "var(--wp-text-disabled)",
-                    fontFamily: "var(--wp-font-sans)",
-                    fontSize: 11,
-                    fontWeight: 600,
-                    letterSpacing: "0.02em",
-                    cursor: enabled ? "pointer" : "not-allowed",
-                    opacity: enabled ? 1 : 0.55,
-                    transition: "background 110ms, color 110ms",
-                  }}
-                  onMouseEnter={(e) => {
-                    if (enabled) {
-                      e.currentTarget.style.background =
-                        "var(--wp-bg-hover)";
-                      e.currentTarget.style.color =
-                        "var(--wp-text-primary)";
-                    }
-                  }}
-                  onMouseLeave={(e) => {
-                    if (enabled) {
-                      e.currentTarget.style.background = "var(--wp-bg)";
-                      e.currentTarget.style.color =
-                        "var(--wp-text-secondary)";
-                    }
-                  }}
-                >
-                  VIEW AGENT
-                  <svg
-                    width="11"
-                    height="11"
-                    viewBox="0 0 12 12"
-                    fill="none"
-                    aria-hidden="true"
-                  >
-                    <path
-                      d="M4 2.5H9.5V8M9.5 2.5L2.5 9.5"
-                      stroke="currentColor"
-                      strokeWidth="1.3"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
   );
 }
 

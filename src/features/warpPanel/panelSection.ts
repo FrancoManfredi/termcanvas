@@ -17,8 +17,10 @@ const VALID_PANEL_SECTIONS: readonly NavSection[] = [
   "issues",
   "activity",
   "agents",
+  "workflows",
   "context",
   "diagnostic",
+  "dependencies",
 ];
 
 export function isValidPanelSection(value: unknown): value is NavSection {
@@ -69,12 +71,16 @@ export function persistPanelSection(section: NavSection): void {
  *
  * Agents is config-only (no live jobs needed): pausing the shared 2.5s
  * `useWorkItemsPolling` loop there stops the shell re-render storm while
- * typing in AgentConfig (user-approved: up to ~10s stale is fine).
+ * typing in the Agents editor (user-approved: up to ~10s stale is fine).
+ * Workflows is a read-only mock view (no live jobs read), so it pauses too —
+ * pan/zoom must not fight a 2.5s setWorkItems storm.
+ * Dependencies is config-only like Agents (status on mount + manual
+ * Re-check; a running install must not fight the poll storm either).
  * Every other section keeps the live poll. Pure, offline-testable.
  */
 export function shouldEnableFactoryPoll(section: NavSection): boolean {
   try {
-    return section !== "agents";
+    return section !== "agents" && section !== "workflows" && section !== "dependencies";
   } catch {
     return true;
   }

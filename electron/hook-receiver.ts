@@ -95,12 +95,6 @@ export class HookReceiver {
           this.eventsReceived++;
           this.lastEventAt = new Date().toISOString();
 
-          if (isDev) console.log(
-            `[HookReceiver] ${parsed.hook_event_name} terminal=${parsed.terminal_id}` +
-            (parsed.tool_name ? ` tool=${parsed.tool_name}` : "") +
-            (parsed.session_id ? ` session=${parsed.session_id}` : "") +
-            (parsed.error ? ` error=${parsed.error}` : ""),
-          );
           this.onEvent(parsed as HookEvent);
         } catch (err) {
           this.parseErrors++;

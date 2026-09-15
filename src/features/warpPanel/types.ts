@@ -1,4 +1,3 @@
-import type { ReactNode } from "react";
 import type { CostSummary } from "../../../shared/types/workItem";
 
 /**
@@ -8,11 +7,12 @@ import type { CostSummary } from "../../../shared/types/workItem";
  * - figma .../src/data/kanban.ts (kanban board model)
  * - figma .../src/data/issues.ts (activity/issues model; IssuesPanel.tsx is
  *   NOT ported as a component, but ActivityPanel imports these types)
- * - figma .../src/components/AgentsPanel.tsx (Agent)
- * - figma .../src/components/AgentConfig.tsx (AgentConfigData, Automation)
  * - figma .../src/components/SidePanel.tsx (NavSection)
  * - figma .../src/components/KanbanBoard.tsx (ViewMode, moved here to break
  *   the Figma-only coupling ActivityPanel -> KanbanBoard)
+ *
+ * Agents: los shapes reales del daemon (`factory/agents/<name>/agent.md`)
+ * viven en `agents/agentDraft.ts`; acá solo el draft compartido.
  */
 
 /* ─── Shell / navigation ─────────────────────────────────────────────── */
@@ -21,8 +21,10 @@ export type NavSection =
   | "issues"
   | "activity"
   | "agents"
+  | "workflows"
   | "context"
-  | "diagnostic";
+  | "diagnostic"
+  | "dependencies";
 
 /** View toggle shared by KanbanBoard and ActivityPanel. */
 export type ViewMode = "columns" | "collapsible";
@@ -196,7 +198,8 @@ export type AwaitingAction =
   | "spec-approval"
   | "triage-respond"
   | "ask-human"
-  | "resume";
+  | "resume"
+  | "rerun";
 
 /**
  * Factory human-gate kind waiting on the linked daemon job (additive to the
@@ -213,7 +216,8 @@ export type FactoryAwaitingKind =
   | "spec-approval"
   | "triage-respond"
   | "ask-human"
-  | "resume";
+  | "resume"
+  | "rerun";
 
 /**
  * Human-gate detail attached to an Activity row whose linked factory job
@@ -286,11 +290,50 @@ export interface IssueFactoryJob {
     fallback?: boolean;
   };
   /**
+   * Avance del run oficial (engine `engineRun`): nodo actual + completados,
+   * proyectado por el daemon al poll item. Permite mostrar DÓNDE está el run
+   * (triage ✓ → spec ✓ → approve …), no solo el stage legacy. Ausente = job
+   * legacy o sin run (honesto, nunca inventado).
+   */
+  engineRun?: {
+    runId: string;
+    workflow: string;
+    status: string;
+    currentNodeId?: string | null;
+    completedNodes?: string[];
+    /**
+     * Orden real de nodos del workflow (stepper del panel). Ausente en jobs
+     * viejos → el panel cae al stepper legacy de lanes.
+     */
+    nodes?: string[];
+    /**
+     * Sesión OpenCode por nodo del run (`nodeId → sessionId`): Agent
+     * Sessions muestra filas dinámicas para workflows arbitrarios.
+     */
+    nodeSessions?: Record<string, string>;
+    /**
+     * Estado por nodo (`nodeId → pending|running|completed|failed|skipped|
+     * cancelled`): fuente del stepper y de las filas de Agent Sessions.
+     */
+    nodeStates?: Record<string, string>;
+    /**
+     * Agente real por nodo (`nodeId → nombre`): la fila muestra la identidad
+     * que efectivamente ejecuta la etapa (nunca el agente primario).
+     */
+    nodeAgents?: Record<string, string>;
+    startedAt?: string;
+  };
+  /**
+   * Nodo del gate humano pendiente (`engineGate.nodeId`): el stepper pinta
+   * esa etapa como `waiting-gate` en vez de `running`. Ausente = sin gate.
+   */
+  engineGateNodeId?: string;
+  /**
    * Phase sessions for the issue footer dropdown (one entry per role with
    * a registered session, phase order, daemon-built URLs). Absent/empty =
    * no dropdown (honest).
    */
-  sessions?: Array<{ role: string; sessionUrl: string }>;
+  sessions?: Array<{ role: string; sessionUrl: string; round?: number }>;
   /**
    * Corridas hook del job (daemon `hookRuns`, en orden de ejecución).
    * Maneja los chips del stepper bajo su lane. Las sesiones de hooks
@@ -417,58 +460,47 @@ export interface ActivityColumn {
   dimColor: string;
 }
 
-/* ─── Agents model (AgentsPanel.tsx + AgentConfig.tsx) ───────────────── */
+/* ─── Agents model (agents/ console) ─────────────────────────────────── */
 
-export type AgentStatus = "idle" | "running" | "error";
-
-export interface Agent {
-  id: string;
+/**
+ * Fila real de `GET /factory/agents`: lo que el índice muestra sin abrir el
+ * agente (metadata del frontmatter incluida). El detalle completo se carga
+ * con `getFactoryAgentFull`.
+ */
+export interface AgentSummary {
   name: string;
   description: string;
-  iconBg: string;
-  iconColor: string;
-  icon: ReactNode;
-  status?: AgentStatus;
-}
-
-export interface AgentMcp {
-  id: string;
-  name: string;
-  icon: string;
-  color: string;
-}
-
-export interface AgentSecret {
-  id: string;
-  key: string;
-  masked: string;
-}
-
-export interface Automation {
-  id: string;
-  trigger: string;
-  description: string;
-  enabled: boolean;
-}
-
-export interface AgentConfigData {
-  description: string;
-  mcps: AgentMcp[];
-  secrets: AgentSecret[];
-  harness: string;
+  agentType: string;
+  mode: string;
   model: string;
-  runner: string;
-  host: string;
+  /** Clave del set curado de íconos ("" = sin ícono, monograma). */
+  icon: string;
+  tools: string[];
+  skills: string[];
+  mcps: string[];
+  stage: string;
+  blocking: boolean;
+}
+
+/**
+ * Draft editable de `factory/agents/<name>/agent.md` (frontmatter gestionado
+ * + body). Solo campos que el engine consume de verdad; la UI oculta lo
+ * heredado (`agentType`, `mode`, `stage`, `blocking`) que el save gestiona
+ * interno (foreman único en archivo, primary/neutralización de hooks).
+ */
+export interface AgentDraft {
+  name: string;
+  description: string;
+  agentType: string;
+  /** `provider/model` o "" (sin pin: opencode usa su default). */
+  model: string;
+  /** Clave del set curado de íconos ("" = sin ícono, monograma). */
+  icon: string;
+  tools: string[];
+  /** Allowlist de skills (`factory/skills/<name>`). */
+  skills: string[];
+  /** Bundles MCP (`factory/mcps/<name>.json`). */
+  mcps: string[];
+  /** Body del agent.md: el system prompt real. */
   prompt: string;
-  automations: Automation[];
-  /**
-   * Frontmatter real del daemon (`factory/agents/<id>/agent.md`).
-   * Opcionales: ausentes = daemon inalcanzable o agente mock (offline).
-   * Cuando presentes, mandan sobre los seeds locales al guardar.
-   */
-  tools?: string[];
-  stage?: string;
-  blocking?: boolean;
-  mode?: string;
-  agentType?: string;
 }

@@ -1,234 +1,308 @@
-import { useCallback, useState } from "react";
-import type { Agent, AgentConfigData } from "../types";
-import type { AgentsAdapter } from "../adapters/types";
-import { mockAgentsAdapter, makeHookAgentCard } from "../adapters/mockAgents";
+/**
+ * useAgents — data layer del console de Agents.
+ *
+ * Fuente única: el daemon real (factoryClient). Sin mocks ni fallback que
+ * finja persistencia: si el daemon no está, la UI muestra un estado offline
+ * honesto con retry. Las mutaciones (save/create/delete) impactan en el
+ * próximo job: el daemon marca `agentDirty` y recicla el server efímero
+ * cuando no hay workers.
+ *
+ * Catálogos: skills (`GET /factory/skills`) y bundles MCP (`GET /factory/mcps`)
+ * se cargan al montar y se refrescan tras cada mutación.
+ */
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import type { AgentDraft, AgentSummary } from "../types";
+import type {
+  FactoryAgentCreateInput,
+  FactoryAgentFull,
+  FactoryMcpBundleListItem,
+  FactorySkillEntry,
+} from "../../../lib/factoryClient";
 import {
   createFactoryAgent,
+  createFactoryMcp,
   deleteFactoryAgent,
+  deleteFactoryMcp,
+  getFactoryAgentFull,
+  getFactoryMcp,
+  getFactorySkills,
   listFactoryAgents,
-  type FactoryAgentCreateInput,
+  listFactoryMcps,
+  saveFactoryAgentFull,
+  saveFactoryMcp,
 } from "../../../lib/factoryClient";
+import { draftToFrontmatter } from "../agents/agentDraft";
 
-export interface UseAgentsResult {
-  foreman: Agent;
-  agents: Agent[];
-  selectedAgentId: string | null;
-  selectedAgent: Agent | null;
-  selectedConfig: AgentConfigData | undefined;
-  selectAgent: (id: string | null) => void;
-  getConfig: (agentId: string) => AgentConfigData | undefined;
-  saveConfig: (
-    agentId: string,
-    patch: Partial<AgentConfigData>,
-  ) => AgentConfigData;
-  /** Alta en una pasada (daemon; offline → error honesto, nada inventado). */
-  createAgent: (input: FactoryAgentCreateInput) => Promise<{ ok: boolean; error?: string }>;
-  /** Baja (daemon; los core se rechazan). */
-  deleteAgent: (agentId: string) => Promise<{ ok: boolean; error?: string }>;
-  /** Fusiona la lista real del daemon (agentes creados fuera de los seeds). */
-  refreshAgents: () => Promise<void>;
-  creating: boolean;
-  agentsError: string | null;
+export type AgentsLoadState = "loading" | "ready" | "offline";
+
+export interface AgentsActionResult {
+  ok: boolean;
+  error?: string;
 }
 
-/**
- * Agent list + per-agent config state over an AgentsAdapter (Track B).
- * Server-shaped state (list, configs, saves) lives here; config tab/dirty
- * flags and tree expand state stay local to the T03 components.
- */
-export function useAgents(
-  adapter: AgentsAdapter = mockAgentsAdapter,
-): UseAgentsResult {
-  const [foreman] = useState<Agent>(() => adapter.getForeman());
-  const [seedAgents] = useState<Agent[]>(() => adapter.listSubAgents());
-  const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
-  const [configRevision, setConfigRevision] = useState<number>(0);
-  // Agentes fuera de los seeds (creados por daemon o fusionados por refresh).
-  const [extraAgents, setExtraAgents] = useState<Agent[]>([]);
-  const [extraConfigs, setExtraConfigs] = useState<Record<string, AgentConfigData>>({});
-  const [creating, setCreating] = useState<boolean>(false);
+export interface UseAgentsResult {
+  agents: AgentSummary[];
+  agentsState: AgentsLoadState;
+  agentsError: string | null;
+  refreshAgents: () => Promise<void>;
+  selectedName: string | null;
+  selectAgent: (name: string | null) => void;
+  full: FactoryAgentFull | null;
+  fullState: AgentsLoadState;
+  fullError: string | null;
+  reloadAgentFull: () => Promise<void>;
+  saveAgent: (name: string, draft: AgentDraft) => Promise<AgentsActionResult>;
+  createAgent: (input: FactoryAgentCreateInput) => Promise<AgentsActionResult & { name?: string }>;
+  deleteAgent: (name: string) => Promise<AgentsActionResult>;
+  skills: FactorySkillEntry[];
+  skillsError: string | null;
+  refreshSkills: () => Promise<void>;
+  mcps: FactoryMcpBundleListItem[];
+  mcpsError: string | null;
+  refreshMcps: () => Promise<void>;
+  loadMcp: (name: string) => Promise<AgentsActionResult & { servers?: Record<string, unknown> }>;
+  addMcp: (name: string, servers: Record<string, unknown>) => Promise<AgentsActionResult>;
+  updateMcp: (name: string, servers: Record<string, unknown>) => Promise<AgentsActionResult>;
+  removeMcp: (name: string) => Promise<AgentsActionResult>;
+}
+
+function truncateError(error: string | undefined): string {
+  return (error ?? "daemon inalcanzable").slice(0, 200);
+}
+
+export function useAgents(): UseAgentsResult {
+  const [agents, setAgents] = useState<AgentSummary[]>([]);
+  const [agentsState, setAgentsState] = useState<AgentsLoadState>("loading");
   const [agentsError, setAgentsError] = useState<string | null>(null);
+  const [selectedName, setSelectedName] = useState<string | null>(null);
+  const [full, setFull] = useState<FactoryAgentFull | null>(null);
+  const [fullState, setFullState] = useState<AgentsLoadState>("loading");
+  const [fullError, setFullError] = useState<string | null>(null);
+  const [skills, setSkills] = useState<FactorySkillEntry[]>([]);
+  const [skillsError, setSkillsError] = useState<string | null>(null);
+  const [mcps, setMcps] = useState<FactoryMcpBundleListItem[]>([]);
+  const [mcpsError, setMcpsError] = useState<string | null>(null);
 
-  // Read through the adapter on every render so saves are always visible.
-  // `configRevision` forces a re-render after saveConfig mutates the store.
-  void configRevision;
-
-  const agents: Agent[] = [...seedAgents];
-  for (const extra of extraAgents) {
-    if (!agents.some((a) => a.id === extra.id)) agents.push(extra);
-  }
-  const allAgents: Agent[] = [foreman, ...agents];
-  const selectedAgent: Agent | null =
-    selectedAgentId === null
-      ? null
-      : (allAgents.find((agent) => agent.id === selectedAgentId) ?? null);
-  const selectedConfig: AgentConfigData | undefined =
-    selectedAgentId === null
-      ? undefined
-      : adapter.getConfig(selectedAgentId);
-
-  const selectAgent = useCallback((id: string | null): void => {
-    setSelectedAgentId(id);
-  }, []);
-
-  const getConfig = useCallback(
-    (agentId: string): AgentConfigData | undefined =>
-      adapter.getConfig(agentId) ?? extraConfigs[agentId],
-    [adapter, extraConfigs],
-  );
-
-  const saveConfig = useCallback(
-    (
-      agentId: string,
-      patch: Partial<AgentConfigData>,
-    ): AgentConfigData => {
-      try {
-        const updated = adapter.saveConfig(agentId, patch);
-        setConfigRevision((revision) => revision + 1);
-        return updated;
-      } catch {
-        // Id fuera de los seeds (creado por daemon): store local del hook.
-        const current = extraConfigs[agentId];
-        if (!current) throw new Error(`Unknown agent id: ${agentId}`);
-        const updated = { ...current, ...patch };
-        setExtraConfigs((prev) => ({ ...prev, [agentId]: updated }));
-        setConfigRevision((revision) => revision + 1);
-        return updated;
-      }
-    },
-    [adapter, extraConfigs],
-  );
+  const fullCacheRef = useRef(new Map<string, FactoryAgentFull>());
+  const fullRequestRef = useRef(0);
 
   const refreshAgents = useCallback(async (): Promise<void> => {
-    try {
-      const res = await listFactoryAgents();
-      if (!res.ok) {
-        setAgentsError(res.error ?? "daemon inalcanzable");
-        return;
-      }
-      setAgentsError(null);
-      const known = new Set<string>(["foreman"]);
-      for (const a of [...seedAgents, ...extraAgents]) known.add(a.id);
-      const fresh: Agent[] = [];
-      const freshConfigs: Record<string, AgentConfigData> = {};
-      for (const item of res.data) {
-        if (known.has(item.name)) continue;
-        fresh.push(makeHookAgentCard(item.name, item.description || item.name));
-        freshConfigs[item.name] = {
-          description: item.description || item.name,
-          mcps: [],
-          secrets: [],
-          harness: "Warp",
-          model: "",
-          runner: "default",
-          host: "Warp hosted",
-          prompt: "",
-          automations: [],
-        };
-      }
-      if (fresh.length > 0) {
-        setExtraAgents((prev) => {
-          const ids = new Set(prev.map((a) => a.id));
-          return [...prev, ...fresh.filter((a) => !ids.has(a.id))];
-        });
-        setExtraConfigs((prev) => ({ ...freshConfigs, ...prev }));
-        setConfigRevision((revision) => revision + 1);
-      }
-    } catch (e) {
-      setAgentsError(e instanceof Error ? e.message.slice(0, 160) : String(e).slice(0, 160));
+    setAgentsState((prev) => (prev === "ready" ? prev : "loading"));
+    const res = await listFactoryAgents();
+    if (!res.ok) {
+      setAgentsState("offline");
+      setAgentsError(truncateError(res.error));
+      return;
     }
-    // Nota: seedAgents/extraAgents por closure quedan fijados por llamada;
-    // refresh se llama desde efectos puntuales, no en loops.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    setAgents(res.data);
+    setAgentsState("ready");
+    setAgentsError(null);
+    setSelectedName((prev) => {
+      if (prev && res.data.some((a) => a.name === prev)) return prev;
+      return res.data.length > 0 ? res.data[0].name : null;
+    });
   }, []);
 
-  const createAgent = useCallback(
-    async (input: FactoryAgentCreateInput): Promise<{ ok: boolean; error?: string }> => {
-      setCreating(true);
-      setAgentsError(null);
-      try {
-        const res = await createFactoryAgent(input);
-        if (!res.ok) {
-          setAgentsError(res.error ?? "no se pudo crear el agente");
-          return { ok: false, error: res.error ?? "no se pudo crear el agente" };
-        }
-        const created = res.data;
-        const card = makeHookAgentCard(created.name, String(created.frontmatter.description ?? created.name));
-        setExtraAgents((prev) => (prev.some((a) => a.id === card.id) ? prev : [...prev, card]));
-        const fm = created.frontmatter as Record<string, unknown>;
-        const asList = (v: unknown): string[] | undefined =>
-          Array.isArray(v) ? (v as unknown[]).filter((x): x is string => typeof x === "string") : undefined;
-        setExtraConfigs((prev) => ({
-          ...prev,
-          [created.name]: {
-            description: typeof fm.description === "string" ? fm.description : created.name,
-            mcps: [],
-            secrets: [],
-            harness: "Warp",
-            model: typeof fm.model === "string" ? fm.model : "",
-            runner: typeof fm.runner === "string" ? fm.runner : "default",
-            host: "Warp hosted",
-            prompt: created.body,
-            automations: [],
-            tools: asList(fm.tools),
-            stage: typeof fm.stage === "string" ? fm.stage : undefined,
-            blocking: typeof fm.blocking === "boolean" ? fm.blocking : undefined,
-            mode: typeof fm.mode === "string" ? fm.mode : undefined,
-            agentType: typeof fm.agentType === "string" ? fm.agentType : undefined,
-          },
-        }));
-        setConfigRevision((revision) => revision + 1);
-        return { ok: true };
-      } catch (e) {
-        const error = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200);
-        setAgentsError(error);
-        return { ok: false, error };
-      } finally {
-        setCreating(false);
+  const refreshSkills = useCallback(async (): Promise<void> => {
+    const res = await getFactorySkills();
+    if (!res.ok) {
+      setSkillsError(truncateError(res.error));
+      return;
+    }
+    setSkills(res.data);
+    setSkillsError(null);
+  }, []);
+
+  const refreshMcps = useCallback(async (): Promise<void> => {
+    const res = await listFactoryMcps();
+    if (!res.ok) {
+      setMcpsError(truncateError(res.error));
+      return;
+    }
+    setMcps(res.data);
+    setMcpsError(null);
+  }, []);
+
+  useEffect(() => {
+    void refreshAgents();
+    void refreshSkills();
+    void refreshMcps();
+  }, [refreshAgents, refreshSkills, refreshMcps]);
+
+  const loadFull = useCallback(async (name: string, force: boolean): Promise<void> => {
+    const cached = fullCacheRef.current.get(name);
+    if (cached && !force) {
+      setFull(cached);
+      setFullState("ready");
+      setFullError(null);
+      return;
+    }
+    const requestId = fullRequestRef.current + 1;
+    fullRequestRef.current = requestId;
+    setFullState("loading");
+    setFullError(null);
+    const res = await getFactoryAgentFull(name);
+    if (fullRequestRef.current !== requestId) return;
+    if (!res.ok) {
+      setFullState("offline");
+      setFullError(truncateError(res.error));
+      setFull(null);
+      return;
+    }
+    fullCacheRef.current.set(name, res.data);
+    setFull(res.data);
+    setFullState("ready");
+  }, []);
+
+  const selectAgent = useCallback(
+    (name: string | null): void => {
+      setSelectedName(name);
+      if (name === null) {
+        setFull(null);
+        setFullState("ready");
+        setFullError(null);
+        return;
       }
+      void loadFull(name, false);
+    },
+    [loadFull],
+  );
+
+  // Selección inicial (o recuperación tras refresh) fuera de refreshAgents:
+  // si hay un agente elegido y no está cargado, se carga una vez.
+  useEffect(() => {
+    if (selectedName === null) return;
+    if (full !== null && full.name === selectedName) return;
+    const cached = fullCacheRef.current.get(selectedName);
+    if (cached) {
+      setFull(cached);
+      setFullState("ready");
+      setFullError(null);
+      return;
+    }
+    void loadFull(selectedName, false);
+  }, [selectedName, full, loadFull]);
+
+  const reloadAgentFull = useCallback(async (): Promise<void> => {
+    if (selectedName === null) return;
+    fullCacheRef.current.delete(selectedName);
+    await loadFull(selectedName, true);
+  }, [selectedName, loadFull]);
+
+  const saveAgent = useCallback(
+    async (name: string, draft: AgentDraft): Promise<AgentsActionResult> => {
+      const body = draft.prompt.replace(/\r\n/g, "\n").replace(/^\n+/, "").replace(/\s+$/, "");
+      if (!body) return { ok: false, error: "Prompt vacío: no se guardó nada." };
+      const res = await saveFactoryAgentFull(name, body, draftToFrontmatter(draft));
+      if (!res.ok) return { ok: false, error: truncateError(res.error) };
+      fullCacheRef.current.set(name, res.data);
+      setFull(res.data);
+      setFullState("ready");
+      setFullError(null);
+      setAgents((prev) =>
+        prev.map((a) =>
+          a.name === name
+            ? { ...a, description: draft.description.trim(), agentType: draft.agentType }
+            : a,
+        ),
+      );
+      return { ok: true };
     },
     [],
+  );
+
+  const createAgent = useCallback(
+    async (input: FactoryAgentCreateInput): Promise<AgentsActionResult & { name?: string }> => {
+      const res = await createFactoryAgent(input);
+      if (!res.ok) return { ok: false, error: truncateError(res.error) };
+      const created = res.data;
+      fullCacheRef.current.set(created.name, created);
+      setFull(created);
+      setFullState("ready");
+      setFullError(null);
+      setSelectedName(created.name);
+      await refreshAgents();
+      return { ok: true, name: created.name };
+    },
+    [refreshAgents],
   );
 
   const deleteAgent = useCallback(
-    async (agentId: string): Promise<{ ok: boolean; error?: string }> => {
-      try {
-        const res = await deleteFactoryAgent(agentId);
-        if (!res.ok) {
-          setAgentsError(res.error ?? "no se pudo eliminar el agente");
-          return { ok: false, error: res.error ?? "no se pudo eliminar el agente" };
-        }
-        setExtraAgents((prev) => prev.filter((a) => a.id !== agentId));
-        setExtraConfigs((prev) => {
-          if (!(agentId in prev)) return prev;
-          const next = { ...prev };
-          delete next[agentId];
-          return next;
-        });
-        setConfigRevision((revision) => revision + 1);
-        return { ok: true };
-      } catch (e) {
-        const error = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200);
-        setAgentsError(error);
-        return { ok: false, error };
-      }
+    async (name: string): Promise<AgentsActionResult> => {
+      const res = await deleteFactoryAgent(name);
+      if (!res.ok) return { ok: false, error: truncateError(res.error) };
+      fullCacheRef.current.delete(name);
+      setAgents((prev) => prev.filter((a) => a.name !== name));
+      setSelectedName((prev) => (prev === name ? null : prev));
+      await refreshAgents();
+      return { ok: true };
+    },
+    [refreshAgents],
+  );
+
+  const loadMcp = useCallback(
+    async (name: string): Promise<AgentsActionResult & { servers?: Record<string, unknown> }> => {
+      const res = await getFactoryMcp(name);
+      if (!res.ok) return { ok: false, error: truncateError(res.error) };
+      return { ok: true, servers: res.data.servers };
     },
     [],
   );
 
+  const addMcp = useCallback(
+    async (name: string, servers: Record<string, unknown>): Promise<AgentsActionResult> => {
+      const res = await createFactoryMcp(name, servers);
+      if (!res.ok) return { ok: false, error: truncateError(res.error) };
+      await refreshMcps();
+      return { ok: true };
+    },
+    [refreshMcps],
+  );
+
+  const updateMcp = useCallback(
+    async (name: string, servers: Record<string, unknown>): Promise<AgentsActionResult> => {
+      const res = await saveFactoryMcp(name, servers);
+      if (!res.ok) return { ok: false, error: truncateError(res.error) };
+      await refreshMcps();
+      return { ok: true };
+    },
+    [refreshMcps],
+  );
+
+  const removeMcp = useCallback(
+    async (name: string): Promise<AgentsActionResult> => {
+      const res = await deleteFactoryMcp(name);
+      if (!res.ok) return { ok: false, error: truncateError(res.error) };
+      await refreshMcps();
+      return { ok: true };
+    },
+    [refreshMcps],
+  );
+
   return {
-    foreman,
     agents,
-    selectedAgentId,
-    selectedAgent,
-    selectedConfig,
+    agentsState,
+    agentsError,
+    refreshAgents,
+    selectedName,
     selectAgent,
-    getConfig,
-    saveConfig,
+    full,
+    fullState,
+    fullError,
+    reloadAgentFull,
+    saveAgent,
     createAgent,
     deleteAgent,
-    refreshAgents,
-    creating,
-    agentsError,
+    skills,
+    skillsError,
+    refreshSkills,
+    mcps,
+    mcpsError,
+    refreshMcps,
+    loadMcp,
+    addMcp,
+    updateMcp,
+    removeMcp,
   };
 }

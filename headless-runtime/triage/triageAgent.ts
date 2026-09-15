@@ -20,7 +20,7 @@ import {
   parseSessionId,
   withTransportRetry,
 } from "../llm/agentTransport";
-import { opencodeServerManager } from "../opencodeServerManager";
+import { opencodeServerManager, ensureAgentTurnClient } from "../opencodeServerManager";
 import { READONLY_TOOLS, toolsetFor } from "../runner/toolPolicy";
 import { sessionAgentArgs } from "../factory/opencodeAgentSync";
 import { promptInSessionWithCost } from "../cost/promptWithCost";
@@ -86,6 +86,10 @@ export class TriageAgent {
       raw,
     });
 
+    // Turno con config fresca: el helper devuelve el singleton si sigue
+    // vigente o un server scopeado recién nacido si la config de agentes
+    // cambió desde que el singleton nació (fix PLATANO fuera del engine).
+    let closeTurn: () => void = () => {};
     try {
       // Mock de tests
       if (promptMock) {
@@ -121,7 +125,9 @@ export class TriageAgent {
         };
       };
       try {
-        client = (await opencodeServerManager.ensureClient()) as unknown as typeof client;
+        const turn = await ensureAgentTurnClient();
+        client = turn.client as unknown as typeof client;
+        closeTurn = turn.close;
       } catch {
         const existing = opencodeServerManager.getClient() as unknown as typeof client | null;
         if (!existing) return fallback();
@@ -304,6 +310,13 @@ export class TriageAgent {
       }
     } catch {
       return { findings: buildFallbackTriageFindings(), raw: null };
+    } finally {
+      // Teardown del server efímero del turno (no-op si corrió en el singleton).
+      try {
+        closeTurn();
+      } catch {
+        // best-effort
+      }
     }
   }
 }

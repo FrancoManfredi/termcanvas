@@ -283,7 +283,7 @@ test("buildTriagePrompt/buildSpecPrompt llevan solo datos, sin rol ni reglas", (
   assert.ok(tri.includes("job-ola8-p01"));
   assert.ok(!tri.includes("factory/agents/triage/agent.md"), "sin header");
   assert.ok(!tri.includes("Sos el TRIAGE"), "sin rol (vive en el espejo)");
-  assert.ok(!tri.includes('"decision"'), "sin schema en el turno (va por format)");
+  assert.ok(tri.includes('"decision"'), "el shape del cierre vive en el turno (una sola fuente)");
   const spec = buildSpecPrompt(
     { id: "job-ola8-p02", prompt: "agregar login", worktree: "" },
     { decision: "spec", scope: "auth", complexity: "simple", openQuestions: [], reason: "planeable", confidence: 0.8 },
@@ -510,7 +510,7 @@ test("triage: id + issue + worktree + cierre, sin rúbrica", () => {
   assert.ok(out.includes("Clasificá ahora"), "el cierre orienta");
   assert.ok(!out.includes("factory/agents/triage/agent.md"), "sin header");
   assert.ok(!out.includes("Sos el TRIAGE"), "sin rol");
-  assert.ok(!out.includes("openQuestions\":"), "sin rúbrica de decisiones");
+  assert.ok(out.includes('"decision"'), "el shape del cierre vive en el turno");
   assert.ok(!out.includes("PROHIBIDO write"), "sin reglas (viven en el espejo)");
 });
 

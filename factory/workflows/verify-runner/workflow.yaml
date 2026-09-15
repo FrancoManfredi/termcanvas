@@ -1,0 +1,207 @@
+name: verify-runner
+description: Verificación real system-owned — corre test/build del repo (suite node --test tests/ o node --check de los JS cambiados cuando no hay runner) y devuelve evidencia estructurada; nunca la escribe un agente.
+tags:
+  - defaults
+  - verify
+inputs:
+  request:
+    default: "(sin pedido)"
+    description: Contexto del run padre (informativo; la verificación no depende del pedido)
+returns: verify
+mutates_checkout: false
+nodes:
+  - id: verify
+    script:
+      runtime: node
+      code: |
+        import fs from "node:fs";
+        import path from "node:path";
+        import { spawnSync } from "node:child_process";
+
+        const cwd = process.cwd();
+        const steps = [];
+        // Logs por step en el dir de artefactos del run: el mensaje solo
+        // lleva un snippet corto + `logPath`; el detalle completo queda
+        // auditable en disco (el panel lo espeja al job al cerrar el run).
+        const artifactsDir =
+          typeof process.env.ARTIFACTS_DIR === "string" && process.env.ARTIFACTS_DIR !== ""
+            ? process.env.ARTIFACTS_DIR
+            : cwd;
+        const logsDir = path.join(artifactsDir, "logs");
+
+        function safeStepFile(name) {
+          const clean = String(name || "step").replace(/[^a-z0-9-_]+/gi, "_").slice(0, 60);
+          return clean.length > 0 ? clean : "step";
+        }
+
+        function runStep(name, command) {
+          const started = Date.now();
+          // Sin contexto de test-runner heredado: un `node --test` hijo
+          // bajo `node --test` saltea los archivos con exit 0 (verde
+          // vacío). El child siempre arranca contexto limpio.
+          const childEnv = { ...process.env };
+          delete childEnv.NODE_TEST_CONTEXT;
+          const result = spawnSync(command, {
+            cwd,
+            shell: true,
+            encoding: "utf-8",
+            timeout: 120000,
+            windowsHide: true,
+            maxBuffer: 16 * 1024 * 1024,
+            env: childEnv,
+          });
+          const durationMs = Date.now() - started;
+          const exitCode = typeof result.status === "number" ? result.status : 1;
+          const output = String((result.stdout || "") + (result.stderr || "")).trim();
+          let logPath = null;
+          try {
+            fs.mkdirSync(logsDir, { recursive: true });
+            const file = safeStepFile(name) + ".log";
+            fs.writeFileSync(
+              path.join(logsDir, file),
+              `[verify] $ ${command} (exit ${exitCode}, ${durationMs}ms)\n${output.slice(-100000)}`,
+              "utf-8",
+            );
+            logPath = "logs/" + file;
+          } catch {
+            logPath = null;
+          }
+          steps.push({
+            name,
+            command,
+            exitCode,
+            durationMs,
+            status: exitCode === 0 ? "pass" : "fail",
+            // Cola corta: el detalle vive en `logPath`; el mensaje no carga ruido.
+            logSnippet: output.slice(Math.max(0, output.length - 600)),
+            ...(logPath !== null ? { logPath } : {}),
+          });
+          return exitCode === 0;
+        }
+
+        function hasPnpm() {
+          try {
+            const probe = spawnSync("pnpm", ["--version"], {
+              cwd,
+              shell: true,
+              encoding: "utf-8",
+              timeout: 20000,
+              windowsHide: true,
+            });
+            return probe.status === 0;
+          } catch {
+            return false;
+          }
+        }
+
+        let scripts = {};
+        try {
+          const pkg = JSON.parse(fs.readFileSync(path.join(cwd, "package.json"), "utf-8"));
+          if (pkg && typeof pkg.scripts === "object" && pkg.scripts !== null) {
+            scripts = pkg.scripts;
+          }
+        } catch {
+          scripts = {};
+        }
+
+        const pm = hasPnpm() ? "pnpm" : "npm";
+        const hasTest = typeof scripts.test === "string" && scripts.test.trim() !== "";
+        const hasBuild = typeof scripts.build === "string" && scripts.build.trim() !== "";
+
+        if (hasTest) {
+          const testOk = runStep("test", pm + " test");
+          if (hasBuild) {
+            if (testOk) {
+              runStep("build", pm + " build");
+            } else {
+              steps.push({
+                name: "build",
+                command: pm + " build",
+                exitCode: 0,
+                durationMs: 0,
+                status: "skipped",
+                logSnippet: "test falló: build no corre (fail-fast)",
+              });
+            }
+          }
+        } else if (hasBuild) {
+          runStep("build", pm + " build");
+        } else {
+          // Sin runner del repo: si hay suite node nativa (tests/ con
+          // *.test.js|mjs|cjs), se ejecuta como prueba de comportamiento
+          // real antes del syntax check. Sin tests/ cae al --check.
+          let testFiles = [];
+          try {
+            testFiles = fs
+              .readdirSync(path.join(cwd, "tests"))
+              .filter((f) => /\.test\.(js|mjs|cjs)$/i.test(f));
+          } catch {
+            testFiles = [];
+          }
+          if (testFiles.length > 0) {
+            runStep("test", "node --test tests/");
+          }
+          let changed = [];
+          try {
+            const status = spawnSync("git", ["status", "--porcelain"], {
+              cwd,
+              shell: true,
+              encoding: "utf-8",
+              timeout: 20000,
+              windowsHide: true,
+            });
+            changed = String(status.stdout || "")
+              .split(/\r?\n/)
+              .map((line) => line.slice(3).trim())
+              .filter((file) => /\.(js|mjs|cjs)$/i.test(file));
+          } catch {
+            changed = [];
+          }
+          if (changed.length === 0) {
+            steps.push({
+              name: "syntax",
+              command: "node --check",
+              exitCode: 0,
+              durationMs: 0,
+              status: "skipped",
+              logSnippet: "sin runner configurado y sin JS cambiado",
+            });
+          } else {
+            for (const file of changed.slice(0, 20)) {
+              runStep("syntax:" + file, 'node --check "' + file + '"');
+            }
+          }
+        }
+
+        const failed = steps.filter((step) => step.status === "fail");
+        const passed = steps.filter((step) => step.status === "pass");
+        const pass = failed.length === 0;
+        const summary = pass
+          ? passed.length > 0
+            ? "verificacion: " + passed.length + " check(s) OK"
+            : "sin runner configurado (nada ejecutable)"
+          : "verificacion FALLO: " + failed.map((step) => step.name).join(", ");
+
+        process.stdout.write(JSON.stringify({ pass, summary, steps }));
+    output_type: verify-evidence
+    output_format:
+      type: object
+      properties:
+        pass: { type: boolean }
+        summary: { type: string }
+        steps:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              command: { type: string }
+              exitCode: { type: number }
+              durationMs: { type: number }
+              status:
+                type: string
+                enum: [pass, fail, skipped]
+              logSnippet: { type: string }
+              logPath: { type: string }
+            required: [name, status]
+      required: [pass, steps]

@@ -64,3 +64,18 @@ test("resolveValue preserva tipos en referencias exactas", () => {
     "limite=3",
   );
 });
+
+test("$node.outputJson renderiza el bloque legible sin cambiar $node.output", () => {
+  const pretty = resolveTemplate("ev=$review.outputJson", ctx());
+  assert.equal(pretty, `ev=${JSON.stringify({ green: true }, null, 2)}`);
+  assert.equal(
+    resolveTemplate("crudo=$review.output", ctx()),
+    'crudo={"green":true}',
+    "$node.output sigue siendo el texto crudo",
+  );
+});
+
+test("$node.outputJson falla honesto sin estructurado o con subpath", () => {
+  assert.throws(() => resolveTemplate("$plan.outputJson", ctx()), /no es estructurado/);
+  assert.throws(() => resolveTemplate("$review.outputJson.green", ctx()), /no tiene campos/);
+});

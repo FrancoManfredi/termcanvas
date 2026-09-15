@@ -277,7 +277,6 @@ export function registerPlaygroundIpc(): void {
         actorDetail: notes ? `human:${notes.slice(0, 80)}` : "human",
       });
 
-      console.log(`[playground-ipc] submitHumanVerdict ${normalized} → ${conclusion} id=${verdict.id}`);
 
       // Derive fresh state for caller
       let state: unknown = null;
@@ -314,7 +313,6 @@ export function registerPlaygroundIpc(): void {
         args = ["--loader", "tsx", verifierPath, normalized];
       }
 
-      console.log(`[playground-ipc] verifyPact ${normalized}: spawning ${cmd} ${args.join(" ")}`);
 
       const child = spawn(cmd, args, { windowsHide: true,
         cwd: path.resolve("."),
@@ -380,5 +378,4 @@ export function registerPlaygroundIpc(): void {
     });
   });
 
-  console.log("[playground-ipc] Handlers registered: playground:getPacts, getState, verifyPact, getFactoryBaseUrl, submitHumanVerdict, etc.");
 }

@@ -250,9 +250,9 @@ test("factory/agents/review/agent.md cablea skills con su cuándo", () => {
   assert.match(md, /^skills: \{[^}]*code-review[^}]*\}/m, "frontmatter declara code-review");
   assert.match(md, /^skills: \{[^}]*repo-conventions[^}]*\}/m, "frontmatter declara repo-conventions");
   assert.doesNotMatch(md, /ui-verification/, "ui-verification removida");
-  assert.match(md, /`code-review` — always/, "code-review siempre");
-  assert.match(md, /`repo-conventions` — always/, "repo-conventions siempre");
-  assert.match(md, /Load them with the `skill` tool/, "carga vía tool skill");
+  assert.match(md, /`code-review` — siempre/, "code-review siempre");
+  assert.match(md, /`repo-conventions` — siempre/, "repo-conventions siempre");
+  assert.match(md, /Cargá con la tool `skill`/, "carga vía tool skill");
 });
 
 // ── Traza: evento timeline con meta skills al consumir ──

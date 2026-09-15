@@ -102,16 +102,20 @@ export function buildReviewPrompt(
   const attempt = ctx.reviewAttempt ?? 1;
   const promptBlock = (workItem.prompt ?? "").slice(0, 4000) || "(vacío)";
 
-  // Turno único de datos: el agente (system prompt del espejo con ejes,
-  // severidades, veredictos y formato de factory/agents/review/agent.md) ya
-  // sabe revisar y descubrir el cambio con read/glob/grep; el turno lleva
-  // id, issue, worktree actual y override del proyecto.
+  // Turno único de datos: el agente (system prompt del espejo con ejes y
+  // severidades de factory/agents/review/agent.md) ya sabe revisar y
+  // descubrir el cambio con read/glob/grep; el turno lleva id, issue,
+  // worktree actual, override del proyecto y el shape del cierre (las keys
+  // exactas viven acá, no en el body: una sola fuente).
   const overrideText = typeof ctx.repoOverride === "string" ? ctx.repoOverride.trim() : "";
   const slim = [
     `WorkItem: ${workItem.id}`,
     `Prompt original: """${stripScopeBoilerplate(promptBlock)}"""`,
     `Worktree: ${workItem.worktree}`,
     ...(overrideText ? [`## Override del proyecto\n${overrideText}`] : []),
+    "",
+    "Cerrá con UN bloque ```json con las keys exactas:",
+    '{"verdict": "accept|revise|ask_human", "confidence": 0.85, "summary": "...", "findings": [{"id": "f1", "axis": "requirements|tests|security", "severity": "info|minor|major|blocker", "file": "ruta", "message": "...", "suggestion": "..."}]}',
   ].join("\n");
   // Etiqueta humana de fase (primera línea): intento N visible en la sesión.
   return withPhaseTag(slim, tagReview(attempt));

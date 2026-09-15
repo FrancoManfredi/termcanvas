@@ -229,7 +229,6 @@ function getString(value: unknown): string | undefined {
 
 function perfLog(label: string, details: Record<string, unknown>) {
   if (!process.env.VITE_DEV_SERVER_URL) return;
-  console.log(`[Perf] ${label}`, details);
 }
 
 function matchPricing(model: string) {

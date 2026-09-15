@@ -142,7 +142,7 @@ test("describeActivityActions never throws on junk transition shapes", () => {
     const defs = describeActivityActions(
       baseArgs({ factoryAwaiting: { kind, jobId: "job-1" } as never }),
     );
-    assert.equal(defs.length, 19);
+    assert.equal(defs.length, 20);
   }
   const junkJobId = [undefined, null, 42, "", "  ", [], {}];
   for (const jobId of junkJobId) {
@@ -151,7 +151,7 @@ test("describeActivityActions never throws on junk transition shapes", () => {
         factoryAwaiting: { kind: "spec-approval", jobId } as never,
       }),
     );
-    assert.equal(defs.length, 19);
+    assert.equal(defs.length, 20);
     assert.equal(
       defs.find((d) => d.kind === "approve-spec")?.enabled,
       false,
@@ -161,11 +161,11 @@ test("describeActivityActions never throws on junk transition shapes", () => {
   const defsFactory = describeActivityActions(
     baseArgs({ factory: "loading" as never }),
   );
-  assert.equal(defsFactory.length, 19);
+  assert.equal(defsFactory.length, 20);
   // Mistyped top-level args degrade to the disabled matrix, never throw.
   for (const junk of [undefined, null, "loading", 42, []]) {
     const defs = describeActivityActions(junk as never);
-    assert.equal(defs.length, 19);
+    assert.equal(defs.length, 20);
   }
 });
 

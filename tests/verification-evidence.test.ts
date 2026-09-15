@@ -308,9 +308,9 @@ test("regla de evidencia vive en el espejo review/agent.md", () => {
     path.join(process.cwd(), "factory", "agents", "review", "agent.md"),
     "utf-8",
   );
-  assert.match(mirror, /missing proof is blocking/);
+  assert.match(mirror, /Evidencia floja = finding/, "la regla de evidencia vive en el agente");
   assert.match(mirror, /major/);
-  assert.match(mirror, /ask_human/);
+  assert.match(mirror, /formato exacto/i, "el contrato de salida se delega al mensaje");
   const prompt = promptCtx(report());
   assert.ok(!prompt.includes("Evidencia de verificación"), "turno flaco: sin bloque");
   assert.ok(!prompt.includes("Regla de evidencia"), "turno flaco: sin regla en el turno");

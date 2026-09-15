@@ -91,7 +91,34 @@ export function workItemListSignature(items: unknown): string {
               ? ((live as Record<string, unknown>).sessionUrl as string)
               : "?";
           const sessionsLen = Array.isArray(j.sessions) ? j.sessions.length : 0;
-          return `${id}|${status}|${updatedAt}|${phase}|${reviewCount}|${tlLen}|${lastAt}|${pr}|${dashboardUrl}|${sessionId}|${liveUrl}|${sessionsLen}`;
+          // Engine surface: nodeStates/nodeAgents/gate cambian sin bump de
+          // updatedAt (attach de sesión al enviar, gate pendiente). Sin esto
+          // el skip-guard congelaría el stepper y las filas nuevas.
+          const run = j.engineRun;
+          let runSig = "?";
+          if (run !== null && typeof run === "object" && !Array.isArray(run)) {
+            const rec = run as Record<string, unknown>;
+            const states = rec.nodeStates;
+            const agents = rec.nodeAgents;
+            runSig = `${typeof rec.currentNodeId === "string" ? rec.currentNodeId : "?"}|${
+              states !== null && typeof states === "object" && !Array.isArray(states)
+                ? Object.keys(states).length
+                : 0
+            }|${
+              agents !== null && typeof agents === "object" && !Array.isArray(agents)
+                ? Object.keys(agents).length
+                : 0
+            }`;
+          }
+          const gate = j.engineGate;
+          const gateNode =
+            gate !== null &&
+            typeof gate === "object" &&
+            !Array.isArray(gate) &&
+            typeof (gate as Record<string, unknown>).nodeId === "string"
+              ? ((gate as Record<string, unknown>).nodeId as string)
+              : "?";
+          return `${id}|${status}|${updatedAt}|${phase}|${reviewCount}|${tlLen}|${lastAt}|${pr}|${dashboardUrl}|${sessionId}|${liveUrl}|${sessionsLen}|${runSig}|${gateNode}`;
         } catch {
           return `throw-${Math.random()}`;
         }

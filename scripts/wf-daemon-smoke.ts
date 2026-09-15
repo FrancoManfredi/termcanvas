@@ -141,15 +141,39 @@ async function main(): Promise<void> {
   childPid = child.pid ?? null;
 
   const { port, names } = await waitForHealth();
-  portsToClean.add(port);
+  // F2: solo matamos el puerto si lo abrió NUESTRO child. El child escribe
+  // el puerto pelado cuando binduéa y `existing:<port>` cuando reutilizó un
+  // factory ajeno (app/standalone de dev): en ese caso el smoke es observador
+  // y no lo toca. (El port-file solo no alcanza: el child escribía el puerto
+  // reusado y el smoke mataba el daemon del usuario — incidente real.)
+  let ownPort: number | null = null;
+  try {
+    const raw = fs.readFileSync(PORT_FILE, "utf-8").trim();
+    if (/^\d+$/.test(raw)) {
+      const parsed = Number(raw);
+      if (Number.isFinite(parsed) && parsed > 0) ownPort = parsed;
+    }
+  } catch {
+    ownPort = null;
+  }
+  const ownsPort = childPid !== null && ownPort === port;
+  if (ownsPort) {
+    portsToClean.add(port);
+  } else {
+    console.log(
+      `[wf-daemon-smoke] factory preexistente en ${port} (no es de este smoke) — no se mata al salir`,
+    );
+  }
   console.log(
     `[wf-daemon-smoke] health=200 workflows=${names.join(",")} port=${port}`,
   );
   if (!names.includes("factory-default")) {
     throw new Error("factory-default no aparece en /factory/workflows");
   }
-  const opencodePort = detectOpencodePort();
-  if (opencodePort !== null) portsToClean.add(opencodePort);
+  if (ownsPort) {
+    const opencodePort = detectOpencodePort();
+    if (opencodePort !== null) portsToClean.add(opencodePort);
+  }
   console.log("[wf-daemon-smoke] OK");
 }
 

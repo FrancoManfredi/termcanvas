@@ -64,7 +64,6 @@
  */
 
 import type { IssueFactoryJob } from "../types";
-import { SCOPE_DISCIPLINE_LINE, scopeWorktreeLine } from "../../../../shared/scope";
 import type { CostSummary } from "../../../../shared/types/workItem";
 import { getLatestSpecApprovalRequest } from "../../../../shared/types/spec";
 import { needsResume } from "../../../../shared/types/workItem";
@@ -201,12 +200,8 @@ export function buildFactoryResolvePrompt(
       title !== null
         ? `# Resolve issue #${n} — ${title}`
         : `# Resolve issue #${n}`;
-    // Dedup: si el body ya trae el SCOPE canónico (issues que lo incluyen),
-    // no se appendea de nuevo — una sola copia para todas las fases.
-    const bodyHasScope = body !== null && body.includes(SCOPE_DISCIPLINE_LINE);
-    const scopeBlock = bodyHasScope
-      ? []
-      : [`## SCOPE`, SCOPE_DISCIPLINE_LINE, scopeWorktreeLine(n)];
+    // F15: sin bloque `## SCOPE`. Las reglas de orquestador (worktree, no-PR)
+    // ya viven en los agent.md: el mensaje queda tarea + issue, limpio.
     return [
       header,
       ``,
@@ -216,8 +211,6 @@ export function buildFactoryResolvePrompt(
       ``,
       `## ORIGINAL BODY`,
       body ?? `(no description)`,
-      ``,
-      ...scopeBlock,
     ].join(`\n`);
   } catch {
     return `# Resolve issue`;
@@ -333,6 +326,24 @@ export function readFactoryJobIssueRef(job: unknown): FactoryIssueRef | null {
 export function isFactoryJobActive(job: unknown): boolean {
   try {
     if (!isRecord(job)) return false;
+    // G3: la verdad del engine manda. Un run vivo (`running`/`pending`) o un
+    // gate pendiente hacen la fila ACTIVA aunque el status legacy sea
+    // terminal (incidente #125: reject + resume dejó Cancelled con el run
+    // corriendo y la fila desaparecía de In Progress).
+    const engineRun = job.engineRun;
+    if (isRecord(engineRun)) {
+      const runStatus =
+        typeof engineRun.status === "string" ? engineRun.status : "";
+      if (runStatus === "running" || runStatus === "pending") return true;
+    }
+    const engineGate = job.engineGate;
+    if (
+      isRecord(engineGate) &&
+      typeof engineGate.nodeId === "string" &&
+      engineGate.nodeId.trim() !== ""
+    ) {
+      return true;
+    }
     const status = typeof job.status === "string" ? job.status : null;
     if (status !== null) {
       if (
@@ -463,6 +474,51 @@ export function findActiveFactoryJobsForIssue(
         if (ref === null || ref.issueNumber !== issueNumber) return;
         if (!sameRepo(ref.repo, want)) return;
         if (!isFactoryJobActive(job)) return;
+        const rec = job as { id?: unknown };
+        if (typeof rec.id !== "string" || rec.id.length === 0) return;
+        if (!out.includes(rec.id)) out.push(rec.id);
+      } catch {
+        // una entrada rota nunca frena a las demás
+      }
+    });
+  } catch {
+    // nunca lanza
+  }
+  return out;
+}
+
+/**
+ * Finds ALL factory jobs linked to one issue in the EXISTING poll list
+ * (misma regla de match que el singular activo, SIN filtro de estado: un
+ * job activo, un run muerto y uno Complete están todos linkeados). Devuelve
+ * los ids deduplicados, tope 10 (estructural, sin loops). Es la lista del
+ * "Descartar issue" del panel: borra TODO lo que el issue creó. Nunca lanza.
+ */
+export function findAllFactoryJobsForIssue(
+  jobs: unknown,
+  issueNumber: number,
+  repo?: string | null,
+): string[] {
+  const out: string[] = [];
+  try {
+    if (!Array.isArray(jobs)) return out;
+    if (
+      typeof issueNumber !== "number" ||
+      !Number.isInteger(issueNumber) ||
+      issueNumber <= 0
+    ) {
+      return out;
+    }
+    const want =
+      typeof repo === "string" && repo.trim().length > 0
+        ? repo.trim()
+        : null;
+    jobs.forEach((job) => {
+      try {
+        if (out.length >= 10) return;
+        const ref = readFactoryJobIssueRef(job);
+        if (ref === null || ref.issueNumber !== issueNumber) return;
+        if (!sameRepo(ref.repo, want)) return;
         const rec = job as { id?: unknown };
         if (typeof rec.id !== "string" || rec.id.length === 0) return;
         if (!out.includes(rec.id)) out.push(rec.id);
@@ -699,11 +755,14 @@ export function readFactoryJobSessionLink(
  * sessionId, sessionUrl}]`, en orden de fase). Espejo del daemon
  * `allSessionsExtras`: el panel nunca construye URLs (no conoce el puerto
  * efímero). Roles sin URL válida se omiten; ausente → null (honesto).
+ * `round` (opcional) marca la ronda del nodo dentro de un loop: la entrada
+ * sin round es la sesión vigente, las numeradas son rondas previas.
  * Never throws.
  */
 export interface FactoryJobPhaseSession {
   role: string;
   sessionUrl: string;
+  round?: number;
 }
 
 export function readFactoryJobSessions(job: unknown): FactoryJobPhaseSession[] | null {
@@ -718,7 +777,15 @@ export function readFactoryJobSessions(job: unknown): FactoryJobPhaseSession[] |
         const role = typeof entry.role === "string" ? entry.role.trim() : "";
         const sessionUrl = cleanSessionUrl(entry.sessionUrl);
         if (role === "" || sessionUrl === null) return;
-        out.push({ role, sessionUrl });
+        const round =
+          typeof entry.round === "number" &&
+          Number.isInteger(entry.round) &&
+          entry.round >= 1
+            ? entry.round
+            : undefined;
+        out.push(
+          round === undefined ? { role, sessionUrl } : { role, sessionUrl, round },
+        );
       } catch {
         // una entrada rota nunca aborta a las demás
       }
@@ -1191,6 +1258,122 @@ export function readFactoryJobPrLink(job: unknown): FactoryJobPrLink | null {
  * then falls back to the generic phase — never a fabricated lane).
  * Never throws.
  */
+/**
+ * Avance del run del engine (`engineRun` proyectado por el daemon). Legible
+ * → `{runId, workflow, status, currentNodeId?, completedNodes?}`; ausente o
+ * inválido → null (nunca inventa nodos ni posiciones). Never throws.
+ */
+function readFactoryJobEngineRun(
+  job: unknown,
+): IssueFactoryJob["engineRun"] | null {
+  try {
+    if (!isRecord(job)) return null;
+    const r = job.engineRun;
+    if (!isRecord(r)) return null;
+    if (typeof r.runId !== "string" || r.runId === "") return null;
+    if (typeof r.workflow !== "string" || r.workflow === "") return null;
+    if (typeof r.status !== "string" || r.status === "") return null;
+    const out: NonNullable<IssueFactoryJob["engineRun"]> = {
+      runId: r.runId,
+      workflow: r.workflow,
+      status: r.status,
+    };
+    if (typeof r.currentNodeId === "string" && r.currentNodeId !== "") {
+      out.currentNodeId = r.currentNodeId;
+    }
+    if (Array.isArray(r.completedNodes)) {
+      out.completedNodes = r.completedNodes
+        .filter((n): n is string => typeof n === "string" && n.trim() !== "")
+        .map((n) => n.trim())
+        .slice(0, 50);
+    }
+    if (Array.isArray(r.nodes)) {
+      out.nodes = r.nodes
+        .filter((n): n is string => typeof n === "string" && n.trim() !== "")
+        .map((n) => n.trim())
+        .slice(0, 50);
+    }
+    if (
+      r.nodeSessions !== null &&
+      typeof r.nodeSessions === "object" &&
+      !Array.isArray(r.nodeSessions)
+    ) {
+      const nodeSessions: Record<string, string> = {};
+      for (const [nodeId, sessionId] of Object.entries(
+        r.nodeSessions as Record<string, unknown>,
+      )) {
+        if (
+          typeof nodeId === "string" && nodeId.trim() !== "" && nodeId.length <= 64 &&
+          typeof sessionId === "string" && sessionId.trim() !== "" &&
+          sessionId.length <= 128
+        ) {
+          nodeSessions[nodeId.trim()] = sessionId.trim();
+        }
+        if (Object.keys(nodeSessions).length >= 50) break;
+      }
+      if (Object.keys(nodeSessions).length > 0) {
+        out.nodeSessions = nodeSessions;
+      }
+    }
+    if (
+      r.nodeStates !== null &&
+      typeof r.nodeStates === "object" &&
+      !Array.isArray(r.nodeStates)
+    ) {
+      const allowed = new Set([
+        "pending",
+        "running",
+        "completed",
+        "failed",
+        "skipped",
+        "cancelled",
+      ]);
+      const nodeStates: Record<string, string> = {};
+      for (const [nodeId, state] of Object.entries(
+        r.nodeStates as Record<string, unknown>,
+      )) {
+        if (
+          typeof nodeId === "string" && nodeId.trim() !== "" && nodeId.length <= 64 &&
+          typeof state === "string" && allowed.has(state)
+        ) {
+          nodeStates[nodeId.trim()] = state;
+        }
+        if (Object.keys(nodeStates).length >= 50) break;
+      }
+      if (Object.keys(nodeStates).length > 0) {
+        out.nodeStates = nodeStates;
+      }
+    }
+    if (
+      r.nodeAgents !== null &&
+      typeof r.nodeAgents === "object" &&
+      !Array.isArray(r.nodeAgents)
+    ) {
+      const nodeAgents: Record<string, string> = {};
+      for (const [nodeId, agent] of Object.entries(
+        r.nodeAgents as Record<string, unknown>,
+      )) {
+        if (
+          typeof nodeId === "string" && nodeId.trim() !== "" && nodeId.length <= 64 &&
+          typeof agent === "string" && agent.trim() !== "" && agent.length <= 128
+        ) {
+          nodeAgents[nodeId.trim()] = agent.trim().slice(0, 128);
+        }
+        if (Object.keys(nodeAgents).length >= 50) break;
+      }
+      if (Object.keys(nodeAgents).length > 0) {
+        out.nodeAgents = nodeAgents;
+      }
+    }
+    if (typeof r.startedAt === "string" && r.startedAt !== "") {
+      out.startedAt = r.startedAt;
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
 export function describeFactoryJobForPanel(
   job: unknown,
 ): IssueFactoryJob | null {
@@ -1264,6 +1447,20 @@ export function describeFactoryJobForPanel(
     if (foremanDecision !== null) info.foremanDecision = foremanDecision;
     const triageDecision = readFactoryJobTriageDecision(job);
     if (triageDecision !== null) info.triageDecision = triageDecision;
+    const engineRun = readFactoryJobEngineRun(job);
+    if (engineRun !== null) info.engineRun = engineRun;
+    // Gate humano pendiente (engineGate.nodeId): el stepper pinta esa etapa
+    // como `waiting-gate`. Ausente/null = sin gate (honest-empty).
+    if (isRecord(job)) {
+      const gate = job.engineGate;
+      if (
+        isRecord(gate) &&
+        typeof gate.nodeId === "string" &&
+        gate.nodeId.trim() !== ""
+      ) {
+        info.engineGateNodeId = gate.nodeId.trim();
+      }
+    }
     return info;
   } catch {
     return null;
@@ -1312,7 +1509,8 @@ export type FactoryHumanNeedKind =
   | "spec-approval"
   | "triage-respond"
   | "ask-human"
-  | "resume";
+  | "resume"
+  | "rerun";
 
 export interface FactoryHumanNeed {
   kind: FactoryHumanNeedKind;
@@ -1543,9 +1741,94 @@ export function matchPendingAskHumanNotification(
 }
 
 /**
- * Human gate of one poll-list job (H1 → H2 → H3 → H4). Null when the job
- * needs nothing from the human. Only ACTIVE jobs can wait: terminal jobs
- * free the row even with stale signals. `notifications` is the optional
+ * Nodo de aprobación del engine (`approve`, `gate`, `plan…`): los gates
+ * guardados ANTES del fix de clasificación quedaron con `kind: "ask-human"`;
+ * re-derivar acá les devuelve los botones Aprobar/Rechazar sin re-emitir el
+ * gate (el mensaje no cambia, solo la semántica de las acciones).
+ */
+function isApprovalGateNode(nodeId: string): boolean {
+  try {
+    const id = nodeId.toLowerCase();
+    return (
+      id.includes("spec") ||
+      id.includes("approve") ||
+      id.includes("gate") ||
+      id.includes("plan")
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * H0c (incidente #125): true cuando el job amerita Re-run: el run del engine
+ * murió (`failed`/`cancelled`) o el job quedó cancelado con el run todavía
+ * vivo (reject + resume posterior). Complete nunca re-corre. Exportado para
+ * que el índice del panel pueda encontrar el job linkeado aunque NO esté
+ * activo (G3 lo excluye y el H0c quedaba inalcanzable). Never throws.
+ */
+export function isFactoryJobRerunnable(job: unknown): boolean {
+  try {
+    if (!isRecord(job)) return false;
+    if (isFactoryJobCompleted(job)) return false;
+    const run = job.engineRun;
+    if (!isRecord(run)) return false;
+    const runStatus = typeof run.status === "string" ? run.status : "";
+    const status = typeof job.status === "string" ? job.status : "";
+    const state = typeof job.state === "string" ? job.state : "";
+    const cancelled = status === "Cancelled" || state === "error";
+    const deadRun = runStatus === "failed" || runStatus === "cancelled";
+    const liveRun = runStatus === "running" || runStatus === "pending";
+    return deadRun || (cancelled && liveRun);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * H0c: el CTA honesto es Re-run (reanuda el run donde quedó). Null = sin
+ * acción de re-run (ver `isFactoryJobRerunnable`). Never throws.
+ */
+function engineRerunNeed(
+  job: Record<string, unknown>,
+  jobId: string,
+): FactoryHumanNeed | null {
+  try {
+    return isFactoryJobRerunnable(job) ? { kind: "rerun", jobId } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Gate de primera clase del workflow engine (`engineGate` proyectado por el
+ * daemon al poll item). Legible → `{nodeId, kind, message}`; ausente/inválido
+ * → null (nunca inventa un gate). Never throws.
+ */
+function engineGateOf(
+  job: Record<string, unknown>,
+): { nodeId: string; kind: string; message: string } | null {
+  try {
+    const g = job.engineGate;
+    if (!isRecord(g)) return null;
+    if (typeof g.nodeId !== "string" || g.nodeId.trim() === "") return null;
+    if (typeof g.kind !== "string" || g.kind.trim() === "") return null;
+    const message =
+      typeof g.message === "string" ? g.message.trim().slice(0, 2000) : "";
+    return {
+      nodeId: g.nodeId.trim().slice(0, 64),
+      kind: g.kind.trim().slice(0, 32),
+      message,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Human gate of one poll-list job (H0 → H0b → H1 → H2 → H3 → H4). Null when
+ * the job needs nothing from the human. Only ACTIVE jobs can wait: terminal
+ * jobs free the row even with stale signals. `notifications` is the optional
  * `GET /factory/notifications` list for the H4 fallback (absent = the
  * fallback stays dormant — structured signals H1–H3 carry the panel).
  * Never throws.
@@ -1556,28 +1839,64 @@ export function readFactoryJobHumanNeed(
 ): FactoryHumanNeed | null {
   try {
     if (!isRecord(job)) return null;
-    if (!isFactoryJobActive(job)) return null;
     const jobId = cleanJobId(job.id);
     if (jobId === null) return null;
+    const completed = isFactoryJobCompleted(job);
 
     // H0 — turno parqueado por reinicio: domina sobre cualquier otro gate
     // (nada más es accionable hasta retomar; el spec stale ya murió en P1a).
     // Perf Ola B: el summary proyecta `parked` (mismo `needsResume`
     // calculado en el server); el scan queda como fallback para la full.
-    try {
-      if (job.parked === true) {
-        return { kind: "resume", jobId };
+    if (!completed) {
+      try {
+        if (job.parked === true) {
+          return { kind: "resume", jobId };
+        }
+      } catch {
+        // cae al scan de abajo
       }
-    } catch {
-      // cae al scan de abajo
-    }
-    try {
-      if (needsResume(jobStatus(job), timelineOf(job) as Parameters<typeof needsResume>[1])) {
-        return { kind: "resume", jobId };
+      try {
+        if (needsResume(jobStatus(job), timelineOf(job) as Parameters<typeof needsResume>[1])) {
+          return { kind: "resume", jobId };
+        }
+      } catch {
+        // cae a los gates normales
       }
-    } catch {
-      // cae a los gates normales
     }
+
+    // H0b — gate del workflow engine (pipeline oficial): el run persiste
+    // `{nodeId, kind, message}` en el job. Sin este paso una job esperando
+    // aprobación de spec queda como "implementing" y sin CTA.
+    const engineGate = engineGateOf(job);
+    if (engineGate !== null && !completed) {
+      if (
+        engineGate.kind === "spec-approval" ||
+        (engineGate.kind === "ask-human" && isApprovalGateNode(engineGate.nodeId))
+      ) {
+        return {
+          kind: "spec-approval",
+          jobId,
+          specSummary:
+            engineGate.message !== "" ? engineGate.message : "(no summary)",
+        };
+      }
+      if (engineGate.kind === "ask-human") {
+        return {
+          kind: "ask-human",
+          jobId,
+          reviewSummary:
+            engineGate.message !== "" ? engineGate.message : "(no summary)",
+        };
+      }
+    }
+
+    // H0c — run del engine muerto/cancelado (reject + resume, crash): el
+    // CTA honesto es Re-run (reanuda el run donde quedó). Un gate vivo gana
+    // (H0b arriba); Complete nunca re-corre.
+    const rerun = engineRerunNeed(job, jobId);
+    if (rerun !== null) return rerun;
+
+    if (!isFactoryJobActive(job)) return null;
 
     const specSummary = pendingSpecApproval(job);
     if (specSummary !== null) {

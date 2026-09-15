@@ -8,8 +8,11 @@ import os from "node:os";
 import path from "node:path";
 import {
   buildToolsRecord,
+  listMcpBundleNames,
   materializeNodeCapabilities,
+  normalizeMcpNames,
   parseMcpConfigFile,
+  resolveAgentMcps,
   resolveSkills,
   skillRoots,
 } from "../headless-runtime/workflows/capabilities.ts";
@@ -151,4 +154,77 @@ test("skillRoots: incluye workflow, factory, project y global", () => {
   assert.equal(roots.length, 4);
   assert.ok(roots[0].startsWith("W"));
   assert.ok(roots[1].includes("factory"));
+});
+
+test("normalizeMcpNames: lista, record, string plano y basura", () => {
+  assert.deepEqual(normalizeMcpNames(["github", " fs "]), ["github", "fs"]);
+  assert.deepEqual(normalizeMcpNames({ github: true, fs: true }), ["github", "fs"]);
+  assert.deepEqual(normalizeMcpNames("{github, fs}"), ["github", "fs"]);
+  assert.deepEqual(normalizeMcpNames(""), []);
+  assert.deepEqual(normalizeMcpNames(undefined), []);
+  assert.deepEqual(normalizeMcpNames(42), []);
+  assert.deepEqual(normalizeMcpNames(["../evil", "ok-name", "a b"]), ["ok-name"]);
+});
+
+test("resolveAgentMcps: resuelve factory/mcps y falla con los disponibles", () => {
+  const { repoRoot } = sandbox();
+  const dir = path.join(repoRoot, "factory", "mcps");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, "github.json"),
+    JSON.stringify({ mcpServers: { github: { url: "https://example.com/mcp" } } }),
+    "utf-8",
+  );
+
+  const config = resolveAgentMcps(["github"], { repoRoot });
+  assert.equal((config.github as Record<string, unknown>).type, "remote");
+  assert.deepEqual(listMcpBundleNames({ repoRoot }), ["github"]);
+
+  assert.throws(
+    () => resolveAgentMcps(["ghost"], { repoRoot }),
+    /mcp bundle "ghost" no existe.*github/,
+  );
+});
+
+test("materialize: mcp del agente scopea aunque el nodo no declare nada", () => {
+  const { repoRoot, workflowDir, scopeDir } = sandbox();
+  const dir = path.join(repoRoot, "factory", "mcps");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, "github.json"),
+    JSON.stringify({ mcpServers: { github: { url: "https://example.com/mcp" } } }),
+    "utf-8",
+  );
+
+  const scope = materializeNodeCapabilities(
+    {},
+    { repoRoot, workflowDir, scopeDir, agentMcps: ["github"] },
+  );
+  assert.ok(scope, "el mcp del agente fuerza server scopeado");
+  const config = scope!.config as { mcp: Record<string, unknown> };
+  assert.equal((config.mcp.github as Record<string, unknown>).type, "remote");
+});
+
+test("materialize: mcp del nodo pisa claves homónimas del agente", () => {
+  const { repoRoot, workflowDir, scopeDir } = sandbox();
+  const dir = path.join(repoRoot, "factory", "mcps");
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, "bundle.json"),
+    JSON.stringify({ mcpServers: { shared: { url: "https://agent.example/mcp" } } }),
+    "utf-8",
+  );
+  fs.writeFileSync(
+    path.join(workflowDir, "node-mcp.json"),
+    JSON.stringify({ mcpServers: { shared: { command: "npx", args: ["node-mcp"] } } }),
+    "utf-8",
+  );
+
+  const scope = materializeNodeCapabilities(
+    { mcp: "node-mcp.json" },
+    { repoRoot, workflowDir, scopeDir, agentMcps: ["bundle"] },
+  );
+  assert.ok(scope);
+  const config = scope!.config as { mcp: Record<string, Record<string, unknown>> };
+  assert.equal(config.mcp.shared.type, "local", "el nodo gana en claves homónimas");
 });

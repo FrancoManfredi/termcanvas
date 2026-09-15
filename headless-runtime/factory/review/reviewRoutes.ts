@@ -11,7 +11,8 @@
  * Reglas que honra (las 8 de los master plans + C1–C10):
  * - C1 ESM/cotas: ESM puro, cero `require()`, sin loops ni timers (split y
  *   filter acotados por la propia longitud del pathname, como
- *   routing/routeParsers y jobs/jobRoutes de E1).
+ *   routing/routeParsers y jobs/jobRoutes de E1, más GET .../review/stale
+ *   (Fix L: mismo gate prefijo+sufijo, sin imports nuevos).
  * - C2 puras fail-safe: try/catch en cada export; null = no-ruta (el caller
  *   cae a los handlers siguientes), `{error}` = ruta con id ausente.
  * - C5 aditivo: réplica exacta de la semántica de los handlers actuales del
@@ -23,7 +24,7 @@
  *   (vive en factory/reviewRaw.ts); estos matchers cubren solo lo que ningún
  *   otro módulo parsea.
  * - C8 rutas en tabla: cubre los dominios job-review, job-review-accept,
- *   job-review-retry y job-review-retry-review.
+ *   job-review-retry, job-review-retry-review y job-review-stale.
  * - C10 trazabilidad: cada matcher cita su handler espejo en el cascarón.
  *
  * Lista blanca de imports de este archivo: NINGUNA (cero imports, solo
@@ -142,6 +143,26 @@ export function parseReviewRetryPath(method: unknown, pathname: unknown): Review
 export function parseReviewRetryReviewPath(method: unknown, pathname: unknown): ReviewRouteOk | null {
   try {
     return parseReviewPostById(method, pathname, "/review/retry-review");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * GET .../:id/review/stale — compara el head actual del PR contra el
+ * `reviewed_head` del último reporte canónico (Fix L: veredicto vencido
+ * ante head nuevo). Null si no es esta ruta; `{error}` si la forma calza
+ * pero el id falta. Puro, nunca lanza. C8: dominio job-review-stale.
+ */
+export function parseReviewStalePath(method: unknown, pathname: unknown): ReviewRouteOk | ReviewPathErr | null {
+  try {
+    const gate = splitReviewPath(method, pathname, "GET", "/review/stale");
+    if (!gate) return null;
+    const id = gate.isWorkItemsAlias ? gate.parts[1] : gate.parts[2];
+    if (!id || id === "review") {
+      return { error: "missing id for review stale" };
+    }
+    return { id, isWorkItemsAlias: gate.isWorkItemsAlias };
   } catch {
     return null;
   }

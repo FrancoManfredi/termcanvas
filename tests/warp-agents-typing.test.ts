@@ -1,90 +1,47 @@
 /**
- * warp-agents-typing — perf Ola 3 (typing jank in AgentConfig).
+ * warp-agents-typing — perf del editor de agentes (Agents console).
  *
- * Root cause: `AgentConfig` computed
- * `JSON.stringify(config) !== JSON.stringify(saved)` on EVERY render —
- * two serializations of the full multi-KB agent.md prompt per keystroke —
- * plus `getFactoryAgentBody` refetched the daemon on every visit to an
- * agent, and `AgentCard` rows re-rendered on every parent render (inline
- * per-row closures).
+ * Root cause original: `AgentConfig` serializaba el prompt completo en cada
+ * render (`JSON.stringify(config) !== JSON.stringify(saved)`) para detectar
+ * cambios. El editor nuevo usa `isAgentDraftDirty` por campo (sin serializar)
+ * y cachea el agente full por nombre en `useAgents`.
  *
- * Fix (3 files):
- * - `AgentConfig.tsx`: field-level `isAgentConfigDirty` (same semantics,
- *   no serialization) + in-memory per-agent body cache.
- * - `useAgents.ts`: stable `selectAgent`/`getConfig`/`saveConfig` refs.
- * - `AgentsPanel.tsx`: memoized `AgentCard` + stable id-based `onSelect`.
- * Offline: pure, zero network.
+ * Offline: puro, cero red.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { isAgentConfigDirty } from "../src/features/warpPanel/components/AgentConfig.tsx";
-import type { AgentConfigData } from "../src/features/warpPanel/types.ts";
+import { isAgentDraftDirty } from "../src/features/warpPanel/agents/agentDraft.ts";
+import type { AgentDraft } from "../src/features/warpPanel/types.ts";
 
-function config(overrides: Partial<AgentConfigData> = {}): AgentConfigData {
+function draft(over: Partial<AgentDraft> = {}): AgentDraft {
   return {
+    name: "foreman",
     description: "Foreman agent",
-    mcps: [{ id: "github", name: "GitHub", icon: "GH", color: "#6e6e6e" }],
-    secrets: [{ id: "secret-1", key: "GITHUB_TOKEN", masked: "ghp_•••" }],
-    harness: "Warp",
-    model: "claude-sonnet-5 (high)",
-    runner: "default",
-    host: "Warp hosted",
+    agentType: "FOREMAN",
+    model: "opencode-go/muse-spark-1.3-contributor",
+    icon: "",
+    tools: [],
+    skills: [],
+    mcps: [],
     prompt: "# Prompt\n\nBody.",
-    automations: [
-      { id: "a1", trigger: "on-issue", description: "d", enabled: true },
-    ],
-    ...overrides,
+    ...over,
   };
 }
 
-test("identical configs are clean (same ref and rebuilt copy)", () => {
-  const c = config();
-  assert.equal(isAgentConfigDirty(c, c), false);
-  assert.equal(isAgentConfigDirty(c, config()), false);
+test("same ref and rebuilt copy are clean", () => {
+  const d = draft();
+  assert.equal(isAgentDraftDirty(d, d), false);
+  assert.equal(isAgentDraftDirty(d, draft()), false);
 });
 
-test("scalar edits are dirty", () => {
-  assert.equal(
-    isAgentConfigDirty(config(), config({ prompt: "# Changed" })),
-    true,
-  );
-  assert.equal(
-    isAgentConfigDirty(config(), config({ description: "x" })),
-    true,
-  );
-  assert.equal(isAgentConfigDirty(config(), config({ model: "x" })), true);
-  assert.equal(isAgentConfigDirty(config(), config({ harness: "x" })), true);
-  assert.equal(isAgentConfigDirty(config(), config({ runner: "x" })), true);
-  assert.equal(isAgentConfigDirty(config(), config({ host: "x" })), true);
-});
-
-test("list add/remove/toggle is dirty", () => {
-  assert.equal(isAgentConfigDirty(config(), config({ mcps: [] })), true);
-  assert.equal(isAgentConfigDirty(config(), config({ secrets: [] })), true);
-  assert.equal(
-    isAgentConfigDirty(
-      config(),
-      config({
-        automations: [
-          { id: "a1", trigger: "on-issue", description: "d", enabled: false },
-        ],
-      }),
-    ),
-    true,
-  );
+test("large prompts compare per-field without throwing", () => {
+  const large = "x".repeat(200_000);
+  assert.equal(isAgentDraftDirty(draft({ prompt: large }), draft({ prompt: large })), false);
+  assert.equal(isAgentDraftDirty(draft({ prompt: large }), draft({ prompt: `${large}y` })), true);
 });
 
 test("junk never throws (degrades to dirty so edits are never hidden)", () => {
-  assert.equal(
-    isAgentConfigDirty(config(), null as unknown as AgentConfigData),
-    true,
-  );
-  assert.equal(
-    isAgentConfigDirty(null as unknown as AgentConfigData, config()),
-    true,
-  );
-  assert.equal(
-    isAgentConfigDirty(config(), config({ mcps: 42 as never })),
-    true,
-  );
+  assert.equal(isAgentDraftDirty(draft(), null as unknown as AgentDraft), true);
+  assert.equal(isAgentDraftDirty(null as unknown as AgentDraft, draft()), true);
+  assert.equal(isAgentDraftDirty(draft(), draft({ mcps: 42 as never })), true);
 });

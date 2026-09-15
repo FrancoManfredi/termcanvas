@@ -321,7 +321,6 @@ export class HeadlessApiServer {
     startTime: number,
   ): void {
     const duration = Date.now() - startTime;
-    console.log(`[api] ${method} ${pathname} ${status} ${duration}ms`);
   }
 
   private sanitizeErrorMessage(message: string): string {

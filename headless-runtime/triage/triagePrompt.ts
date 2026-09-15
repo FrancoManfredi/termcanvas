@@ -100,7 +100,8 @@ export function buildTriagePrompt(
 
   // Turno único de datos: el agente (system prompt del espejo con las
   // reglas de factory/agents/triage/agent.md) ya sabe clasificar; el turno
-  // lleva id, issue, worktree (lo explora con lectura) y cierre.
+  // lleva id, issue, worktree (lo explora con lectura), cierre y el shape
+  // del bloque (las keys exactas viven acá, no en el body: una sola fuente).
   const slim = [
     `WorkItem: ${workItem.id}.`,
     modelRefLine,
@@ -109,6 +110,7 @@ export function buildTriagePrompt(
     contextBlock,
     "",
     "Clasificá ahora (prosa clara + bloque ```json al final):",
+    'Cerrá con UN bloque ```json con las keys exactas: {"decision": "building|spec|triage", "scope": "...", "complexity": "trivial|simple|complex", "openQuestions": ["..."], "reason": "...", "confidence": 0.85}',
   ]
     .filter(Boolean)
     .join("\n");

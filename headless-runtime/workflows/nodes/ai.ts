@@ -11,8 +11,9 @@
  */
 
 import type { NodeExecutionResult } from "../types";
+import type { PromptAttempt } from "../../llm/agentTransport";
 import { NodeExecutionError } from "../errors";
-import { buildToolsRecord, materializeNodeCapabilities } from "../capabilities";
+import { buildToolsRecord, materializeNodeCapabilities, normalizeMcpNames } from "../capabilities";
 
 export interface AiNodeUsage {
   inputTokens?: number;
@@ -36,6 +37,13 @@ export interface AiNodeRequest {
   signal?: AbortSignal;
   /** Sesión a reutilizar (context: shared / context.resume); null = nueva. */
   sessionId?: string | null;
+  /**
+   * Callback: la sesión ya está resuelta (creada o reutilizada) y el mensaje
+   * está por enviarse. El executor lo usa para emitir `node_session_attached`
+   * (Agent Sessions habilita la fila en el envío, no al completar la fase).
+   * Nunca debe romper el nodo: el llamador lo invoca dentro de try/catch.
+   */
+  onSessionCreated?: (sessionId: string) => void;
   /** Fase 2: capacidades por nodo. */
   skills?: string[];
   mcp?: string;
@@ -80,14 +88,20 @@ function mapUsage(usage: unknown): AiNodeUsage | undefined {
   return Object.keys(mapped).length > 0 ? mapped : undefined;
 }
 
+/**
+ * Predicado de frescura compartido con el server manager (fuente única):
+ * true cuando el nodo corre en un server scopeado recién nacido (scope
+ * propio o revisión/huella de agentes cambiada desde que nació el singleton).
+ * Re-export para compat de las suites que lo importan de este módulo.
+ */
+export { shouldUseScopedServer } from "../../opencodeServerManager";
+
 /** Runner real: server OpenCode embebido (o scopeado) + transporte con fusible. */
 export function createOpencodeAiRunner(): AiNodeRunner {
   return async (req: AiNodeRequest): Promise<AiNodeResponse> => {
-    const { ensureClient, spawnOpencodeServer } = await import("../../opencodeServerManager");
-    const { attemptJsonPromptOnce, parseSessionId } = await import("../../llm/agentTransport");
+    const { ensureAgentTurnClient } = await import("../../opencodeServerManager");
+    const { attemptJsonPromptAsyncOnce, attemptJsonPromptOnce, parseSessionId } = await import("../../llm/agentTransport");
     const { structuredFormat } = await import("../../llm/structuredOutput");
-    const { encontrarPuertoServidor } = await import("../../interview/puerto-libre");
-    const { createOpencodeClient } = await import("@opencode-ai/sdk/v2");
 
     let scopedHandle: { close: () => void } | null = null;
     try {
@@ -97,33 +111,37 @@ export function createOpencodeAiRunner(): AiNodeRunner {
       });
 
       let sessionApi: Record<string, unknown>;
+      // MCPs del agente (agent.md → factory/mcps/<bundle>.json): se resuelven
+      // ANTES de materializar para que el server scopeado los inyecte junto a
+      // los del nodo. Sin bundles declarados no hay costo extra.
+      let agentMcpNames: string[] = [];
+      try {
+        const { loadAgentDef } = await import("../../factory/agentLoader");
+        const agentDef = req.agent ? loadAgentDef(req.agent) : null;
+        agentMcpNames = normalizeMcpNames(agentDef?.frontmatter?.mcps);
+      } catch {
+        agentMcpNames = [];
+      }
       const scope = materializeNodeCapabilities(
         { skills: req.skills, mcp: req.mcp },
         {
           repoRoot: req.repoRoot,
           workflowDir: req.workflowDir,
           scopeDir: req.scopeDir,
+          agentMcps: agentMcpNames,
         },
       );
-      if (scope) {
-        const port = await encontrarPuertoServidor(20_000, 45_000, 12);
-        const handle = await spawnOpencodeServer({
-          hostname: "127.0.0.1",
-          port,
-          timeout: 20_000,
-          config: scope.config,
-        });
-        scopedHandle = handle;
-        const scopedClient = createOpencodeClient({
-          baseUrl: handle.url,
-        }) as unknown as { session: Record<string, unknown> };
-        sessionApi = scopedClient.session;
-      } else {
-        const client = (await ensureClient()) as unknown as {
-          session: Record<string, unknown>;
-        };
-        sessionApi = client.session;
-      }
+      // Frescura (fix PLATANO, helper compartido): si la revisión/huella de
+      // agentes vigente cambió desde que nació el singleton, este nodo corre
+      // en un server recién nacido (config fresca de disco) en vez de
+      // heredar el prompt/modelo anterior del singleton. El mismo helper
+      // cubre el scope propio del nodo (skills/mcp) y sella el teardown.
+      const turn = await ensureAgentTurnClient({
+        hasNodeScope: scope !== null,
+        ...(scope ? { scopeConfig: scope.config as Record<string, unknown> } : {}),
+      });
+      scopedHandle = turn.fresh ? { close: turn.close } : null;
+      sessionApi = (turn.client as unknown as { session: Record<string, unknown> }).session;
 
       let sessionId = req.sessionId ?? null;
       if (!sessionId) {
@@ -151,11 +169,40 @@ export function createOpencodeAiRunner(): AiNodeRunner {
         }
       }
 
+      // La sesión ya existe (creada o reutilizada): avisar ANTES del prompt
+      // para que Agent Sessions la habilite en el envío. Observabilidad pura:
+      // jamás rompe el nodo.
+      try {
+        req.onSessionCreated?.(sessionId);
+      } catch {
+        // best-effort
+      }
+
       const promptFn = sessionApi.prompt as
         | ((params: unknown, opts?: unknown) => Promise<unknown>)
         | undefined;
-      if (typeof promptFn !== "function") {
-        throw new NodeExecutionError(req.nodeId, "session.prompt no disponible en el SDK");
+      // Transporte async (incidente #125): `promptAsync` + `messages` es el
+      // camino preferido — el turno no vive pegado al request HTTP (el
+      // server puede cortar la respuesta síncrona de un turno largo
+      // mientras la sesión sigue corriendo). Sin esas dos funciones se cae
+      // al prompt síncrono de siempre (fakes/tests y servers viejos).
+      const promptAsyncFn = sessionApi.promptAsync as
+        | ((params: unknown, opts?: unknown) => Promise<unknown>)
+        | undefined;
+      const messagesFn = sessionApi.messages as
+        | ((params: unknown, opts?: unknown) => Promise<unknown>)
+        | undefined;
+      const abortFn = sessionApi.abort as
+        | ((params: unknown, opts?: unknown) => Promise<unknown>)
+        | undefined;
+      if (
+        typeof promptFn !== "function" &&
+        typeof promptAsyncFn !== "function"
+      ) {
+        throw new NodeExecutionError(
+          req.nodeId,
+          "session.prompt/promptAsync no disponibles en el SDK",
+        );
       }
 
       const parts: Array<Record<string, unknown>> = [];
@@ -166,34 +213,88 @@ export function createOpencodeAiRunner(): AiNodeRunner {
       const modelRef = buildModelRef(req.model);
       if (modelRef) payload.model = modelRef;
       if (req.effort) payload.variant = req.effort;
-      if (req.agent) {
-        try {
-          const { sessionAgentArgs } = await import("../../factory/opencodeAgentSync");
-          Object.assign(payload, sessionAgentArgs(req.agent));
-        } catch {
-          payload.agent = req.agent;
+      if (!req.agent || req.agent.trim() === "") {
+        // Estricto: un nodo IA sin identidad jamás corre con el agente
+        // primario de opencode (Build). Falla con error claro.
+        throw new NodeExecutionError(
+          req.nodeId,
+          "nodo IA sin `agent`: la identidad es obligatoria (nunca corre el agente primario)",
+        );
+      }
+      {
+        const { resolveSessionAgent } = await import("../../factory/opencodeAgentSync");
+        const identity = resolveSessionAgent(req.agent);
+        if (identity === null) {
+          throw new NodeExecutionError(
+            req.nodeId,
+            `agente "${req.agent}" no resuelto: falta factory/agents/${req.agent}/agent.md (el server efímero inyecta los agentes inline)`,
+          );
         }
+        Object.assign(payload, identity);
       }
       if (req.outputFormat) payload.format = structuredFormat(req.outputFormat);
       if (tools) payload.tools = tools;
 
-      const attempt = await attemptJsonPromptOnce(
-        (signal: AbortSignal, body: Record<string, unknown>) =>
-          promptFn.call(sessionApi, { sessionID: sessionId, ...body }, { signal }),
-        {
-          payload,
-          label: `workflow ${req.nodeId} session.prompt`,
-          jobId: req.runId,
-          sessionId,
-          ...(typeof req.timeoutMs === "number" ? { ms: req.timeoutMs } : {}),
-        },
-      );
+      const attemptOpts = {
+        payload,
+        label: `workflow ${req.nodeId} session.prompt`,
+        jobId: req.runId,
+        sessionId,
+        ...(typeof req.timeoutMs === "number" ? { ms: req.timeoutMs } : {}),
+      };
+      let attempt: PromptAttempt;
+      if (typeof promptAsyncFn === "function" && typeof messagesFn === "function") {
+        attempt = await attemptJsonPromptAsyncOnce(
+          {
+            promptAsync: (params, opts) =>
+              promptAsyncFn.call(sessionApi, params, opts),
+            messages: (params, opts) =>
+              messagesFn.call(sessionApi, params, opts),
+            ...(typeof abortFn === "function"
+              ? {
+                  abort: (params, opts) =>
+                    abortFn.call(sessionApi, params, opts),
+                }
+              : {}),
+          },
+          {
+            ...attemptOpts,
+            sessionID: sessionId,
+            // Cancelación del run (discard/cancel): corta el poll y aborta
+            // el turno en el server en vez de dejarlo hasta el fusible.
+            ...(req.signal ? { signal: req.signal } : {}),
+          },
+        );
+      } else if (typeof promptFn === "function") {
+        attempt = await attemptJsonPromptOnce(
+          (signal: AbortSignal, body: Record<string, unknown>) =>
+            promptFn.call(
+              sessionApi,
+              { sessionID: sessionId, ...body },
+              { signal },
+            ),
+          attemptOpts,
+        );
+      } else {
+        throw new NodeExecutionError(
+          req.nodeId,
+          "session.prompt/promptAsync no disponibles en el SDK",
+        );
+      }
 
       if (attempt.raw === null) {
         const message =
           attempt.lastErr instanceof Error
             ? attempt.lastErr.message
-            : String(attempt.lastErr ?? "sin respuesta");
+            : attempt.lastErr === null || attempt.lastErr === undefined
+              ? "sin respuesta"
+              : (() => {
+                  try {
+                    return JSON.stringify(attempt.lastErr).slice(0, 300);
+                  } catch {
+                    return String(attempt.lastErr).slice(0, 300);
+                  }
+                })();
         throw new NodeExecutionError(
           req.nodeId,
           `prompt falló: ${message.slice(0, 300)}`,

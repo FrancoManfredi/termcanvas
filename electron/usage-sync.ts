@@ -397,8 +397,6 @@ export async function backfillHistory(): Promise<void> {
 
   try {
     await writeFile(BACKFILL_FLAG, new Date().toISOString(), "utf-8");
-    if (isDev)
-      console.log(PREFIX, `Backfill complete: ${allRecords.length} records`);
   } catch (err) {
     console.error(PREFIX, "Failed to write backfill flag:", err);
   }

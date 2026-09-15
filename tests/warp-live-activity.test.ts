@@ -26,6 +26,10 @@ import {
 } from "../src/canvas/reviewVerdict.ts";
 import { useIssueResolveStore } from "../src/stores/issueResolveStore.ts";
 import { useIssueReviewStore } from "../src/stores/issueReviewStore.ts";
+import {
+  resetSeedStateForTests,
+  seedOpenPrsFromFactoryJobs,
+} from "../src/features/factoryLab/hooks/useWorkItemsPolling.ts";
 
 // ─── Shared fakes ──────────────────────────────────────────────────────────
 
@@ -459,6 +463,7 @@ test("describe: returns the full CTA set in stable order", () => {
       "approve-spec",
       "reject-spec",
       "resume",
+      "rerun",
       "discard",
       "re-review",
       "triage-respond",
@@ -596,6 +601,109 @@ test("describe: merge only for aprobado + OPEN with busy … variant", () => {
   ).get("merge");
   assert.equal(busyMerge?.label, "Merge PR…");
   assert.equal(busyMerge?.enabled, false);
+});
+
+test("describe: merge C1 (factory Complete + PR abierto) sin review:aprobado", () => {
+  const c1 = byKind(
+    describeActivityActions(baseArgs({ factoryMergeApproved: true })),
+  ).get("merge");
+  assert.equal(c1?.enabled, true, "C1 habilita Merge sin label aprobado");
+  assert.equal(c1?.title, "Merge PR #50");
+  // N1 neutral sin C1 sigue con Merge disabled (matriz intacta).
+  assert.equal(
+    byKind(describeActivityActions(baseArgs())).get("merge")?.enabled,
+    false,
+  );
+  // PR cerrado / changes-requested nunca mergean, ni con C1.
+  assert.equal(
+    byKind(
+      describeActivityActions(
+        baseArgs({ factoryMergeApproved: true, prState: "MERGED" }),
+      ),
+    ).get("merge")?.enabled,
+    false,
+  );
+  assert.equal(
+    byKind(
+      describeActivityActions(
+        baseArgs({
+          factoryMergeApproved: true,
+          effective: REVIEW_LABEL_CHANGES,
+        }),
+      ),
+    ).get("merge")?.enabled,
+    false,
+  );
+  // Gate fallido o conflicto activo tampoco mergean por C1.
+  assert.equal(
+    byKind(
+      describeActivityActions(
+        baseArgs({
+          factoryMergeApproved: true,
+          effective: REVIEW_LABEL_GATE_FAIL,
+          gateStatus: "fail",
+        }),
+      ),
+    ).get("merge")?.enabled,
+    false,
+  );
+  assert.equal(
+    byKind(
+      describeActivityActions(
+        baseArgs({ factoryMergeApproved: true, conflicted: true }),
+      ),
+    ).get("merge")?.enabled,
+    false,
+  );
+});
+
+test("invoke merge C1: repo del issue + merge-notify al daemon (seams offline)", async () => {
+  const merges: Array<{ repoPath: string; prNumber: number }> = [];
+  const closed: Array<{ jobId: string; prNumber: number }> = [];
+  const notes: string[] = [];
+  await invokeActivityAction("merge", 7, 50, {
+    factoryMergeApproved: true,
+    worktreePath: "/repo/issue-7",
+    factoryJobId: "job-merge-1",
+    githubMergePr: async (repoPath, prNumber) => {
+      merges.push({ repoPath, prNumber });
+      return { ok: true };
+    },
+    notifyFactoryJobMerged: async (jobId, prNumber) => {
+      closed.push({ jobId, prNumber });
+      return { ok: true };
+    },
+    notify: (message) => notes.push(message),
+  });
+  assert.deepEqual(merges, [{ repoPath: "/repo/issue-7", prNumber: 50 }]);
+  assert.deepEqual(closed, [{ jobId: "job-merge-1", prNumber: 50 }]);
+  assert.ok(notes.some((m) => m.includes("mergeado")));
+});
+
+test("invoke merge C1: fallo de merge no avisa al daemon y notifica honesto", async () => {
+  const closed: string[] = [];
+  const notes: string[] = [];
+  await invokeActivityAction("merge", 7, 50, {
+    factoryMergeApproved: true,
+    worktreePath: "/repo/issue-7",
+    factoryJobId: "job-merge-2",
+    githubMergePr: async () => ({ ok: false, error: "conflicto con main" }),
+    notifyFactoryJobMerged: async (jobId) => {
+      closed.push(jobId);
+      return { ok: true };
+    },
+    notify: (message) => notes.push(message),
+  });
+  assert.deepEqual(closed, [], "sin merge no hay close-out");
+  assert.ok(notes.some((m) => m.includes("conflicto con main")));
+});
+
+test("invoke merge sin C1 sigue delegando al handler del canvas", async () => {
+  const handlerCalls: Array<number | undefined> = [];
+  await invokeActivityAction("merge", 7, 50, {
+    mergeHandler: (issueNumber) => handlerCalls.push(issueNumber),
+  });
+  assert.deepEqual(handlerCalls, [7]);
 });
 
 test("describe: conflict + gate rows gate on flags, not on guesses", () => {
@@ -1159,4 +1267,202 @@ test("row carries factory.stalled for jobs past the threshold", () => {
     false,
     "no job = no stalled flag invented",
   );
+});
+
+// ─── H0c end-to-end: dead run → awaiting/rerun (incidente #125) ───────────
+// The engine run died (`engineRun.status = "failed"`, job Cancelled) while
+// the activity adapter only asked for a human need on ACTIVE jobs — the row
+// fell to Pending with no CTA (real #125: implement failed at ~5m, session
+// kept running server-side). The linked-but-dead job must map to
+// awaiting/YOUR TURN with the Re-run CTA AND keep its panel evidence.
+
+function deadRunJob(id: string, issueNumber: number): unknown {
+  return {
+    id,
+    status: "Cancelled",
+    state: "error",
+    phase: "diagnosisLlm",
+    worktree: "C:/repos/termcanvas",
+    runnerId: "linux-build",
+    createdAt: "2026-09-13T04:43:22.000Z",
+    updatedAt: "2026-09-13T04:48:38.000Z",
+    timeline: [],
+    engineRun: {
+      runId: "run-dead",
+      workflow: "plan-approve-implement",
+      status: "failed",
+      currentNodeId: null,
+      nodes: ["plan", "gate", "build.implement", "build.verify", "build.review"],
+      completedNodes: ["plan", "gate"],
+      nodeStates: {
+        plan: "completed",
+        gate: "completed",
+        "build.implement": "failed",
+        "build.verify": "skipped",
+        "build.review": "skipped",
+      },
+    },
+    issueRef: {
+      provider: "github",
+      issueNumber,
+      repo: "org/termcanvas",
+      url: `https://github.com/org/termcanvas/issues/${issueNumber}`,
+    },
+  };
+}
+
+test("H0c adapter: dead-run job maps to awaiting/rerun with evidence attached", () => {
+  const rows = stalledAdapter([deadRunJob("job-dead", 7)]).listActivityIssues();
+  const row = rows.find((r) => r.id === 7);
+  assert.ok(row, "row 7 listed");
+  assert.equal(row?.status, "awaiting");
+  assert.equal(row?.awaitingAction, "rerun");
+  assert.equal(row?.factoryAwaiting?.kind, "rerun");
+  assert.equal(row?.factoryAwaiting?.jobId, "job-dead");
+  assert.equal(
+    row?.factory?.jobId,
+    "job-dead",
+    "dead-run panel evidence (stage/sessions) stays attached",
+  );
+});
+
+test("H0c adapter: an active job still wins over a dead-run sibling", () => {
+  const active = { ...(deadRunJob("job-active", 7) as Record<string, unknown>) };
+  active.status = "Building";
+  active.state = "running";
+  active.engineRun = {
+    runId: "run-live",
+    workflow: "plan-approve-implement",
+    status: "running",
+    currentNodeId: "build.implement",
+  };
+  const rows = stalledAdapter([deadRunJob("job-dead", 7), active]).listActivityIssues();
+  const row = rows.find((r) => r.id === 7);
+  assert.equal(row?.status, "in-progress");
+  assert.equal(row?.phase, "implementing");
+  assert.equal(row?.awaitingAction, undefined);
+  assert.equal(row?.factory?.jobId, "job-active");
+});
+
+test("H0c derivation: rerun gate fires with factoryLinked, not without", () => {
+  assert.deepEqual(
+    deriveActivityStatus(
+      7,
+      baseReview(),
+      null,
+      "OPEN",
+      false,
+      "rerun",
+      false,
+      false,
+      true,
+    ),
+    { status: "awaiting", awaitingAction: "rerun" },
+  );
+  // Backward-safe: no linked job → the rerun kind is ignored (pending).
+  assert.deepEqual(
+    deriveActivityStatus(
+      7,
+      baseReview(),
+      null,
+      "OPEN",
+      false,
+      "rerun",
+      false,
+      false,
+      false,
+    ),
+    { status: "pending" },
+  );
+});
+
+test("H0c derivation: dead run never claims in-progress via I3", () => {
+  assert.deepEqual(
+    deriveActivityStatus(7, baseReview(), null, "OPEN", false),
+    { status: "pending" },
+  );
+});
+
+// ─── PR seed desde el daemon (fila sin PR cuando la lookup cacheó null) ────
+
+test("seed: el PR del daemon pisa un null viejo de la lookup (panel en vivo)", () => {
+  resetSeedStateForTests();
+  const store = useIssueReviewStore.getState();
+  // Foto vieja: la fila se miró durante el run y la lookup dijo "sin PR".
+  store.setPrStatus(123, null);
+  store.setOpenPrs(123, []);
+  seedOpenPrsFromFactoryJobs([
+    {
+      id: "job-seed-1",
+      status: "Complete",
+      isolation: {
+        branch: "issue-123-fix",
+        prNumber: 139,
+        prUrl: "https://github.com/o/r/pull/139",
+      },
+    },
+  ]);
+  const after = useIssueReviewStore.getState();
+  const primary = after.prsByIssue[123];
+  assert.ok(primary !== null && typeof primary === "object");
+  assert.equal((primary as { number: number }).number, 139);
+  assert.equal((primary as { state: string }).state, "OPEN");
+  assert.ok(
+    (after.openPrsByIssue[123] ?? []).some((p) => p.number === 139),
+    "openPrs incluye el PR sembrado",
+  );
+});
+
+test("seed: un PR real cacheado manda (el seed no lo pisa)", () => {
+  resetSeedStateForTests();
+  const store = useIssueReviewStore.getState();
+  store.setPrStatus(124, {
+    number: 5,
+    title: "real",
+    url: "https://github.com/o/r/pull/5",
+    state: "OPEN",
+    headRefName: "issue-124-fix",
+    headRefOid: "",
+  });
+  seedOpenPrsFromFactoryJobs([
+    {
+      id: "job-seed-2",
+      status: "Complete",
+      isolation: {
+        branch: "issue-124-fix",
+        prNumber: 140,
+        prUrl: "https://github.com/o/r/pull/140",
+      },
+    },
+  ]);
+  const after = useIssueReviewStore.getState();
+  assert.equal((after.prsByIssue[124] as { number: number }).number, 5);
+  assert.ok(
+    !(after.openPrsByIssue[124] ?? []).some((p) => p.number === 140),
+    "el seed no mete un PR cuando ya hay uno real",
+  );
+});
+
+test("seed: el rate-limit por issue evita el storm cuando el null vuelve", () => {
+  resetSeedStateForTests();
+  const store = useIssueReviewStore.getState();
+  store.setPrStatus(125, null);
+  const job = {
+    id: "job-seed-3",
+    status: "Complete",
+    isolation: {
+      branch: "issue-125-fix",
+      prNumber: 141,
+      prUrl: "https://github.com/o/r/pull/141",
+    },
+  };
+  seedOpenPrsFromFactoryJobs([job]);
+  // La lookup vuelve a cachear null (lag de indexado / PR cerrado): dentro
+  // del TTL no se re-siembra ni se re-fuerza el lookup.
+  store.setPrStatus(125, null);
+  store.setOpenPrs(125, []);
+  seedOpenPrsFromFactoryJobs([job]);
+  const after = useIssueReviewStore.getState();
+  assert.equal(after.prsByIssue[125], null, "dentro del TTL no re-siembra");
+  assert.deepEqual(after.openPrsByIssue[125] ?? [], []);
 });

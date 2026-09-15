@@ -56,7 +56,7 @@ import {
 } from "../headless-runtime/measure/scorerHttp.ts";
 import { workItemStore } from "../headless-runtime/workItem/workItemStore.ts";
 
-const SCORER_MODEL = "opencode-go/muse-spark-1.2-contributor";
+const SCORER_MODEL = "opencode-go/muse-spark-1.3-contributor";
 const REAL_SCORERS = [
   "review-formato-valido",
   "implement-scope-1-3",

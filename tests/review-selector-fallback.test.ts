@@ -32,7 +32,7 @@ test("H-006: fallback builder-aware evita el par colisionado (disjoint real)", (
 test("H-006: fallbackFor sin builder intacto (mapeo canónico, pacts a salvo)", () => {
   assert.deepEqual(fallbackFor(PRIMARY_H006), {
     providerID: "opencode-go",
-    modelID: "muse-spark-1.2-contributor",
+    modelID: "muse-spark-1.3-contributor",
   });
   assert.deepEqual(fallbackFor({ providerID: "anthropic", modelID: "claude-sonnet-4-20250514" }), {
     providerID: "openai",

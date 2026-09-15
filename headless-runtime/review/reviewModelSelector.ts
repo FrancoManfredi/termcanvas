@@ -32,7 +32,7 @@ export const REVIEWER_DEFAULT: ModelRef = {
 
 export const REVIEWER_MUSE_SPARK: ModelRef = {
   providerID: "opencode-go",
-  modelID: "muse-spark-1.2-contributor",
+  modelID: "muse-spark-1.3-contributor",
 };
 
 export const REVIEWER_GPT4O: ModelRef = {
@@ -50,7 +50,7 @@ export const REVIEWER_ANTHROPIC: ModelRef = {
  */
 export const REVIEWER_PAIRS: Array<{ match: string; reviewer: string }> = [
   { match: "muse-spark → big-pickle", reviewer: "opencode/big-pickle" },
-  { match: "big-pickle → muse-spark", reviewer: "opencode-go/muse-spark-1.2-contributor" },
+  { match: "big-pickle → muse-spark", reviewer: "opencode-go/muse-spark-1.3-contributor" },
   { match: "anthropic/* → gpt-4o", reviewer: "openai/gpt-4o" },
   { match: "openai/* → anthropic", reviewer: "anthropic/claude-sonnet-4-20250514" },
 ];

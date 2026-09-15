@@ -11,7 +11,8 @@ ports:
 # Timeouts en milisegundos — doctrina sin-límites: el ÚNICO que queda es el
 # de verificación (cada paso test/build muere por este techo con kill en 2
 # fases: seguridad de proceso, no límite de fase). Los turnos LLM viven hasta
-# el fusible global GLOBAL_AGENT_FUSE_MS (headless-runtime/llm/agentTransport)
+# el fusible global GLOBAL_AGENT_FUSE_MS (default 600s; ajustable sin
+# recompilar vía env TERMCANVAS_AGENT_FUSE_MS — headless-runtime/llm/agentTransport)
 # y session.create hasta SESSION_CREATE_FUSE_MS: sin timeouts por fase.
 # - verifyMs: IMPLEMENT_VERIFY_TIMEOUT_MS (shared/types/implement.ts, verify fail-fast test+build) — 120s por paso.
 timeouts:
@@ -22,8 +23,8 @@ timeouts:
 # - review: auto-disjoint documenta que lo resuelve reviewModelSelector (ver H4),
 #   con override explícito reviewerRef cuando el usuario lo pide.
 defaultModels:
-  foreman: "opencode-go/muse-spark-1.2-contributor"
-  implement: "opencode-go/muse-spark-1.2-contributor"
+  foreman: "opencode-go/muse-spark-1.3-contributor"
+  implement: "opencode-go/muse-spark-1.3-contributor"
   review: "auto-disjoint"
 
 # Pares builder -> revisor (H4): espejo EXACTO de REVIEWER_PAIRS
@@ -33,7 +34,7 @@ reviewerPairs:
   - match: "muse-spark → big-pickle"
     reviewer: "opencode/big-pickle"
   - match: "big-pickle → muse-spark"
-    reviewer: "opencode-go/muse-spark-1.2-contributor"
+    reviewer: "opencode-go/muse-spark-1.3-contributor"
   - match: "anthropic/* → gpt-4o"
     reviewer: "openai/gpt-4o"
   - match: "openai/* → anthropic"

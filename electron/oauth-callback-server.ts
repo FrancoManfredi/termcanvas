@@ -162,7 +162,6 @@ export function startOAuthCallbackServer(): {
       // Check for authorization code (PKCE flow)
       const code = url.searchParams.get("code");
       if (code) {
-        if (isDev) console.log("[OAuthCallback] Authorization code received");
         settle({ type: "success", code });
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end(RELAY_HTML);
@@ -201,9 +200,6 @@ export function startOAuthCallbackServer(): {
   });
 
   server.listen(CALLBACK_PORT, "127.0.0.1", () => {
-    if (isDev) console.log(
-      `[OAuthCallback] Listening on http://127.0.0.1:${CALLBACK_PORT}/callback`,
-    );
   });
 
   // Timeout — don't leave the server hanging forever

@@ -17,6 +17,7 @@ import {
 import {
   findActiveFactoryJobForIssueIndexed,
   findCompletedFactoryJobForIssueIndexed,
+  findRerunnableFactoryJobForIssueIndexed,
   getFactoryJobIndex,
   isFactoryJobStalled,
   readJobTimestampMs,
@@ -551,21 +552,43 @@ export class LiveActivityAdapter implements ActivityAdapter {
         // the human-gate derivation, AND the live stage/session attached
         // below, so status and progress can never disagree about which job
         // they describe.
+        const nodeRepo =
+          typeof record.url === "string"
+            ? parseGitHubIssueRepo(record.url)
+            : null;
         const factoryJob = activeFactoryJobForIssue(
           factoryIndex,
           issueNumber,
           typeof record.url === "string" ? record.url : null,
         );
-        // Human gate for the SAME job (spec approval / triage answers /
-        // ask_human — read from the poll-list item, H4 fallback from the
-        // threaded notifications). A waiting job maps to awaiting/YOUR
-        // TURN (rows F-A1–F-A4) instead of generic implementing.
+        // H0c link (incidente #125): a dead run (`engineRun` failed/cancelled)
+        // is NOT active, so the active finder skips it — yet it still needs
+        // the human (Re-run). Resolve it against the SAME index so the row
+        // stops reading "pending" as if nothing had happened.
+        let rerunnableJob: unknown | null = null;
+        if (factoryJob === null) {
+          try {
+            rerunnableJob = findRerunnableFactoryJobForIssueIndexed(
+              factoryIndex,
+              issueNumber,
+              nodeRepo,
+            );
+          } catch {
+            rerunnableJob = null;
+          }
+        }
+        const linkedJob: unknown | null = factoryJob ?? rerunnableJob;
+        // Human gate for the SAME linked job (spec approval / triage answers
+        // / ask_human / dead-run Re-run — read from the poll-list item, H4
+        // fallback from the threaded notifications). A waiting or dead job
+        // maps to awaiting/YOUR TURN (rows F-A) instead of generic
+        // implementing or a dead-end pending.
         let factoryAwaitingKind: string | null = null;
         let factoryAwaiting: Issue["factoryAwaiting"] = undefined;
         try {
-          if (factoryJob !== null) {
+          if (linkedJob !== null) {
             const need = readFactoryJobHumanNeed(
-              factoryJob,
+              linkedJob,
               pendingNotifications,
             );
             if (need !== null) {
@@ -604,9 +627,7 @@ export class LiveActivityAdapter implements ActivityAdapter {
           factoryCompletedJob = findCompletedFactoryJobForIssueIndexed(
             factoryIndex,
             issueNumber,
-            typeof record.url === "string"
-              ? parseGitHubIssueRepo(record.url)
-              : null,
+            nodeRepo,
           );
           factoryCompleted = factoryCompletedJob !== null;
         } catch {
@@ -628,6 +649,23 @@ export class LiveActivityAdapter implements ActivityAdapter {
         } catch {
           optimisticReady = false;
         }
+        // Merge confirmado por el daemon (close-out externo vía `gh pr view`
+        // + `isolation.state="pr-merged"`): evidencia real de done aunque la
+        // lookup de GitHub del renderer todavía no haya corrido.
+        let factoryPrMerged = false;
+        try {
+          const iso = (
+            factoryCompletedJob as
+              | { isolation?: { state?: unknown } }
+              | null
+          )?.isolation;
+          factoryPrMerged =
+            iso !== null &&
+            typeof iso === "object" &&
+            (iso as { state?: unknown }).state === "pr-merged";
+        } catch {
+          factoryPrMerged = false;
+        }
         const derived = deriveActivityStatus(
           issueNumber,
           review,
@@ -637,6 +675,8 @@ export class LiveActivityAdapter implements ActivityAdapter {
           factoryAwaitingKind,
           factoryCompleted,
           optimisticReady,
+          linkedJob !== null,
+          factoryPrMerged,
         );
         const rawProjectId =
           typeof record.projectId === "string" ? record.projectId : "";
@@ -672,24 +712,28 @@ export class LiveActivityAdapter implements ActivityAdapter {
           projectName,
           entries,
         );
-        // Live Warp cycle stage + session link for the SAME matched job
+        // Live Warp cycle stage + session link for the SAME linked job
         // (verbatim daemon status + daemon-built dashboardUrl; absent when
         // the job shape is unknown — the row keeps the generic phase).
-        // When no active job is linked but a terminal Complete job is, its
-        // panel info is attached instead so Ready to Merge rows keep their
-        // worktree (explicit delete), phase sessions and PR link. The
-        // in-progress timeline stays gated on active jobs in the detail.
+        // H0c: a dead-run job (not active) also attaches its panel info so
+        // the detail keeps the engineRun/stepper/sessions evidence that
+        // explains the failure instead of a bare Re-run row.
+        // When no active/rerunnable job is linked but a terminal Complete
+        // job is, its panel info is attached instead so Ready to Merge rows
+        // keep their worktree (explicit delete), phase sessions and PR link.
+        // The in-progress timeline stays gated on active jobs in the detail.
         try {
-          if (factoryJob !== null) {
-            const panelInfo = describeFactoryJobForPanel(factoryJob);
+          const infoJob = factoryJob ?? rerunnableJob;
+          if (infoJob !== null) {
+            const panelInfo = describeFactoryJobForPanel(infoJob);
             if (panelInfo !== null) {
               // B4/B5 freshness (additive, honest-empty when unknown —
               // never invented, never a fabricated lane).
-              const createdAtMs = readJobTimestampMs(factoryJob, "createdAt");
+              const createdAtMs = readJobTimestampMs(infoJob, "createdAt");
               if (createdAtMs !== null) panelInfo.createdAtMs = createdAtMs;
-              const updatedAtMs = readJobTimestampMs(factoryJob, "updatedAt");
+              const updatedAtMs = readJobTimestampMs(infoJob, "updatedAt");
               if (updatedAtMs !== null) panelInfo.updatedAtMs = updatedAtMs;
-              if (isFactoryJobStalled(factoryJob, snapshotNowMs)) {
+              if (isFactoryJobStalled(infoJob, snapshotNowMs)) {
                 panelInfo.stalled = true;
               }
               mapped.factory = panelInfo;

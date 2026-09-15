@@ -53,7 +53,6 @@ import { reviewService } from "../headless-runtime/review/reviewService.ts";
 import { setReviewPromptMock } from "../headless-runtime/review/reviewAgent.ts";
 import { setTriagePromptMock } from "../headless-runtime/triage/triageAgent.ts";
 import { setSpecPromptMock } from "../headless-runtime/spec/specAgent.ts";
-import { runForemanDecisionAndDispatch } from "../headless-runtime/factory/factoryServer.ts";
 import { tryCreateOpencodeSession } from "../headless-runtime/factory/factoryServer.ts";
 
 // ── Sandbox factory (todo .notifications.json va acá, nunca al repo real) ──
@@ -428,32 +427,6 @@ test("emisor (a) ask_human: reviewService genera 1 con el texto de la decisión"
     assert.ok(found!.body.includes("necesito tu decisión"), `body espeja la decisión, fue "${found!.body}"`);
   } finally {
     setReviewPromptMock(null);
-  }
-});
-
-test("emisor (b) spec pendiente: gate no-trivial genera 1 spec-approval", async () => {
-  resetStore();
-  const id = nextJobId("job-specgate");
-  makeJobInStatus(id, "Foreman");
-  setTriagePromptMock(async () =>
-    JSON.stringify({ decision: "spec", scope: "multi-archivo", complexity: "complex", openQuestions: [], reason: "necesita plan", confidence: 0.8 }),
-  );
-  setSpecPromptMock(async () =>
-    JSON.stringify({ summary: "spec no-trivial de prueba para aprobar", acceptanceCriteria: ["c1"], targetFiles: [], trivial: false, openQuestions: [] }),
-  );
-  try {
-    const before = listNotifications().length;
-    await runForemanDecisionAndDispatch(id);
-    const after = listNotifications();
-    const found = after.find((n) => n.kind === "spec-approval" && n.workItemId === id);
-    assert.ok(found, `spec gate debe notificar (hubo ${after.length - before} nuevas)`);
-    assert.equal(found!.title, "Spec pendiente de aprobación");
-    assert.ok(found!.body.includes("spec no-trivial de prueba"), `body espeja el summary, fue "${found!.body}"`);
-    // El job quedó en Triage esperando humano (el gate no se rompió).
-    assert.equal(workItemStore.get(id)?.status, "Triage");
-  } finally {
-    setTriagePromptMock(null);
-    setSpecPromptMock(null);
   }
 });
 

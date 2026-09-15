@@ -66,7 +66,7 @@ test("B-A1 arranque delega: el cascarón importa y llama al dominio", () => {
     "decideRestoreJobB(",
     "applyDotDoneB(",
     "shouldRetryBindB(",
-    "shouldKickManagerB(",
+    "shouldKickManagerBackoffB(",
     "buildPortFilePathB(",
     "formatPortFileB(",
   ]) {

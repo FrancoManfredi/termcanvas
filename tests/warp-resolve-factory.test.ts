@@ -169,7 +169,7 @@ function resolveDeps(
 
 // ─── Prompt building ─────────────────────────────────────────────────────
 
-test("prompt carries title/body/labels/url and the Closes trailer", () => {
+test("prompt carries title/body/labels/url and no orchestrator boilerplate", () => {
   const prompt = buildFactoryResolvePrompt({
     issueNumber: 7,
     title: "Fix the thing",
@@ -182,13 +182,11 @@ test("prompt carries title/body/labels/url and the Closes trailer", () => {
   assert.ok(prompt.includes("Long description"));
   assert.ok(prompt.includes("bug"));
   assert.ok(prompt.includes(ISSUE_URL));
-  assert.ok(prompt.includes("Closes #7"));
-  // El template NUNCA le pide al LLM abrir el PR: el orquestador es el
-  // único dueño (commit+push+create). El modelo deja todo sin commitear.
-  // (La frase "NEVER open a pull request" contiene ese substring: por eso se
-  // afirma la forma NEVER + uncommitted, no la ausencia del substring.)
-  assert.ok(prompt.includes("NEVER open a pull request"));
-  assert.ok(prompt.includes("uncommitted"));
+  // F15: las reglas de orquestador viven en los agent.md; el prompt ya no
+  // lleva el bloque SCOPE (ni Closes/NEVER/uncommitted).
+  assert.equal(prompt.includes("## SCOPE"), false, "sin bloque SCOPE");
+  assert.equal(prompt.includes("NEVER open a pull request"), false);
+  assert.equal(prompt.includes("uncommitted"), false);
 });
 
 test("prompt no duplica el SCOPE si el body ya lo trae (una sola copia)", () => {

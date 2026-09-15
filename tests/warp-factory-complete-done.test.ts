@@ -236,6 +236,52 @@ test("activity: Complete + OPEN PR invites a merge (C1)", () => {
   });
 });
 
+test("activity: factoryPrMerged (close-out externo del daemon) settlea done", () => {
+  // Merge confirmado por el daemon (`gh pr view` → isolation pr-merged):
+  // evidencia real, la fila pasa a done aunque la lookup del renderer no
+  // haya corrido (merge hecho desde GitHub UI/consola).
+  assert.deepEqual(
+    deriveActivityStatus(
+      7,
+      emptyReview(),
+      null,
+      "OPEN",
+      false,
+      null,
+      true,
+      false,
+      false,
+      true,
+    ),
+    { status: "done" },
+  );
+  // Sin la evidencia no inventa done: sigue C1 merge-ready (PR abierto).
+  assert.deepEqual(
+    deriveActivityStatus(
+      7,
+      emptyReview({
+        primaryPrByIssue: {
+          7: {
+            number: 61,
+            title: "PR",
+            url: "https://x/y/pull/61",
+            state: "OPEN",
+          },
+        },
+      }),
+      null,
+      "OPEN",
+      false,
+      null,
+      true,
+      false,
+      false,
+      false,
+    ),
+    { status: "ready", awaitingAction: "merge-ready" },
+  );
+});
+
 test("activity: done still requires real merge evidence", () => {
   // MERGED PR → done even with a Complete flag present.
   assert.deepEqual(

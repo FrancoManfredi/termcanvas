@@ -3,9 +3,12 @@ import assert from "node:assert/strict";
 import {
   GLOBAL_AGENT_FUSE_MS,
   SESSION_CREATE_FUSE_MS,
+  attemptJsonPromptAsyncOnce,
   attemptJsonPromptOnce,
+  attemptPromptAsyncOnce,
   attemptPromptOnce,
   extractSessionText,
+  globalAgentFuseMs,
   isRetryableTransportError,
   isTimeoutLikeError,
   parseSessionId,
@@ -14,6 +17,7 @@ import {
   withTimeoutNoResend,
   withTransportRetry,
 } from "../headless-runtime/llm/agentTransport.ts";
+import { resetFormatUnsupportedMemoForTests } from "../headless-runtime/llm/structuredOutput.ts";
 
 // Módulo único de transporte LLM (doctrina no-resend, Track A):
 // timeout/abort = el modelo sigue pensando → NUNCA reenviar;
@@ -48,6 +52,23 @@ test("isRetryableTransportError: transporte true, timeout/abort/zod false", () =
 test("fusibles: global 10min, create 30s", () => {
   assert.equal(GLOBAL_AGENT_FUSE_MS, 600_000);
   assert.equal(SESSION_CREATE_FUSE_MS, 30_000);
+});
+
+test("globalAgentFuseMs: default y override por TERMCANVAS_AGENT_FUSE_MS", () => {
+  const prev = process.env.TERMCANVAS_AGENT_FUSE_MS;
+  try {
+    delete process.env.TERMCANVAS_AGENT_FUSE_MS;
+    assert.equal(globalAgentFuseMs(), GLOBAL_AGENT_FUSE_MS);
+    process.env.TERMCANVAS_AGENT_FUSE_MS = "1800000";
+    assert.equal(globalAgentFuseMs(), 1_800_000);
+    process.env.TERMCANVAS_AGENT_FUSE_MS = "0";
+    assert.equal(globalAgentFuseMs(), GLOBAL_AGENT_FUSE_MS, "0 cae al default");
+    process.env.TERMCANVAS_AGENT_FUSE_MS = "nope";
+    assert.equal(globalAgentFuseMs(), GLOBAL_AGENT_FUSE_MS, "inválido cae al default");
+  } finally {
+    if (prev === undefined) delete process.env.TERMCANVAS_AGENT_FUSE_MS;
+    else process.env.TERMCANVAS_AGENT_FUSE_MS = prev;
+  }
 });
 
 // ── Primitivas ──
@@ -159,6 +180,43 @@ test("readResultError: error plano y anidado, null sin error", () => {
   assert.equal(readResultError(null), null);
 });
 
+test("readResultError: error vacío cae al status HTTP (incidente #125)", () => {
+  // El SDK devuelve `error: {}` cuando la respuesta no-2xx no trae body
+  // (hey-api `finalError = finalError || {}`): sin esto el mensaje era "{}".
+  assert.equal(
+    readResultError({
+      error: {},
+      response: { status: 500, statusText: "Internal Server Error" },
+    }),
+    "HTTP 500 Internal Server Error (empty error body)",
+  );
+  assert.equal(
+    readResultError({ error: {}, response: { status: 504 } }),
+    "HTTP 504 (empty error body)",
+  );
+  assert.equal(
+    readResultError({
+      data: { error: {} },
+      response: { status: 502, statusText: "Bad Gateway" },
+    }),
+    "HTTP 502 Bad Gateway (empty error body)",
+  );
+  // Sin status legible conserva el "{}" legacy (nunca inventa).
+  assert.equal(readResultError({ error: {} }), "{}");
+  assert.equal(
+    readResultError({ error: {}, response: { status: "raro" } }),
+    "{}",
+  );
+  // Un error con contenido sigue teniendo prioridad sobre el status.
+  assert.equal(
+    readResultError({
+      error: { message: "boom" },
+      response: { status: 500, statusText: "Internal Server Error" },
+    }),
+    '{"message":"boom"}',
+  );
+});
+
 test("parseSessionId: todas las formas del SDK", () => {
   assert.equal(parseSessionId("ses_abc123"), "ses_abc123");
   assert.equal(parseSessionId({ id: "ses_1" }), "ses_1");
@@ -215,6 +273,7 @@ test("attemptJsonPromptOnce: sin opt-in quita format (texto plano directo)", asy
 });
 
 test("attemptJsonPromptOnce: 400 OutputFormat → memo + 1 reintento en texto plano", async () => {
+  resetFormatUnsupportedMemoForTests();
   const prev = process.env.TERMCANVAS_STRUCTURED_OUTPUT;
   process.env.TERMCANVAS_STRUCTURED_OUTPUT = "1";
   try {
@@ -235,6 +294,238 @@ test("attemptJsonPromptOnce: 400 OutputFormat → memo + 1 reintento en texto pl
     );
     assert.ok(out.raw !== null && out.raw.includes("accept"));
     assert.equal(calls, 2);
+    assert.ok("format" in (seen[0] as Record<string, unknown>));
+    assert.ok(!("format" in (seen[1] as Record<string, unknown>)));
+  } finally {
+    if (prev === undefined) delete process.env.TERMCANVAS_STRUCTURED_OUTPUT;
+    else process.env.TERMCANVAS_STRUCTURED_OUTPUT = prev;
+  }
+});
+
+// ── Transporte async (promptAsync + poll), incidente #125 ──
+
+test("attemptPromptAsyncOnce: ack inmediato + poll hasta el assistant completo", async () => {
+  let messageCalls = 0;
+  let ackParams: Record<string, unknown> | null = null;
+  // Turno viejo ya terminado y RECIENTE: el corte por índice (conteo previo)
+  // debe ganarle al de timestamp (sesión reusada por el loop).
+  const oldUser = { info: { role: "user", text: "prev" } };
+  const oldAssistant = {
+    info: {
+      role: "assistant",
+      finish: "stop",
+      time: { created: Date.now(), completed: Date.now() },
+      parts: [{ type: "text", text: "viejo" }],
+    },
+  };
+  const api = {
+    promptAsync: async (params: Record<string, unknown>) => {
+      ackParams = params;
+      return { data: {} };
+    },
+    messages: async () => {
+      messageCalls += 1;
+      // #1: conteo previo (2 mensajes del turno anterior).
+      if (messageCalls === 1) return { data: [oldUser, oldAssistant] };
+      // #2: nuestro turno con paso intermedio `tool-calls` (no cierra).
+      if (messageCalls === 2) {
+        return {
+          data: [
+            oldUser,
+            oldAssistant,
+            { info: { role: "user", text: "hola" } },
+            {
+              info: {
+                role: "assistant",
+                finish: "tool-calls",
+                time: { created: Date.now(), completed: Date.now() },
+                parts: [{ type: "text", text: "paso intermedio" }],
+              },
+            },
+          ],
+        };
+      }
+      // #3: assistant final (stop) → se devuelve ESTE, no el viejo.
+      return {
+        data: [
+          oldUser,
+          oldAssistant,
+          { info: { role: "user", text: "hola" } },
+          {
+            info: {
+              role: "assistant",
+              finish: "stop",
+              time: { created: Date.now(), completed: Date.now() },
+              parts: [{ type: "text", text: '{"green":true}' }],
+            },
+          },
+        ],
+      };
+    },
+  };
+  const out = await attemptPromptAsyncOnce(api, {
+    payload: { parts: [{ type: "text", text: "hola" }] },
+    sessionID: "ses_async_1",
+    label: "t-async",
+    preferKey: "green",
+    pollIntervalMs: 5,
+    ms: 2_000,
+  });
+  assert.equal(out.raw, '{"green":true}');
+  assert.equal(out.lastErr, null);
+  assert.ok(messageCalls >= 3, "pre-conteo + poll hasta completar");
+  assert.equal(ackParams?.sessionID, "ses_async_1");
+});
+
+test("attemptPromptAsyncOnce: fusible aborta el turno y no reenvía", async () => {
+  let prompts = 0;
+  let aborted = 0;
+  const out = await attemptPromptAsyncOnce(
+    {
+      promptAsync: async () => {
+        prompts += 1;
+        return { data: {} };
+      },
+      messages: async () => ({ data: [] }),
+      abort: async () => {
+        aborted += 1;
+        return { data: {} };
+      },
+    },
+    {
+      payload: {},
+      sessionID: "ses_fuse",
+      label: "t-fuse",
+      pollIntervalMs: 5,
+      ms: 30,
+    },
+  );
+  assert.equal(out.raw, null);
+  assert.match(String((out.lastErr as Error)?.message ?? ""), /timeout 30ms/);
+  assert.equal(prompts, 1, "un solo promptAsync (cero reenvíos)");
+  assert.equal(aborted, 1, "aborta el turno server-side al vencer");
+});
+
+test("attemptPromptAsyncOnce: abort externo corta el poll y aborta el turno", async () => {
+  const ctrl = new AbortController();
+  let aborted = 0;
+  const started = Date.now();
+  setTimeout(() => ctrl.abort(), 20);
+  const out = await attemptPromptAsyncOnce(
+    {
+      promptAsync: async () => ({ data: {} }),
+      messages: async () => ({ data: [] }),
+      abort: async () => {
+        aborted += 1;
+        return { data: {} };
+      },
+    },
+    {
+      payload: {},
+      sessionID: "ses_cancel",
+      label: "t-cancel",
+      pollIntervalMs: 5,
+      ms: 2_000,
+      signal: ctrl.signal,
+    },
+  );
+  const elapsed = Date.now() - started;
+  assert.equal(out.raw, null);
+  assert.match(String((out.lastErr as Error)?.message ?? ""), /abortado/);
+  assert.equal(aborted, 1, "aborta el turno server-side al cancelar");
+  assert.ok(elapsed < 1_000, `cortó rápido (${elapsed}ms), no esperó al fusible`);
+});
+
+test("attemptPromptAsyncOnce: signal ya abortado no envía nada", async () => {
+  const ctrl = new AbortController();
+  ctrl.abort();
+  let prompts = 0;
+  const out = await attemptPromptAsyncOnce(
+    {
+      promptAsync: async () => {
+        prompts += 1;
+        return { data: {} };
+      },
+      messages: async () => ({ data: [] }),
+    },
+    {
+      payload: {},
+      sessionID: "ses_pre",
+      label: "t-pre",
+      signal: ctrl.signal,
+    },
+  );
+  assert.equal(prompts, 0, "no se envía el prompt con signal abortado");
+  assert.match(String((out.lastErr as Error)?.message ?? ""), /abortado antes del envío/);
+});
+
+test("attemptPromptAsyncOnce: error del ack se surface con status HTTP, sin poll", async () => {
+  let polls = 0;
+  const out = await attemptPromptAsyncOnce(
+    {
+      promptAsync: async () => ({
+        error: {},
+        response: { status: 500, statusText: "Internal Server Error" },
+      }),
+      messages: async () => {
+        polls += 1;
+        return { data: [] };
+      },
+    },
+    { payload: {}, sessionID: "ses_err", label: "t-ack", ms: 200 },
+  );
+  assert.equal(out.raw, null);
+  assert.match(
+    String((out.lastErr as Error)?.message ?? ""),
+    /HTTP 500 Internal Server Error/,
+  );
+  assert.equal(polls, 1, "solo el conteo previo; sin poll tras el ack roto");
+});
+
+test("attemptJsonPromptAsyncOnce: 400 OutputFormat → memo + 1 reintento en texto plano", async () => {
+  resetFormatUnsupportedMemoForTests();
+  const prev = process.env.TERMCANVAS_STRUCTURED_OUTPUT;
+  process.env.TERMCANVAS_STRUCTURED_OUTPUT = "1";
+  try {
+    const seen: unknown[] = [];
+    let acks = 0;
+    const api = {
+      promptAsync: async (params: Record<string, unknown>) => {
+        acks += 1;
+        seen.push(params);
+        if (acks === 1) {
+          return { error: "Expected OutputFormatJsonSchema, got {...}" };
+        }
+        return { data: {} };
+      },
+      // Vacío hasta que el ack #2 entra: el conteo previo de cada intento ve
+      // la sesión sin mensajes nuevos y el poll final encuentra el assistant.
+      messages: async () => ({
+        data:
+          acks < 2
+            ? []
+            : [
+                {
+                  info: {
+                    role: "assistant",
+                    finish: "stop",
+                    time: { created: Date.now(), completed: Date.now() },
+                    parts: [{ type: "text", text: '{"verdict":"accept"}' }],
+                  },
+                },
+              ],
+      }),
+    };
+    const out = await attemptJsonPromptAsyncOnce(api, {
+      payload: { sessionID: "ses_x", format: { type: "json_schema", schema: {} } },
+      sessionID: "ses_x",
+      label: "t-400-async",
+      preferKey: "verdict",
+      pollIntervalMs: 5,
+      ms: 2_000,
+    });
+    assert.ok(out.raw !== null && out.raw.includes("accept"));
+    assert.equal(acks, 2);
     assert.ok("format" in (seen[0] as Record<string, unknown>));
     assert.ok(!("format" in (seen[1] as Record<string, unknown>)));
   } finally {

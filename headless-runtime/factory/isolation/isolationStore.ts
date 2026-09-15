@@ -102,10 +102,23 @@ export function parseIssueTitleFromPrompt(
 }
 
 /**
- * PR title for an isolated job. Never throws.
+ * PR title for an isolated job. Outcome-first (prp-pr rule): when the
+ * accepted outcome is known it leads the title in behavior language
+ * (first line, capped); the issue title is the fallback. Never throws.
  */
-export function buildPrTitle(issueNumber: number, title?: unknown): string {
+export function buildPrTitle(
+  issueNumber: number,
+  title?: unknown,
+  outcome?: unknown,
+): string {
   try {
+    const outcomeLine =
+      typeof outcome === "string" && outcome.trim().length > 0
+        ? (outcome.split("\n")[0] ?? "").trim().slice(0, 120)
+        : "";
+    if (outcomeLine.length > 0) {
+      return `Resolve issue #${issueNumber} — ${outcomeLine}`;
+    }
     const clean =
       typeof title === "string" && title.trim().length > 0
         ? title.trim().slice(0, 200)
@@ -129,12 +142,106 @@ export function buildPrTitle(issueNumber: number, title?: unknown): string {
 export interface PrBodyDetails {
   /** Accepted review summary (human-readable, what the change does). */
   summary?: unknown;
-  /** Reviewer model ref, rendered as provenance under Summary. */
+  /** Reviewer model ref, rendered as provenance at the end. */
   reviewer?: unknown;
   /** Files created/modified by implement (timeline `createdFiles`). */
   files?: unknown;
   /** Verification report (timeline `meta.verification` shape). */
   verification?: unknown;
+  /**
+   * Implement report text (timeline `meta.implementReport`): "qué cambió"
+   * más `## Review guidance`. Feeds Solution / Review guidance / Not verified.
+   */
+  implementReport?: unknown;
+  /** Isolation branch (Delivery considerations: revert source). */
+  branch?: unknown;
+  /** Isolation base branch (Delivery considerations: revert target). */
+  baseBranch?: unknown;
+  /**
+   * Verified published-plan URL (rendered under ## Links). Local plan
+   * paths are never rendered: only http(s) URLs reach the body.
+   */
+  planUrl?: unknown;
+}
+
+/**
+ * Extrae el bloque markdown tras el primer encabezado `## <nombre>`
+ * (case-insensitive, con alias). Devuelve el cuerpo hasta el próximo
+ * encabezado o fin, recortado. Lee secciones del reporte del implement
+ * (`## Review guidance`). Puro, nunca lanza.
+ */
+export function extractReportSection(text: unknown, names: readonly string[]): string {
+  try {
+    if (typeof text !== "string" || text.trim() === "") return "";
+    const wanted = names
+      .map((n) => (typeof n === "string" ? n.trim().toLowerCase() : ""))
+      .filter((n) => n !== "");
+    if (wanted.length === 0) return "";
+    const lines = text.replace(/\r/g, "").split("\n");
+    const start = lines.findIndex((line) => {
+      try {
+        const m = line.match(/^#{1,3}\s*(.+?)\s*$/);
+        if (!m) return false;
+        const title = (m[1] ?? "").trim().toLowerCase();
+        return wanted.some(
+          (w) =>
+            title === w ||
+            title.startsWith(`${w} `) ||
+            title.startsWith(`${w}:`) ||
+            title.startsWith(`${w} —`) ||
+            title.startsWith(`${w} -`),
+        );
+      } catch {
+        return false;
+      }
+    });
+    if (start < 0) return "";
+    const end = lines.findIndex(
+      (line, idx) => idx > start && /^#{1,3}\s+/.test(line),
+    );
+    return lines
+      .slice(start + 1, end < 0 ? undefined : end)
+      .join("\n")
+      .trim()
+      .slice(0, 1500);
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Intro del reporte (texto antes del primer encabezado), recortada.
+ * Es el "qué cambió" del implement. Puro, nunca lanza.
+ */
+export function reportIntro(text: unknown, max = 1200): string {
+  try {
+    if (typeof text !== "string") return "";
+    const flat = text.replace(/\r/g, "");
+    const cut = flat.search(/\n#{1,3}\s+/);
+    return (cut < 0 ? flat : flat.slice(0, cut)).trim().slice(0, max);
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Línea "No verificado" dentro de una guidance ("- No verificado: ..." o
+ * "nada pendiente" que mapea a "Nothing material."). Puro, nunca lanza.
+ */
+export function extractNotVerified(guidance: string): string {
+  try {
+    if (typeof guidance !== "string" || guidance.trim() === "") return "";
+    const hit = guidance
+      .split("\n")
+      .map((raw) => raw.replace(/^[-*]\s+/, "").trim())
+      .find((line) => /^(no verificado|not verified)\b/i.test(line));
+    if (!hit) return "";
+    const rest = hit.replace(/^(no verificado|not verified)\s*:?\s*/i, "").trim();
+    if (/^(nada pendiente|nothing|none)\b/i.test(rest)) return "Nothing material.";
+    return rest.slice(0, 300);
+  } catch {
+    return "";
+  }
 }
 
 /** Trimmed single-line-safe text detail; empty when junk. Never throws. */
@@ -156,6 +263,70 @@ function cleanDetailList(v: unknown, cap: number): string[] {
       .map((x) => (typeof x === "string" ? x.trim().slice(0, 200) : ""))
       .filter((s) => s.length > 0)
       .slice(0, cap);
+  } catch {
+    return [];
+  }
+}
+
+/** Trimmed http(s) URL detail; local paths and junk never qualify. Never throws. */
+export function cleanDetailUrl(v: unknown, max = 500): string {
+  try {
+    if (typeof v !== "string") return "";
+    const s = v.trim().slice(0, max);
+    return /^https?:\/\/\S+$/.test(s) ? s : "";
+  } catch {
+    return "";
+  }
+}
+
+/** Terminal finding states written by implement (prp-issue rule). */
+export const DISPOSITION_VALUES: readonly string[] = [
+  "FIXED",
+  "NOT_A_FINDING",
+  "TRACKED_FOLLOW_UP",
+  "DECLINED",
+];
+
+/** One parsed disposition line from the implement report. */
+export interface FindingDisposition {
+  id: string;
+  disposition: string;
+  reason: string;
+}
+
+/**
+ * Parsea la sección `## Dispositions` del reporte del implement
+ * (líneas `- <id>: <ESTADO> — <razón>`). Sin sección o sin líneas
+ * válidas devuelve []. Puro, nunca lanza.
+ */
+export function extractDispositions(text: unknown): FindingDisposition[] {
+  try {
+    if (typeof text !== "string" || text.trim() === "") return [];
+    const section = extractReportSection(text, ["dispositions", "disposiciones"]);
+    if (section === "") return [];
+    const seen = new Set<string>();
+    return section
+      .split("\n")
+      .map((raw) => {
+        try {
+          const m = raw.match(
+            /^\s*[-*]\s*(f\d+)\s*:\s*(FIXED|NOT_A_FINDING|TRACKED_FOLLOW_UP|DECLINED)\s*[—–\-:.]?\s*(.*)$/i,
+          );
+          if (!m) return null;
+          const id = (m[1] ?? "").toLowerCase();
+          if (seen.has(id)) return null;
+          seen.add(id);
+          return {
+            id,
+            disposition: (m[2] ?? "").toUpperCase(),
+            reason: (m[3] ?? "").trim().replace(/\s+/g, " ").slice(0, 300),
+          };
+        } catch {
+          return null;
+        }
+      })
+      .filter((d): d is FindingDisposition => d !== null)
+      .slice(0, 50);
   } catch {
     return [];
   }
@@ -188,6 +359,12 @@ function verificationLines(v: unknown): string[] {
   }
 }
 
+/**
+ * PR body de un job aislado, estilo guía de review (problema + outcome,
+ * solución, review guidance, archivos, validación, entrega). Siempre lleva
+ * `Closes #N`; cada sección aparece solo cuando aporta información (nunca
+ * relleno). Neutral English. Puro, nunca lanza.
+ */
 export function buildPrBody(
   issueNumber: number,
   title?: unknown,
@@ -201,21 +378,85 @@ export function buildPrBody(
       "Automated change set, opened by the factory daemon for human review.",
       "Merging stays a human decision (panel Merge action or GitHub UI).",
     ];
-    const summary = cleanDetailText(details?.summary, 600);
-    if (summary.length > 0) {
-      lines.push("", "## Summary", summary);
-      const reviewer = cleanDetailText(details?.reviewer, 120);
-      if (reviewer.length > 0) {
-        lines.push("", `Reviewed by \`${reviewer}\`.`);
-      }
+    // Problem and outcome: el issue es el problema; el outcome es el
+    // resumen aceptado del review (veredicto) o la intro del implement.
+    const outcome = cleanDetailText(details?.summary, 400);
+    const reportText =
+      typeof details?.implementReport === "string" ? details.implementReport : "";
+    const solution =
+      reportText.trim() !== "" ? reportIntro(reportText, 1200) : "";
+    const solutionFirst = solution.length > 0 ? (solution.split("\n")[0] ?? "") : "";
+    const outcomeLine =
+      outcome.length > 0 ? (outcome.split("\n")[0] ?? "") : solutionFirst;
+    const po: string[] = [`- **Issue:** #${issueNumber}`];
+    if (outcomeLine.trim().length > 0) {
+      po.push(`- **Outcome:** ${outcomeLine.trim().slice(0, 400)}`);
+    }
+    lines.push("", "## Problem and outcome", ...po);
+    if (solution.length > 0 && solution !== outcomeLine) {
+      lines.push("", "## Solution", solution);
+    }
+    // Review guidance del implement (Start here incluido).
+    const guidance =
+      reportText.trim() !== ""
+        ? extractReportSection(reportText, ["review guidance", "guía de revisión"])
+        : "";
+    if (guidance.length > 0) lines.push("", "## Review guidance", guidance);
+    // Dispositions del implement (una línea por finding, estados
+    // terminales). Sin sección en el reporte no hay tabla (nunca relleno).
+    const dispositions =
+      reportText.trim() !== "" ? extractDispositions(reportText) : [];
+    if (dispositions.length > 0) {
+      lines.push(
+        "",
+        "## Review dispositions",
+        "",
+        "| Finding | Disposition | Reason |",
+        "|---|---|---|",
+        ...dispositions.map(
+          (d) =>
+            `| \`${d.id}\` | ${d.disposition} | ${(d.reason.length > 0 ? d.reason : "—").replace(/\|/g, "/").slice(0, 200)} |`,
+        ),
+      );
     }
     const files = cleanDetailList(details?.files, 50);
     if (files.length > 0) {
       lines.push("", "## Changed files", ...files.map((f) => `- \`${f}\``));
     }
     const ver = verificationLines(details?.verification);
-    if (ver.length > 0) {
-      lines.push("", "## Verification", ...ver);
+    const notVerified = extractNotVerified(guidance);
+    // Honest validation (prp-pr rule): only verification that actually ran
+    // counts. "Nothing material" is claimed only when real steps ran; a
+    // pending claim without steps stays visible as unrunned coverage.
+    if (ver.length > 0 || notVerified.length > 0) {
+      lines.push("", "## Validation", ...ver);
+      if (notVerified.length > 0 && notVerified !== "Nothing material.") {
+        lines.push(`- **Not verified:** ${notVerified}`);
+      } else if (ver.length > 0) {
+        lines.push("- **Not verified:** Nothing material.");
+      } else {
+        lines.push(
+          "- **Not verified:** Claimed nothing pending — no verification steps ran.",
+        );
+      }
+    }
+    const branch = cleanDetailText(details?.branch, 120);
+    const base = cleanDetailText(details?.baseBranch, 120);
+    if (branch.length > 0) {
+      lines.push(
+        "",
+        "## Delivery considerations",
+        "| Concern | Detail |",
+        "|---|---|",
+        `| Rollout / rollback | Revert de la rama \`${branch}\`${base.length > 0 ? ` contra \`${base}\`` : ""}; el merge lo decide un humano |`,
+      );
+    }
+    const reviewer = cleanDetailText(details?.reviewer, 120);
+    if (reviewer.length > 0) lines.push("", `Reviewed by \`${reviewer}\`.`);
+    // Links: verified published-plan URL only (never a local path).
+    const planUrl = cleanDetailUrl(details?.planUrl);
+    if (planUrl.length > 0) {
+      lines.push("", "## Links", "", `- Plan: ${planUrl}`);
     }
     lines.push("", `Closes #${issueNumber}`, "");
     return lines.join("\n");

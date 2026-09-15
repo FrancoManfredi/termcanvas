@@ -12,6 +12,7 @@ import {
   readFactoryJobSessions,
   readRoleSessionLink,
 } from "../src/features/warpPanel/adapters/factoryIssueJobs.ts";
+import { buildAgentTimeline } from "../src/features/warpPanel/adapters/agentTimeline.ts";
 
 const URL = "http://127.0.0.1:20274/abc/session/ses_role1";
 const MVP_URL = "http://127.0.0.1:20274/def/session/ses_mvp1";
@@ -122,6 +123,59 @@ test("allSessionsExtras lista una entrada por rol con sesion, en orden de fase",
   assert.ok(links.every((l) => l.sessionUrl.includes(l.sessionId)));
 });
 
+test("loop_group F16: el nodo namespaced no duplica la fila canónica en Agent Sessions", () => {
+  // Wire del daemon: `build.implement` ya cubierto por el alias canónico
+  // `implement` (mismo sessionId) → manda el nodeId exacto, una sola entrada.
+  const extras = allSessionsExtras(
+    {
+      worktree: "C:/repo",
+      agentSessions: { foreman: "ses-f", triage: "ses-t", implement: "ses-i" },
+      engineRun: {
+        nodes: ["triage", "build.implement", "build.review"],
+        nodeSessions: { "build.implement": "ses-i" },
+      },
+    },
+    buildUrl,
+  );
+  const links = extras.sessions as Array<{ role: string; sessionUrl: string }>;
+  assert.deepEqual(
+    links.map((l) => l.role),
+    ["foreman", "triage", "build.implement"],
+  );
+
+  const described = describeFactoryJobForPanel({
+    id: "job-1",
+    status: "Building",
+    sessions: links,
+    engineRun: {
+      runId: "run-1",
+      workflow: "fix-issue",
+      status: "running",
+      currentNodeId: "build.implement",
+      completedNodes: ["triage"],
+      nodes: ["triage", "build.implement", "build.review"],
+      nodeStates: {
+        triage: "completed",
+        "build.implement": "running",
+        "build.review": "pending",
+      },
+      nodeAgents: { "build.implement": "implement" },
+    },
+  });
+  assert.ok(described);
+  assert.deepEqual(
+    buildAgentTimeline(described).stages.map(
+      (s) => `${s.id}:${s.state}:${s.sessionUrl ?? "—"}`,
+    ),
+    [
+      `foreman:completed:${buildUrl("ses-f")}`,
+      `triage:completed:${buildUrl("ses-t")}`,
+      `build.implement:running:${buildUrl("ses-i")}`,
+      "build.review:pending:—",
+    ],
+  );
+});
+
 test("allSessionsExtras honesto sin sesiones ({} sin inventar)", () => {
   assert.deepEqual(allSessionsExtras({ worktree: "C:/repo" }, () => "http://x"), {});
   assert.deepEqual(allSessionsExtras({ worktree: "C:/repo", agentSessions: {} }, () => "http://x"), {});
@@ -227,4 +281,125 @@ test("panel sin hooks: sin info.hooks ni filas extra", () => {
   assert.ok(described);
   assert.equal(described?.hooks, undefined);
   assert.deepEqual(described?.sessions, [{ role: "review", sessionUrl: URL }]);
+});
+
+// ── Rondas de loop (VIEW AGENT por ronda) ──
+
+function roundsJob() {
+  return {
+    worktree: "C:/repo",
+    agentSessions: { implement: "ses-i2", review: "ses-r2" },
+    engineRun: {
+      nodes: ["triage", "build.implement", "build.review"],
+      nodeSessions: { "build.implement": "ses-i2", "build.review": "ses-r2" },
+      nodeSessionRounds: [
+        { nodeId: "build.implement", iteration: 1, sessionId: "ses-i1" },
+        { nodeId: "build.review", iteration: 1, sessionId: "ses-r1" },
+        { nodeId: "build.implement", iteration: 2, sessionId: "ses-i2" },
+        { nodeId: "build.review", iteration: 2, sessionId: "ses-r2" },
+      ],
+    },
+  };
+}
+
+test("allSessionsExtras: la vigente lleva round y las previas viajan aparte", () => {
+  const out = allSessionsExtras(roundsJob(), buildUrl);
+  const links = out.sessions as Array<{
+    role: string;
+    sessionId: string;
+    sessionUrl: string;
+    round?: number;
+  }>;
+  const byRole = new Map(links.map((l) => [`${l.role}#${l.sessionId}`, l]));
+  const impl = byRole.get("build.implement#ses-i2");
+  assert.ok(impl, "la vigente del nodo sigue listada");
+  assert.equal(impl && impl.round, 2, "la vigente marca su ronda");
+  const implR1 = byRole.get("build.implement#ses-i1");
+  assert.ok(implR1, "la R1 viaja como entrada propia");
+  assert.equal(implR1 && implR1.round, 1);
+  assert.ok((implR1 && implR1.sessionUrl.endsWith("ses-i1")) === true);
+  const revR1 = byRole.get("build.review#ses-r1");
+  assert.ok(revR1, "el review R1 también viaja");
+  assert.equal(revR1 && revR1.round, 1);
+  assert.deepEqual(
+    links.filter((l) => l.role === "build.implement").map((l) => l.round),
+    [2, 1],
+    "vigente primero, previas en orden de llegada",
+  );
+});
+
+test("allSessionsExtras: sin rondas el contrato previo no cambia", () => {
+  const out = allSessionsExtras(
+    {
+      worktree: "C:/repo",
+      agentSessions: { implement: "ses-i" },
+      engineRun: {
+        nodes: ["build.implement"],
+        nodeSessions: { "build.implement": "ses-i" },
+      },
+    },
+    buildUrl,
+  );
+  const links = out.sessions as Array<{
+    role: string;
+    sessionId: string;
+    sessionUrl: string;
+    round?: number;
+  }>;
+  assert.equal(links.length, 1);
+  assert.equal(links[0] && links[0].role, "build.implement");
+  assert.equal(links[0] && links[0].round, undefined);
+});
+
+test("readFactoryJobSessions conserva round y descarta basura", () => {
+  const mixed = readFactoryJobSessions({
+    sessions: [
+      { role: "build.implement", sessionUrl: URL, round: 2 },
+      { role: "build.implement", sessionUrl: "http://127.0.0.1:1/i1", round: 1 },
+      { role: "build.implement", sessionUrl: "http://127.0.0.1:1/x", round: 0 },
+      { role: "build.implement", sessionUrl: "http://127.0.0.1:1/y", round: "2" },
+    ],
+  });
+  assert.deepEqual(mixed, [
+    { role: "build.implement", sessionUrl: URL, round: 2 },
+    { role: "build.implement", sessionUrl: "http://127.0.0.1:1/i1", round: 1 },
+    { role: "build.implement", sessionUrl: "http://127.0.0.1:1/x" },
+    { role: "build.implement", sessionUrl: "http://127.0.0.1:1/y" },
+  ]);
+});
+
+test("buildAgentTimeline: la fila expone rounds y currentRound", () => {
+  const extras = allSessionsExtras(roundsJob(), buildUrl);
+  const links = extras.sessions as Array<{ role: string; sessionUrl: string; round?: number }>;
+  const described = describeFactoryJobForPanel({
+    id: "job-1",
+    status: "Building",
+    sessions: links,
+    engineRun: {
+      runId: "run-1",
+      workflow: "fix-issue",
+      status: "running",
+      currentNodeId: "build.review",
+      completedNodes: ["build.implement"],
+      nodes: ["build.implement", "build.review"],
+      nodeStates: { "build.implement": "completed", "build.review": "running" },
+      nodeAgents: { "build.implement": "implement", "build.review": "review" },
+    },
+  });
+  assert.ok(described);
+  const stages = buildAgentTimeline(described).stages;
+  const byId = new Map(stages.map((s) => [s.id, s]));
+  const implement = byId.get("build.implement");
+  assert.ok(implement);
+  assert.equal(implement && implement.sessionUrl, buildUrl("ses-i2"));
+  assert.equal(implement && implement.currentRound, 2);
+  assert.deepEqual(implement && implement.rounds, [
+    { round: 1, sessionUrl: buildUrl("ses-i1") },
+  ]);
+  const review = byId.get("build.review");
+  assert.ok(review);
+  assert.equal(review && review.currentRound, 2);
+  assert.deepEqual(review && review.rounds, [
+    { round: 1, sessionUrl: buildUrl("ses-r1") },
+  ]);
 });

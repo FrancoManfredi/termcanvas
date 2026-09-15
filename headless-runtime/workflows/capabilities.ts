@@ -28,6 +28,13 @@ export interface CapabilityOptions {
   repoRoot: string;
   workflowDir: string;
   scopeDir: string;
+  /**
+   * Nombres de bundles MCP declarados por el agente del nodo
+   * (`factory/agents/<name>/agent.md` → `mcps: {a, b}`). Se resuelven contra
+   * `factory/mcps/<name>.json` y se mergean con el MCP del nodo (el nodo pisa
+   * claves homónimas). Fatal si un bundle no existe.
+   */
+  agentMcps?: string[];
 }
 
 export interface NodeCapabilityScope {
@@ -149,19 +156,97 @@ export function parseMcpConfigFile(filePath: string): Record<string, unknown> {
   return out;
 }
 
+/** Nombres de bundles MCP válidos (mismo anti-traversal que agentes/skills). */
+export const MCP_BUNDLE_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]*$/i;
+
+/**
+ * Normaliza `mcps` del frontmatter (el parser lo entrega como string[],
+ * Record o string crudo `{a, b}`) a una lista de nombres válidos.
+ * Pura, nunca lanza. Nombres inválidos se descartan.
+ */
+export function normalizeMcpNames(raw: unknown): string[] {
+  try {
+    if (raw === undefined || raw === null) return [];
+    let items: unknown[] = [];
+    if (Array.isArray(raw)) items = raw;
+    else if (typeof raw === "object") items = Object.keys(raw as Record<string, unknown>);
+    else if (typeof raw === "string") {
+      const t = raw.trim().replace(/^\{/, "").replace(/\}$/, "");
+      items = t.length === 0 ? [] : t.split(",").map((s) => s.trim().replace(/^["']+|["']+$/g, ""));
+    } else return [];
+    const out: string[] = [];
+    for (const item of items) {
+      const name = String(item ?? "").trim();
+      if (!name || !MCP_BUNDLE_NAME_PATTERN.test(name)) continue;
+      if (!out.includes(name)) out.push(name);
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/** Dir de bundles MCP (`<repoRoot>/factory/mcps`). */
+export function mcpBundlesDir(opts: { repoRoot: string }): string {
+  return path.join(opts.repoRoot, "factory", "mcps");
+}
+
+/**
+ * Resuelve bundles MCP por nombre contra `factory/mcps/<name>.json`.
+ * Cada bundle aporta uno o más servers (formato `{ mcpServers: {...} }`).
+ * Fatal si un bundle no existe: el nodo no corre a medias.
+ */
+export function resolveAgentMcps(
+  names: string[],
+  opts: { repoRoot: string },
+): Record<string, unknown> {
+  const dir = mcpBundlesDir(opts);
+  const out: Record<string, unknown> = {};
+  const requested = normalizeMcpNames(names);
+  for (const name of requested) {
+    const filePath = path.join(dir, `${name}.json`);
+    if (!fs.existsSync(filePath)) {
+      const available = listMcpBundleNames(opts);
+      throw new Error(
+        `mcp bundle "${name}" no existe en factory/mcps. Disponibles: ${available.length > 0 ? available.join(", ") : "(ninguno)"}`,
+      );
+    }
+    Object.assign(out, parseMcpConfigFile(filePath));
+  }
+  return out;
+}
+
+/** Nombres de bundles `factory/mcps/*.json` presentes en disco. Nunca lanza. */
+export function listMcpBundleNames(opts: { repoRoot: string }): string[] {
+  try {
+    const dir = mcpBundlesDir(opts);
+    if (!fs.existsSync(dir)) return [];
+    return fs
+      .readdirSync(dir)
+      .filter((entry) => entry.endsWith(".json") && MCP_BUNDLE_NAME_PATTERN.test(entry.slice(0, -5)))
+      .map((entry) => entry.slice(0, -5))
+      .sort();
+  } catch {
+    return [];
+  }
+}
+
 /**
  * Materializa las capacidades de un nodo. Devuelve null cuando el nodo no
- * declara skills ni mcp (no hace falta server scopeado).
- * Los errores de skill/mcp son fatales: el nodo no debe correr a medias.
+ * declara skills ni mcp ni hereda MCPs del agente (no hace falta server
+ * scopeado). Los errores de skill/mcp son fatales: el nodo no debe correr a
+ * medias. El MCP del nodo pisa claves homónimas del MCP del agente.
  */
 export function materializeNodeCapabilities(
   node: Pick<WorkflowNode, "skills" | "mcp">,
   opts: CapabilityOptions,
 ): NodeCapabilityScope | null {
   const skillNames = node.skills ?? [];
-  const mcpConfig = node.mcp
+  const nodeMcpConfig = node.mcp
     ? parseMcpConfigFile(path.resolve(opts.workflowDir, node.mcp))
     : {};
+  const agentMcpConfig = resolveAgentMcps(opts.agentMcps ?? [], opts);
+  const mcpConfig = { ...agentMcpConfig, ...nodeMcpConfig };
   const hasMcp = Object.keys(mcpConfig).length > 0;
   if (skillNames.length === 0 && !hasMcp) return null;
 

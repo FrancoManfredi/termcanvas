@@ -100,7 +100,6 @@ export class ReviewService {
     if (snapshot.status !== "Review") return null;
 
     if (!workItemStore.acquireReviewLock(id)) {
-      console.log(`[ReviewService] ${id} already handling Review — skip duplicate`);
       return null;
     }
 

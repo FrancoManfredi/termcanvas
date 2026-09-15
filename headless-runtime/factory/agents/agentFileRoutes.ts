@@ -13,9 +13,8 @@
  * - Anti-traversal idéntico al loader: `^[a-z0-9-]+$` + resolución dentro de
  *   `factory/agents/` (el `..`/slash/`%2f` nunca matchea).
  * - Escritura atómica `tmp→rename` (patrón `resultWriter.ts`/`workItemDisk.ts`).
- * - Tras escribir, regenera el espejo `.opencode/agents/*.md` best-effort
- *   (`syncFactoryAgentsToOpencode` nunca lanza; si falla, el PUT igual es 200
- *   porque el disco ya quedó bien).
+ * - Tras escribir, el próximo job idle recicla el server efímero
+ *   (`agentDirty`); los agentes viajan inline, no hay espejos que regenerar.
  * - `factoryDir` es seam SOLO para tests (sandbox): en producción se omite y
  *   se usa `resolveAgentFilePath` del loader.
  */
@@ -33,7 +32,7 @@ import {
 } from "../agentLoader";
 import { isSessionAgentRole } from "../../../shared/roles";
 import { KNOWN_AGENT_TOOLS } from "../definitionValidate";
-import { buildOpencodeAgentMarkdown, resetServerAgentsMemoForTests, resolveGlobalAgentsDir, resolveOpencodeAgentPath, syncFactoryAgentsGlobal, syncFactoryAgentsToOpencode } from "../opencodeAgentSync";
+import { resetServerAgentsMemoForTests } from "../opencodeAgentSync";
 import { markAgentsDirty } from "./agentDirty";
 
 /**
@@ -218,12 +217,46 @@ export interface AgentListItem {
   name: string;
   description: string;
   agentType: string;
+  /** Metadata del frontmatter para el índice de la UI (sin abrir el agente). */
+  mode: string;
+  model: string;
+  /** Clave del set curado de íconos de la UI (`""` = sin ícono, monograma). */
+  icon: string;
+  tools: string[];
+  skills: string[];
+  mcps: string[];
+  stage: string;
+  blocking: boolean;
+}
+
+/** Normaliza una lista nominal del frontmatter (array, record o string). Pura. */
+function nameListOf(value: unknown): string[] {
+  try {
+    if (Array.isArray(value)) {
+      return (value as unknown[]).map((v) => String(v ?? "").trim()).filter(Boolean);
+    }
+    if (value && typeof value === "object") {
+      return Object.keys(value as Record<string, unknown>).map((k) => k.trim()).filter(Boolean);
+    }
+    if (typeof value === "string") {
+      return value
+        .trim()
+        .replace(/^\{/, "")
+        .replace(/\}$/, "")
+        .split(",")
+        .map((s) => s.trim().replace(/^["']+|["']+$/g, ""))
+        .filter(Boolean);
+    }
+    return [];
+  } catch {
+    return [];
+  }
 }
 
 /**
  * Lista agentes (`factory/agents/*\/agent.md`): nombre + description +
- * agentType. Los rotos se omiten (los reporta el validator). Ordenados.
- * Nunca lanza.
+ * agentType + metadata del frontmatter para el índice. Los rotos se omiten
+ * (los reporta el validator). Ordenados. Nunca lanza.
  */
 export function listAgents(factoryDir?: string): AgentListItem[] {
   const out: AgentListItem[] = [];
@@ -247,6 +280,14 @@ export function listAgents(factoryDir?: string): AgentListItem[] {
           name,
           description: String(fm.description ?? "").slice(0, 300),
           agentType: String(fm.agentType ?? "").toUpperCase(),
+          mode: String(fm.mode ?? "").trim().toLowerCase() || "primary",
+          model: String(fm.model ?? "").trim(),
+          icon: String(fm.icon ?? "").trim(),
+          tools: nameListOf(fm.tools),
+          skills: nameListOf(fm.skills),
+          mcps: nameListOf(fm.mcps),
+          stage: String(fm.stage ?? "").trim().toLowerCase() || "none",
+          blocking: fm.blocking === true || String(fm.blocking ?? "").toLowerCase() === "true",
         });
       } catch {
         // roto: lo reporta el validator, acá se omite
@@ -494,8 +535,8 @@ export function setMirrorTestHomeForTests(dir: string | null): void {
 
 /**
  * Reporte del espejo tras un save: qué lados quedaron realmente en sync.
- * `synced === false` = el próximo server opencode puede bootear con el
- * prompt viejo; el caller lo expone (mirrorSynced) para no mentir en la UI.
+ * F14: sin mirrors, `synced: true` = definición factory válida (el server
+ * efímero la toma al reciclarse). El caller lo expone (mirrorSynced).
  */
 export interface MirrorSyncReport {
   local: boolean;
@@ -503,148 +544,19 @@ export interface MirrorSyncReport {
   synced: boolean;
 }
 
-/** Texto del espejo esperado para un agent.md (o "" si no es parseable). */
-function expectedMirrorText(name: string, agentFileText: string): string {
-  try {
-    const parsed = parseAgentFile(agentFileText);
-    return buildOpencodeAgentMarkdown({ name, frontmatter: parsed.frontmatter, body: parsed.body });
-  } catch {
-    return "";
-  }
-}
-
-/** Lee un archivo o null (nunca lanza). */
-function readMirrorOrNull(file: string): string | null {
-  try {
-    return fs.readFileSync(file, "utf-8");
-  } catch {
-    return null;
-  }
-}
-
-/** True si cada espejo coincide byte a byte (expected null = debe faltar). */
-function verifyMirrorFiles(
-  entries: Array<{ file: string; expected: string | null }>,
-): boolean {
-  try {
-    if (entries.length === 0) return false;
-    for (const { file, expected } of entries) {
-      const actual = readMirrorOrNull(file);
-      if (expected === null) {
-        if (actual !== null) return false;
-      } else if (actual !== expected) {
-        return false;
-      }
-    }
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /**
- * Regenera espejos proyecto + global tras un alta/baja/modificación (los
- * jobs en worktrees sin `.opencode` solo ven el global: sin esto, editar
- * desde la UI no llegaba a los jobs hasta el próximo reinicio).
- * En disco real: regen completo de ambos y VERIFICACIÓN del agente tocado
- * (el server opencode cachea al boot; un espejo que no quedó en sync se
- * reporta para que la UI no cante éxito). En sandbox (factoryDir + seam de
- * tests): espejo puntual del agente tocado en ambos lados, verificados.
- * Best-effort, nunca lanza.
+ * F14: mirrors ELIMINADOS. Los agentes viajan INLINE en el config del server
+ * efímero de TermCanvas (`buildFactoryAgentsConfig`): el opencode del usuario
+ * nunca los ve, y un edit impacta al reciclar el server (agentDirty).
+ * Este seam se conserva como no-op para no tocar el contrato del CRUD:
+ * `synced: true` = definición factory válida. Nunca lanza.
  */
 function regenMirrorBestEffort(
-  factoryDir?: string,
-  touchedName?: string,
-  touchedText?: string,
+  _factoryDir?: string,
+  _touchedName?: string,
+  _touchedText?: string,
 ): MirrorSyncReport {
-  const report: MirrorSyncReport = { local: false, global: false, synced: false };
-  try {
-    const expected =
-      touchedName !== undefined && touchedText !== undefined && touchedText !== null
-        ? expectedMirrorText(touchedName, touchedText)
-        : null;
-    // Sandbox + seam: espejo puntual en ambos lados, sin tocar nada fuera.
-    if (factoryDir && mirrorTestHome !== null && touchedName) {
-      const localFile = path.join(factoryDir, ".opencode", "agents", `${touchedName}.md`);
-      const globalFile = path.join(mirrorTestHome, ".config", "opencode", "agents", `${touchedName}.md`);
-      writeSingleMirrors(touchedName, touchedText ?? null, factoryDir, mirrorTestHome);
-      const expectFile = touchedText === undefined || touchedText === null ? null : expected;
-      report.local = verifyMirrorFiles([{ file: localFile, expected: expectFile }]);
-      report.global = verifyMirrorFiles([{ file: globalFile, expected: expectFile }]);
-      report.synced = report.local && report.global;
-      return report;
-    }
-    // Sandbox sin seam: nada fuera del sandbox (tests herméticos).
-    if (factoryDir) {
-      return { local: true, global: true, synced: true };
-    }
-    // Disco real: regen completo proyecto + global.
-    try {
-      syncFactoryAgentsToOpencode();
-    } catch {
-      // noop: best-effort
-    }
-    try {
-      syncFactoryAgentsGlobal();
-    } catch {
-      // noop: best-effort
-    }
-    if (touchedName) {
-      report.local = verifyMirrorFiles([
-        { file: resolveOpencodeAgentPath(touchedName), expected },
-      ]);
-      report.global = verifyMirrorFiles([
-        { file: path.join(resolveGlobalAgentsDir(), `${touchedName}.md`), expected },
-      ]);
-      report.synced = report.local && report.global;
-    } else {
-      // Sin agente puntual (p. ej. delete): el caller borra explícito.
-      report.local = true;
-      report.global = true;
-      report.synced = true;
-    }
-    return report;
-  } catch {
-    return report;
-  }
-}
-
-/** Espejo puntual de UN agente en ambos lados del sandbox. Nunca lanza. */
-function writeSingleMirrors(name: string, text: string | null, factoryDir: string, home: string): void {
-  try {
-    const targets = [
-      path.join(factoryDir, ".opencode", "agents", `${name}.md`),
-      path.join(home, ".config", "opencode", "agents", `${name}.md`),
-    ];
-    if (text === null) {
-      for (const target of targets) {
-        try {
-          if (fs.existsSync(target)) fs.unlinkSync(target);
-        } catch {
-          // noop
-        }
-      }
-      return;
-    }
-    let mirror = "";
-    try {
-      const parsed = parseAgentFile(text);
-      mirror = buildOpencodeAgentMarkdown({ name, frontmatter: parsed.frontmatter, body: parsed.body });
-    } catch {
-      return;
-    }
-    if (!mirror) return;
-    for (const target of targets) {
-      try {
-        fs.mkdirSync(path.dirname(target), { recursive: true });
-        fs.writeFileSync(target, mirror, "utf-8");
-      } catch {
-        // noop
-      }
-    }
-  } catch {
-    // noop: best-effort
-  }
+  return { local: true, global: true, synced: true };
 }
 
 /**
@@ -797,38 +709,9 @@ export function deleteAgentFile(
     } catch {
       // dir no vacío (skills propias u otros): se deja, el agent.md ya salió
     }
-    // Espejos proyecto + global best-effort (en sandbox solo con seam de
-    // tests). Sin esto, el borrado no llegaba al global que ven los jobs.
-    if (!factoryDir) {
-      regenMirrorBestEffort();
-    } else if (mirrorTestHome !== null) {
-      writeSingleMirrors(clean, null, factoryDir, mirrorTestHome);
-    }
-    // En disco real, regen completo (también limpia huérfanos); en sandbox
-    // sin seam, nada fuera del sandbox.
-    if (!factoryDir) {
-      try {
-        const mirror = path.join(agentsDirFor(), "..", "..", ".opencode", "agents", `${clean}.md`);
-        try {
-          if (fs.existsSync(mirror)) fs.unlinkSync(mirror);
-        } catch {
-          // noop
-        }
-      } catch {
-        // noop: best-effort
-      }
-      try {
-        const globalMirror = path.join(resolveGlobalAgentsDir(), `${clean}.md`);
-        try {
-          if (fs.existsSync(globalMirror)) fs.unlinkSync(globalMirror);
-        } catch {
-          // noop
-        }
-      } catch {
-        // noop: best-effort
-      }
-      markAgentsChangedBestEffort();
-    }
+    // F14: sin mirrors en disco. La baja impacta al reciclar el server
+    // efímero (agentDirty), que reconstruye los agentes inline.
+    markAgentsChangedBestEffort();
     return { ok: true, value: { name: clean } };
   } catch {
     return { ok: false, error: "no se pudo eliminar el agente", code: "io" };

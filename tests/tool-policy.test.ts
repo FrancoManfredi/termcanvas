@@ -75,8 +75,11 @@ test("readonly es el espejo {read,glob,grep,webfetch} (TRIAGE_TOOLS/SPEC/REVIEW 
   }
 });
 
-test("implement es el único set con escritura (read/write/edit/bash/glob/grep/webfetch)", () => {
-  assert.deepEqual(Object.keys({ ...IMPLEMENT_TOOLS }).sort(), ["bash", "edit", "glob", "grep", "read", "webfetch", "write"]);
+test("implement es el único set con escritura (set completo del runner)", () => {
+  assert.deepEqual(
+    Object.keys({ ...IMPLEMENT_TOOLS }).sort(),
+    ["bash", "edit", "glob", "grep", "list", "lsp", "read", "todowrite", "webfetch", "websearch", "write"],
+  );
   assert.deepEqual(toolsetFor("implement"), { ...IMPLEMENT_TOOLS });
   for (const role of ["triage", "spec", "review", "foreman", "mvp-tracking", "interview"]) {
     assert.deepEqual(toolsetFor(role), { ...READONLY_TOOLS }, `${role} es readonly`);

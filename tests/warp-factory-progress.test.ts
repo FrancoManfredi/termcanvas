@@ -407,6 +407,39 @@ test("panel snapshot: stage + session combined; unknown job shape stays null", (
   assert.equal(describeFactoryJobForPanel(null), null);
 });
 
+test("engine run: describe adjunta engineRun saneado; junk se omite", () => {
+  const info = describeFactoryJobForPanel(
+    queuedJob({
+      status: "Building",
+      engineRun: {
+        runId: "run-1",
+        workflow: "factory-default",
+        status: "running",
+        currentNodeId: "spec",
+        completedNodes: ["triage", "  ", "spec"],
+        nodes: ["triage", "  ", "spec", "approve"],
+        nodeSessions: { triage: "ses-t1", spec: "ses-s1", deploy: "  " },
+        startedAt: "2026-09-12T00:00:00.000Z",
+      },
+    }),
+  );
+  assert.ok(info);
+  assert.equal(info.engineRun?.runId, "run-1");
+  assert.equal(info.engineRun?.workflow, "factory-default");
+  assert.equal(info.engineRun?.currentNodeId, "spec");
+  assert.deepEqual(info.engineRun?.completedNodes, ["triage", "spec"]);
+  assert.deepEqual(info.engineRun?.nodes, ["triage", "spec", "approve"]);
+  assert.deepEqual(info.engineRun?.nodeSessions, {
+    triage: "ses-t1",
+    spec: "ses-s1",
+  });
+  const junk = describeFactoryJobForPanel(
+    queuedJob({ engineRun: { runId: "run-1" } }),
+  );
+  assert.ok(junk);
+  assert.equal(junk.engineRun, undefined, "run incompleto no se proyecta");
+});
+
 // ─── Derivation: both sections move ──────────────────────────────────────────
 
 test("activity derivation: factory-active row is in-progress/implementing", () => {

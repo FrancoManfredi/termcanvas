@@ -29,6 +29,7 @@ import {
   parseReviewPath,
   parseReviewRetryPath,
   parseReviewRetryReviewPath,
+  parseReviewStalePath,
 } from "../headless-runtime/factory/review/reviewRoutes.ts";
 import { matchRoute } from "../headless-runtime/factory/routing/routeTable.ts";
 import { writeReviewJsonAtomic, writeReviewRawAtomic } from "../headless-runtime/review/reviewDisk.ts";
@@ -142,6 +143,24 @@ test("F2-E2 review: matchers POST ok dual + null ante método o longitud", () =>
   assert.equal(parseReviewRetryPath("POST", "/factory/jobs/job-f2e2-a/review/retry-review"), null);
 });
 
+test("F2-E2 review: parseReviewStalePath ok dual + 400 sin id + null ajeno", () => {
+  assert.deepEqual(parseReviewStalePath("GET", "/factory/jobs/job-f2e2-a/review/stale"), {
+    id: "job-f2e2-a",
+    isWorkItemsAlias: false,
+  });
+  assert.deepEqual(parseReviewStalePath("GET", "/work-items/job-f2e2-a/review/stale"), {
+    id: "job-f2e2-a",
+    isWorkItemsAlias: true,
+  });
+  assert.deepEqual(parseReviewStalePath("GET", "/factory/jobs/review/stale"), {
+    error: "missing id for review stale",
+  });
+  assert.equal(parseReviewStalePath("POST", "/factory/jobs/job-f2e2-a/review/stale"), null);
+  assert.equal(parseReviewStalePath("GET", "/factory/jobs/job-f2e2-a/review"), null);
+  assert.equal(parseReviewStalePath("GET", "/factory/jobs/job-f2e2-a/review/raw"), null);
+  assert.equal(parseReviewStalePath("GET", "/otro/job-f2e2-a/review/stale"), null);
+});
+
 test("F2-E2 review: paridad total contra matchRoute (dominio+id+alias)", () => {
   const cases: Array<{ path: string; domain: string | null }> = [
     { path: "/factory/jobs/job-f2e2-a/review", domain: "job-review" },
@@ -152,18 +171,22 @@ test("F2-E2 review: paridad total contra matchRoute (dominio+id+alias)", () => {
     { path: "/work-items/job-f2e2-a/review/retry", domain: "job-review-retry" },
     { path: "/factory/jobs/job-f2e2-a/review/retry-review", domain: "job-review-retry-review" },
     { path: "/work-items/job-f2e2-a/review/retry-review", domain: "job-review-retry-review" },
+    { path: "/factory/jobs/job-f2e2-a/review/stale", domain: "job-review-stale" },
+    { path: "/work-items/job-f2e2-a/review/stale", domain: "job-review-stale" },
   ];
   for (const { path: p, domain } of cases) {
-    const table = matchRoute(domain === "job-review" ? "GET" : "POST", p);
+    const table = matchRoute(domain === "job-review" || domain === "job-review-stale" ? "GET" : "POST", p);
     assert.equal(table?.domain ?? null, domain, `tabla en ${p}`);
     const mine =
       domain === "job-review"
         ? parseReviewPath("GET", p)
-        : domain === "job-review-accept"
-          ? parseReviewAcceptPath("POST", p)
-          : domain === "job-review-retry"
-            ? parseReviewRetryPath("POST", p)
-            : parseReviewRetryReviewPath("POST", p);
+        : domain === "job-review-stale"
+          ? parseReviewStalePath("GET", p)
+          : domain === "job-review-accept"
+            ? parseReviewAcceptPath("POST", p)
+            : domain === "job-review-retry"
+              ? parseReviewRetryPath("POST", p)
+              : parseReviewRetryReviewPath("POST", p);
     assert.ok(mine !== null && !("error" in mine), `match propio en ${p}`);
     if (mine !== null && !("error" in mine) && table?.id) {
       assert.equal(mine.id, table.id, `paridad id en ${p}`);

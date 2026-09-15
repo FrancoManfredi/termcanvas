@@ -28,7 +28,7 @@
  */
 
 import { getFactoryConfig } from "../factory/agentLoader";
-import { mirrorExists } from "../factory/opencodeAgentSync";
+import { factoryAgentExists } from "../factory/opencodeAgentSync";
 import {
   isSessionAgentRole,
   SESSION_AGENT_ROLES,
@@ -364,9 +364,9 @@ export async function promptInAgentSession<T>(opts: {
   const { jobId, role, create, promptWith, expectAgent, getAgent } = opts;
   let hasMirrorFn: (name: string) => boolean;
   try {
-    hasMirrorFn = typeof opts.hasMirror === "function" ? opts.hasMirror : mirrorExists;
+    hasMirrorFn = typeof opts.hasMirror === "function" ? opts.hasMirror : factoryAgentExists;
   } catch {
-    hasMirrorFn = mirrorExists;
+    hasMirrorFn = factoryAgentExists;
   }
 
   let enabled = false;
@@ -420,9 +420,9 @@ export async function promptInAgentSession<T>(opts: {
     return { sessionId: fresh, res, renewed: true };
   };
 
-  // Con guardada + identidad exigida (espejo en disco): UNA lectura
-  // best-effort. Mismatch EXPLÍCITO → renovar; duda (lectura falla o sin
-  // agent) → reutilizar como siempre. Sin expectAgent/getAgent: intacto.
+  // Con guardada + identidad exigida (definición factory existente): UNA
+  // lectura best-effort. Mismatch EXPLÍCITO → renovar; duda (lectura falla o
+  // sin agent) → reutilizar como siempre. Sin expectAgent/getAgent: intacto.
   if (saved && expectAgent && getAgent) {
     try {
       if (hasMirrorFn(expectAgent)) {

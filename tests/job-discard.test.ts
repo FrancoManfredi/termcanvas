@@ -7,7 +7,7 @@
  * PR close (sin merge) → worktree remove → rama remota+local (base nunca)
  * → archivos sueltos (untracked borra, tracked revierte) → job borrado
  * total (memoria + dir + índice + sessions).
- * Guards 404/409 (solo Cancelled o en-curso frenan; Complete se acepta).
+ * Guards 404/409 (solo en-curso frena; Cancelled/Complete se borran igual).
  *
  * Sandbox: TERMCANVAS_FACTORY_DIR a tmp (el índice real no se toca),
  * git real en tmp, gh/worktree/branch con seam fake. Sin red, sin daemon.
@@ -111,18 +111,24 @@ test("discard 404 ante id inválido o ausente", { timeout: TEST_TIMEOUT_MS }, as
   }
 });
 
-test("discard 409 solo si ya está descartado o está en curso", { timeout: TEST_TIMEOUT_MS }, async () => {
+test("discard 409 solo si está en curso; Cancelled se borra completo", { timeout: TEST_TIMEOUT_MS }, async () => {
   const wt = makeTmp("job-discard-guard-");
   workItemStore.clear();
   try {
-    const doneId = "job-discard-done01";
-    toBuilding(doneId, wt);
-    workItemStore.transition(doneId, "Cancelled", "user", "t");
-    assert.deepEqual(await requestJobDiscard(doneId), {
-      ok: false,
-      code: 409,
-      error: "job already discarded",
+    // Un job Cancelled (incidente #125) debe poder borrarse: antes el guard
+    // devolvía 409 "job already discarded" y quedaba para siempre en disco.
+    const cancelledId = "job-discard-cancelled01";
+    toBuilding(cancelledId, wt);
+    workItemStore.transition(cancelledId, "Cancelled", "user", "t");
+    const cancelledOut = await requestJobDiscard(cancelledId, {
+      run: fakeRun([]),
     });
+    assert.equal(cancelledOut.ok, true);
+    if (cancelledOut.ok) {
+      assert.equal(cancelledOut.status, "Discarded");
+      assert.equal(cancelledOut.cleaned.jobDeleted, true);
+    }
+    assert.equal(workItemStore.get(cancelledId), undefined);
 
     const lockId = "job-discard-lock01";
     toBuilding(lockId, wt);

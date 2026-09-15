@@ -290,9 +290,6 @@ function sanitizarCandidatas(
     const otras = candidatas.filter((c) => !c.es_recomendada).slice(0, 3);
     const aConservar = new Set([recomendada!, ...otras]);
     candidatas = candidatas.filter((c) => aConservar.has(c));
-    console.log(
-      `[tácticas ${etiqueta}] ${data.candidatas.length} candidatas > máximo 4: se conservan la recomendada + las primeras 3.`,
-    );
   }
   const unica = candidatas.length === 1;
   return {
@@ -425,12 +422,10 @@ export async function analyzeTacticForAsr(
   // Trazabilidad pedida por el dueño: el prompt completo de cada ASR queda
   // en la consola del proceso main (terminal donde corre electron — NUNCA en
   // DevTools del renderer).
-  console.log(`[tácticas ${asr.id}] prompt (${prompt.length} chars):\n${prompt}`);
 
   // Sesión efímera REAL por llamada: NO se pasa session_id vacío (el SDK
   // armaría "/session//message" y el server respondería HTML — ver nota en
   // requirements.ts). Se libera en finally, best-effort.
-  console.log(`[tácticas ${asr.id}] llamando al modelo…`);
   let client: OpencodeClient;
   let sesionId: string;
   try {
@@ -440,7 +435,6 @@ export async function analyzeTacticForAsr(
     ).id;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.log(`[tácticas ${asr.id}] terminó con error (sesión): ${msg}`);
     return { ok: false, error: msg };
   }
   const fakeLedger = { session_id: sesionId, project_path: projectPath } as unknown as InterviewLedger;
@@ -464,7 +458,6 @@ export async function analyzeTacticForAsr(
       { ...res.data, asr_id: asr.id, categoria_atributo: catalogo.categoria },
       asr.id,
     );
-    console.log(`[tácticas ${asr.id}] terminó ok`);
     return {
       ok: true,
       data,
@@ -473,7 +466,6 @@ export async function analyzeTacticForAsr(
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.log(`[tácticas ${asr.id}] terminó con error: ${msg}`);
     return { ok: false, error: msg };
   } finally {
     try {
@@ -500,7 +492,6 @@ export async function consolidateTactics(
   if (recomendadas.length < 2) return { ok: true, skipped: true };
 
   const prompt = buildConsolidationPrompt(recomendadas);
-  console.log(`[tácticas] consolidación llamando al modelo (${recomendadas.length} recomendadas)…`);
   let client: OpencodeClient;
   let sesionId: string;
   try {
@@ -526,11 +517,9 @@ export async function consolidateTactics(
       ),
       "Consolidación de tácticas",
     );
-    console.log("[tácticas] consolidación terminó ok");
     return { ok: true, skipped: false, data: res.data };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    console.log(`[tácticas] consolidación terminó con error: ${msg}`);
     return { ok: false, error: msg };
   } finally {
     try {
@@ -1166,9 +1155,6 @@ export async function ejecutarAnalisisTacticas(
   // hasta terminar y persiste cada hito.
   void (async () => {
     try {
-      console.log(
-        `[tácticas] run iniciado (${genuinos.length} ASR: ${genuinos.map((a) => a.id).join(", ")})`,
-      );
       const ahora = new Date().toISOString();
       const doc: AnalisisTacticasDoc = {
         synthesis_path: synthesisPath,
@@ -1205,11 +1191,9 @@ export async function ejecutarAnalisisTacticas(
       }
       docFinal.estado = "done";
       escribirAnalisisDoc(projectPath, docFinal);
-      console.log("[tácticas] run terminado (done)");
     } catch (err) {
       // Catastrófico (p.ej. sin permisos de escritura): queda registrado.
       const msg = err instanceof Error ? err.message : String(err);
-      console.log(`[tácticas] run terminado con error global: ${msg}`);
       const doc = leerAnalisisDoc(projectPath);
       if (doc && doc.synthesis_path === synthesisPath) {
         doc.estado = "error";
@@ -1243,9 +1227,6 @@ export async function ejecutarReintentoTactico(
   runsActivos.add(synthesisPath);
   void (async () => {
     try {
-      console.log(
-        `[tácticas] reintento iniciado (${asrId}${categoriaExplicita ? `, categoría ${categoriaExplicita}` : ""})`,
-      );
       const docExistente = leerAnalisisDoc(projectPath);
       const doc: AnalisisTacticasDoc =
         docExistente && docExistente.synthesis_path === synthesisPath

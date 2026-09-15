@@ -18,6 +18,11 @@ export interface VarContext {
   loopPrev?: Record<string, unknown>;
   /** Salida textual de la iteración anterior de un `loop` escalar. */
   loopPrevOutput?: string;
+  /**
+   * Rondas previas de un `loop_group` (`$LOOP_HISTORY`): array de
+   * `{iteration, nodes}`. Solo lectura, armado por el executor.
+   */
+  loopHistory?: unknown;
 }
 
 const VAR_PATTERN = /\$([A-Za-z_][A-Za-z0-9_]*)((?:\.[A-Za-z0-9_-]+)*)/g;
@@ -85,6 +90,11 @@ function resolveRootPath(
         throw new VariablesError(`${expression}: $LOOP_PREV_OUTPUT no tiene campos`);
       }
       return ctx.loopPrevOutput ?? "";
+    case "LOOP_HISTORY":
+      if (segments.length > 0) {
+        throw new VariablesError(`${expression}: $LOOP_HISTORY no tiene campos`);
+      }
+      return ctx.loopHistory ?? [];
     case "INPUTS": {
       const [name, ...rest] = segments;
       if (!name) {
@@ -110,10 +120,29 @@ function resolveRootPath(
         throw new VariablesError(`${expression}: variable desconocida $${root}`);
       }
       const [head, ...rest] = segments;
-      if (head !== "output") {
+      if (head !== "output" && head !== "outputJson") {
         throw new VariablesError(
-          `${expression}: $${root} solo expone .output (u .output.<campo>)`,
+          `${expression}: $${root} solo expone .output (u .output.<campo>) y .outputJson`,
         );
+      }
+      if (head === "outputJson") {
+        // Bloque legible para inyectar evidencia estructurada en mensajes
+        // (no cambia `$node.output`: ese sigue siendo el texto crudo).
+        if (rest.length > 0) {
+          throw new VariablesError(
+            `${expression}: $${root}.outputJson no tiene campos (usá $${root}.output.<campo>)`,
+          );
+        }
+        if (state.outputJson === undefined) {
+          throw new VariablesError(
+            `${expression}: $${root} no es estructurado (declarar output_format)`,
+          );
+        }
+        try {
+          return JSON.stringify(state.outputJson, null, 2);
+        } catch {
+          return state.output ?? "";
+        }
       }
       if (rest.length === 0) {
         return state.output ?? "";

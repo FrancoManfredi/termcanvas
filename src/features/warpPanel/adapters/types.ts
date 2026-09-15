@@ -2,8 +2,6 @@ import type {
   KanbanIssue,
   KanbanStatus,
   Issue,
-  Agent,
-  AgentConfigData,
 } from "../types";
 
 /**
@@ -32,13 +30,4 @@ export interface ActivityAdapter {
    */
   listActivityIssues(): Issue[];
   getActivityIssue(id: number): Issue | undefined;
-}
-
-/** Agents + per-agent configuration (Track B). Backs AgentsPanel + AgentConfig. */
-export interface AgentsAdapter {
-  listSubAgents(): Agent[];
-  getForeman(): Agent;
-  getConfig(agentId: string): AgentConfigData | undefined;
-  /** Local draft save (mock: in-memory; real: persist + daemon call). */
-  saveConfig(agentId: string, patch: Partial<AgentConfigData>): AgentConfigData;
 }

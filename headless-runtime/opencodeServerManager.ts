@@ -13,6 +13,9 @@
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk/v2";
 import { exec, spawn } from "node:child_process";
 import { daemonGuardrailPermission } from "../shared/agentGuardrails.ts";
+import { buildFactoryAgentsConfig, resolveFactorySkillsDir } from "./factory/opencodeAgentSync";
+import { getAgentDefsFingerprint, getAgentDefsRevision } from "./factory/agentLoader";
+import { markAgentsDirty } from "./factory/agents/agentDirty";
 import { encontrarPuertoServidor, OPENCODE_EPHEMERAL_HINT } from "./interview/puerto-libre.ts";
 
 const SERVER_START_TIMEOUT_MS = 30_000;
@@ -36,6 +39,21 @@ let runningClient: OpencodeClient | null = null;
 let runningUrl: string | null = null;
 let runningPort: number | null = null;
 let startedAt: number | null = null;
+/**
+ * Revisión de agentes con la que nació el singleton (`agentDefsRevision` al
+ * spawnear). Los turnos de agente la comparan con la vigente: si cambió,
+ * corren en un server scopeado fresco en vez del singleton stale (fix
+ * PLATANO: la config de agentes aplica al próximo turno aunque la cola esté
+ * ocupada). null = sin singleton (sin comparación posible).
+ */
+let runningAgentsRevision: number | null = null;
+
+/**
+ * Huella de disco de los agentes al spawnear el singleton (mtime+size de
+ * `factory/agents/<name>/agent.md`). Cubre ediciones a mano que no pasan por la
+ * API (sin bump de revisión). null = sin singleton.
+ */
+let runningAgentsFingerprint: number | null = null;
 
 // Test seam: permite inyectar cliente mock sin levantar server real (igual que harness)
 let testClientOverride: OpencodeClient | null = null;
@@ -62,11 +80,15 @@ export function setTestClient(client: OpencodeClient | null, url?: string | null
     runningUrl = url ?? "http://127.0.0.1:4096";
     runningPort = null;
     startedAt = Date.now();
+    runningAgentsRevision = null;
+    runningAgentsFingerprint = null;
   } else {
     runningClient = null;
     runningUrl = null;
     runningPort = null;
     startedAt = null;
+    runningAgentsRevision = null;
+    runningAgentsFingerprint = null;
   }
 }
 
@@ -110,22 +132,89 @@ async function healthCheck(url: string): Promise<boolean> {
 }
 
 /**
- * Permisos del server efímero del daemon: la factory corre sin humano
- * delante — cada prompt de permiso (`ask`) estanca el pipeline para siempre.
- * Por eso TODO es `allow` o `deny`, nunca `ask`: `deny` bloquea sin
- * preguntar (el agente recibe error y sigue con otra cosa).
- * Guardrails canónicos en shared/agentGuardrails.ts (secretos, lockfiles,
- * estado interno y comandos que cuelgan el bash). `deny` ≠ `ask`: denegar
- * NO interrumpe el pipeline.
- * `TERMCANVAS_DAEMON_ASK_PERMISSIONS=1` restaura los prompts (supervisado).
- * Nunca lanza.
+ * Config base del server efímero de TermCanvas: guardrails de permiso +
+ * agentes factory INLINE (`Config.agent`), nunca a disco — el opencode del
+ * usuario no los ve en ninguna carpeta. `TERMCANVAS_DAEMON_ASK_PERMISSIONS=1`
+ * restaura los prompts de permiso. Nunca lanza.
  */
-function daemonPermissionConfig(): Record<string, unknown> {
+export function buildBaseServerConfig(): Record<string, unknown> {
+  const config: Record<string, unknown> = {};
   try {
-    if (process.env.TERMCANVAS_DAEMON_ASK_PERMISSIONS === "1") return {};
-    return { permission: daemonGuardrailPermission() };
+    if ((process.env.TERMCANVAS_DAEMON_ASK_PERMISSIONS ?? "") !== "1") {
+      config.permission = daemonGuardrailPermission();
+    }
   } catch {
-    return {};
+    // sin permission: opencode usa su default
+  }
+  try {
+    const agents = buildFactoryAgentsConfig();
+    if (Object.keys(agents).length > 0) config.agent = agents;
+  } catch {
+    // sin agentes: la identidad estricta del engine fallará el nodo con error claro
+  }
+  try {
+    const skillsDir = resolveFactorySkillsDir();
+    if (skillsDir !== null) config.skills = { paths: [skillsDir] };
+  } catch {
+    // sin skills: los agentes corren sin skills nativas
+  }
+  return config;
+}
+
+/**
+ * Une `skills.paths` de base + scope (dedup, solo strings no vacíos). El
+ * scope AGREGA su scopeDir; sin esto, un nodo con skills propias dejaba
+ * invisibles las skills de `factory/skills` que el agente tiene allowadas.
+ * Pura, nunca lanza.
+ */
+function mergeSkillsPaths(
+  baseSkills: unknown,
+  scopeSkills: unknown,
+): Record<string, unknown> | undefined {
+  try {
+    const asRecord = (v: unknown): Record<string, unknown> =>
+      v !== null && typeof v === "object" && !Array.isArray(v)
+        ? (v as Record<string, unknown>)
+        : {};
+    const b = asRecord(baseSkills);
+    const s = asRecord(scopeSkills);
+    const collect = (v: unknown): string[] =>
+      Array.isArray(v)
+        ? (v as unknown[]).filter((p): p is string => typeof p === "string" && p.trim().length > 0)
+        : [];
+    const paths = [...new Set([...collect(s.paths), ...collect(b.paths)])];
+    if (paths.length === 0) return undefined;
+    return { ...b, ...s, paths };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Merge config base + config scopeada por nodo (skills/mcp): `permission` se
+ * FUSIONA (el scope agrega su allow de skill, no pisa los guardrails),
+ * `skills.paths` se UNE (scopeDir + factory/skills) y el resto del scope pisa
+ * la base. Los agentes inline SIEMPRE viajan. Pura.
+ */
+export function mergeServerConfig(
+  scope: Record<string, unknown>,
+): Record<string, unknown> {
+  try {
+    const base = buildBaseServerConfig();
+    const asRecord = (v: unknown): Record<string, unknown> =>
+      v !== null && typeof v === "object" && !Array.isArray(v)
+        ? (v as Record<string, unknown>)
+        : {};
+    const merged: Record<string, unknown> = {
+      ...base,
+      ...scope,
+      permission: { ...asRecord(base.permission), ...asRecord(scope.permission) },
+    };
+    const skills = mergeSkillsPaths(base.skills, scope.skills);
+    if (skills) merged.skills = skills;
+    return merged;
+  } catch {
+    return { ...scope };
   }
 }
 
@@ -307,15 +396,13 @@ async function createEphemeralServer(): Promise<ServerHandle> {
       // Gao: encontrarPuertoServidor intenta OPENCODE_EPHEMERAL_HINT=20274 primero
       port = await encontrarPuertoServidor(20000, 45000, 12);
       const isHint = port === OPENCODE_EPHEMERAL_HINT;
-      console.log(`[OpencodeServerManager] port candidato ${port}${isHint ? " (hint 20274)" : ""} (intento ${attempt + 1}/${SERVER_START_RETRIES}) → probarBind ok, creando server...`);
       server = await spawnOpencodeServer({
         hostname: "127.0.0.1",
         port,
         timeout: SERVER_START_TIMEOUT_MS,
-        config: daemonPermissionConfig(),
+        config: buildBaseServerConfig(),
       });
       const url = (server as unknown as { url: string }).url ?? `http://127.0.0.1:${port}`;
-      console.log(`[OpencodeServerManager] createOpencodeServer ok url=${url}, health-check GET /provider 800ms x2...`);
       const healthy = await healthCheck(url);
       if (!healthy) {
         console.warn(`[OpencodeServerManager] health-check falló para ${url}, cerrando zombie CLOSE_WAIT y resorteando`);
@@ -325,7 +412,6 @@ async function createEphemeralServer(): Promise<ServerHandle> {
         lastError = new Error(`health-check failed for ${url}`);
         continue;
       }
-      console.log(`[OpencodeServerManager] health ok ${url}`);
       // Versión del BINARIO spawneado (puede divergir del SDK npm y del
       // binario del shell: el skew explica 400s como el de `format`.
       // Best-effort: nunca bloquea ni rompe el arranque. `exec` (shell)
@@ -335,7 +421,6 @@ async function createEphemeralServer(): Promise<ServerHandle> {
         exec("opencode --version", { timeout: 8000, windowsHide: true }, (err, stdout) => {
           try {
             if (!err && typeof stdout === "string" && stdout.trim() !== "") {
-              console.log(`[OpencodeServerManager] binario opencode --version: ${stdout.trim().slice(0, 40)} (server ${url})`);
             }
           } catch {}
         });
@@ -385,6 +470,8 @@ export async function ensureClient(): Promise<OpencodeClient> {
       runningUrl = null;
       runningPort = null;
       startedAt = null;
+      runningAgentsRevision = null;
+      runningAgentsFingerprint = null;
     }
     try {
       const server = await createEphemeralServer();
@@ -402,7 +489,23 @@ export async function ensureClient(): Promise<OpencodeClient> {
       startedAt = Date.now();
       lastHealthyAt = Date.now();
       lastError = null;
-      console.log(`[OpencodeServerManager] ready ${url}`);
+      try {
+        runningAgentsRevision = getAgentDefsRevision();
+      } catch {
+        runningAgentsRevision = null;
+      }
+      try {
+        runningAgentsFingerprint = getAgentDefsFingerprint();
+      } catch {
+        runningAgentsFingerprint = null;
+      }
+      try {
+        console.log(
+          `[OpencodeServerManager] singleton sellado rev=${String(runningAgentsRevision)} fp=${String(runningAgentsFingerprint)} (${url})`,
+        );
+      } catch {
+        // log best-effort
+      }
       return client;
     } catch (e) {
       lastError = e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200);
@@ -472,7 +575,8 @@ export function close(): void {
   runningUrl = null;
   runningPort = null;
   startedAt = null;
-  console.log(`[OpencodeServerManager] closed`);
+  runningAgentsRevision = null;
+  runningAgentsFingerprint = null;
 }
 
 export function getPort(): number | null {
@@ -483,9 +587,170 @@ export function getStartedAt(): number | null {
   return startedAt;
 }
 
+/**
+ * Revisión de agentes sellada al spawnear el singleton (null = sin singleton
+ * o revisión desconocida). Los nodos IA la comparan con
+ * `getAgentDefsRevision()` para decidir server fresco. Nunca lanza.
+ */
+export function getRunningAgentsRevision(): number | null {
+  try {
+    return runningAgentsRevision;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Huella de agentes sellada al spawnear el singleton (null = sin singleton).
+ * Nunca lanza.
+ */
+export function getRunningAgentsFingerprint(): number | null {
+  try {
+    return runningAgentsFingerprint;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True cuando un turno de agente debe correr en un server scopeado recién
+ * nacido en vez del singleton: el nodo declara capacidades propias
+ * (skills/mcp) o la revisión/huella de agentes vigente cambió desde que el
+ * singleton nació (fix PLATANO: la config inline del singleton quedó con el
+ * prompt anterior). Sin singleton vivo la revisión es desconocida (null) y no
+ * fuerza scope: `ensureClient` bootea fresco de todos modos. Pura, nunca lanza.
+ */
+export function shouldUseScopedServer(opts: {
+  hasNodeScope: boolean;
+  currentRevision: unknown;
+  singletonRevision: unknown;
+  currentFingerprint?: unknown;
+  singletonFingerprint?: unknown;
+}): boolean {
+  try {
+    if (opts.hasNodeScope) return true;
+    if (
+      typeof opts.currentRevision === "number" &&
+      typeof opts.singletonRevision === "number" &&
+      opts.currentRevision !== opts.singletonRevision
+    ) {
+      return true;
+    }
+    if (
+      typeof opts.currentFingerprint === "number" &&
+      typeof opts.singletonFingerprint === "number" &&
+      opts.currentFingerprint !== opts.singletonFingerprint
+    ) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/** Resultado de `ensureAgentTurnClient`: cliente + teardown del turno. */
+export interface AgentTurnClient {
+  client: OpencodeClient;
+  /**
+   * Cierra el server efímero del turno. No-op cuando el turno corre en el
+   * singleton (nunca se cierra desde acá: mataría sesiones vivas de otros
+   * jobs).
+   */
+  close: () => void;
+  /** true = server scopeado recién nacido (el singleton estaba stale). */
+  fresh: boolean;
+}
+
+/**
+ * Cliente para UN turno de agente con config fresca garantizada:
+ * - singleton si sigue vigente (revisión y huella de agentes sin cambios);
+ * - server scopeado recién nacido (config de disco + scope opcional) si el
+ *   singleton quedó stale. En ese caso además marca dirty: el próximo intake
+ *   idle recicla el singleton (no se cierra acá porque hay sesiones vivas).
+ *
+ * Multi-uso: los callers DEBEN llamar `close()` en un `finally`. Nunca deja
+ * el server huérfano si el spawn falla (lanza y el caller cae a su fallback).
+ */
+export async function ensureAgentTurnClient(opts?: {
+  hasNodeScope?: boolean;
+  scopeConfig?: Record<string, unknown>;
+}): Promise<AgentTurnClient> {
+  const hasNodeScope = opts?.hasNodeScope === true;
+  let currentRevision: number | null = null;
+  let currentFingerprint: number | null = null;
+  let singletonRevision: number | null = null;
+  let singletonFingerprint: number | null = null;
+  try {
+    currentRevision = getAgentDefsRevision();
+  } catch {
+    currentRevision = null;
+  }
+  try {
+    currentFingerprint = getAgentDefsFingerprint();
+  } catch {
+    currentFingerprint = null;
+  }
+  try {
+    singletonRevision = runningAgentsRevision;
+  } catch {
+    singletonRevision = null;
+  }
+  try {
+    singletonFingerprint = runningAgentsFingerprint;
+  } catch {
+    singletonFingerprint = null;
+  }
+  const scoped = shouldUseScopedServer({
+    hasNodeScope,
+    currentRevision,
+    singletonRevision,
+    currentFingerprint,
+    singletonFingerprint,
+  });
+  if (!scoped) {
+    return { client: await ensureClient(), close: () => {}, fresh: false };
+  }
+  // Singleton stale (o scope propio del nodo): server recién nacido de disco.
+  try {
+    console.log(
+      `[OpencodeServerManager] turno con server fresco: singleton rev=${String(singletonRevision)}/fp=${String(singletonFingerprint)} → vigente rev=${String(currentRevision)}/fp=${String(currentFingerprint)}`,
+    );
+  } catch {
+    // log best-effort
+  }
+  try {
+    markAgentsDirty();
+  } catch {
+    // best-effort: sin flag, el reciclado lo cubre el próximo save por API
+  }
+  const port = await encontrarPuertoServidor(20_000, 45_000, 12);
+  const handle = await spawnOpencodeServer({
+    hostname: "127.0.0.1",
+    port,
+    timeout: SERVER_START_TIMEOUT_MS,
+    config: mergeServerConfig(opts?.scopeConfig ?? {}),
+  });
+  const client = createOpencodeClient({
+    baseUrl: handle.url,
+  } as unknown as Record<string, unknown>) as unknown as OpencodeClient;
+  return {
+    client,
+    close: () => {
+      try {
+        handle.close();
+      } catch {
+        // teardown best-effort: el server muere con el proceso si falla
+      }
+    },
+    fresh: true,
+  };
+}
+
 // Singleton object para uso OO (Factory/Foreman esperan manager.getClient/getUrl)
 export const opencodeServerManager = {
   ensureClient,
+  ensureAgentTurnClient,
   getClient,
   getUrl,
   getUrlAsync,
@@ -493,6 +758,9 @@ export const opencodeServerManager = {
   close,
   getPort,
   getStartedAt,
+  getRunningAgentsRevision,
+  getRunningAgentsFingerprint,
+  shouldUseScopedServer,
   setTestClient,
   getLastError,
 };

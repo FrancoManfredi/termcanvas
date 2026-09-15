@@ -309,9 +309,6 @@ async function syncReviewLabelToIssue(
       15_000,
     );
   } catch (err) {
-    console.log(
-      `[review] failed to sync issue #${issueNumber} label: ${err instanceof Error ? err.message : String(err)}`,
-    );
   }
 }
 

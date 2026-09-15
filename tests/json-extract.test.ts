@@ -31,9 +31,36 @@ test("prefiere el objeto con la key pedida entre varios", () => {
   assert.equal((JSON.parse(found as string) as Record<string, unknown>).verdict, "revise");
 });
 
-test("sin preferKeys devuelve el primer objeto parseable", () => {
-  const found = extractBalancedJSONObject('previo {"a":1} resto');
-  assert.equal(found, '{"a":1}');
+test("sin preferKeys devuelve el top-level, no el anidado más interno", () => {
+  assert.equal(extractBalancedJSONObject('previo {"a":1} resto'), '{"a":1}');
+  const nested =
+    'prosa {"green":true,"findings":[{"id":"f1","reverify":{"commands":["git diff --stat"],"reason":"x"}}]} fin';
+  const found = extractBalancedJSONObject(nested);
+  assert.ok(found !== null);
+  assert.equal(
+    (JSON.parse(found as string) as Record<string, unknown>).green,
+    true,
+  );
+});
+
+test("preferKeys matchea por presencia: boolean y array valen", () => {
+  const nested =
+    'prosa {"green":true,"findings":[{"id":"f1","reverify":{"commands":["git diff --stat"],"reason":"x"}}]} fin';
+  const found = extractBalancedJSONObject(nested, ["green", "findings"]);
+  assert.ok(found !== null);
+  const parsed = JSON.parse(found as string) as Record<string, unknown>;
+  assert.equal(parsed.green, true);
+  assert.ok(Array.isArray(parsed.findings));
+});
+
+test("con varios top-level gana el último (la respuesta va al final)", () => {
+  const mixed = 'eco {"id":"t1"} y luego {"green":true,"findings":[]} final';
+  const found = extractBalancedJSONObject(mixed);
+  assert.ok(found !== null);
+  assert.equal(
+    (JSON.parse(found as string) as Record<string, unknown>).green,
+    true,
+  );
 });
 
 test("jurk y vacíos → null, nunca lanza", () => {

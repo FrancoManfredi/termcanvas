@@ -147,6 +147,7 @@ export const AWAITING_LABELS: Record<AwaitingAction, string> = {
   "triage-respond":     "Answer Questions",
   "ask-human":          "Accept Review",
   "resume":             "Retomar trabajo",
+  "rerun":              "Re-run job",
 };
 
 /** Re-exported status union for column lookups (mirrors issues.ts usage). */

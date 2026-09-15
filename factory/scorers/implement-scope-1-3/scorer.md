@@ -5,7 +5,7 @@ agents: {implement}
 labels: [{"value":"en-scope","score":1,"description":"1 a 3 archivos tocados, todos justificados por el pedido"},{"value":"fuera-de-scope","score":0,"description":"cero archivos, mas de 3, o extras ajenos al pedido"}]
 passingScore: 0.5
 samplingRate: 25
-model: opencode-go/muse-spark-1.2-contributor
+model: opencode-go/muse-spark-1.3-contributor
 selfImprovement: false
 ---
 # implement-scope-1-3 — juez de scope del implement

@@ -81,6 +81,9 @@ export const FACTORY_INTEGRATIONS_TIMEOUT_MS = 3000;
 export const FACTORY_INTEGRATION_POST_TIMEOUT_MS = 3000;
 export const FACTORY_INTEGRATION_WEBHOOK_TIMEOUT_MS = 5000;
 export const FACTORY_INTEGRATION_POSTBACK_TIMEOUT_MS = 60000;
+export const FACTORY_DEPENDENCIES_TIMEOUT_MS = 20000;
+/** Install = hasta dos instaladores en cadena (uv, fallback pip): tope largo, a pedido humano. */
+export const FACTORY_DEPENDENCIES_INSTALL_TIMEOUT_MS = 610000;
 export const FACTORY_WORKTREE_DELETE_TIMEOUT_MS = 5000;
 /**
  * Discard = teardown completo (gh pr close + git push --delete + branch -D
@@ -2489,6 +2492,39 @@ export interface FactoryAgentListItem {
   name: string;
   description: string;
   agentType: string;
+  /** Metadata del índice (daemon viejo puede no traerla: defaults honestos). */
+  mode: string;
+  model: string;
+  /** Clave del set curado de íconos ("" = sin ícono, monograma). */
+  icon: string;
+  tools: string[];
+  skills: string[];
+  mcps: string[];
+  stage: string;
+  blocking: boolean;
+}
+
+function stringListOf(raw: unknown): string[] {
+  try {
+    if (Array.isArray(raw)) {
+      return (raw as unknown[]).map((v) => String(v ?? "").trim()).filter(Boolean);
+    }
+    if (raw && typeof raw === "object") {
+      return Object.keys(raw as Record<string, unknown>).map((k) => k.trim()).filter(Boolean);
+    }
+    if (typeof raw === "string") {
+      return raw
+        .trim()
+        .replace(/^\{/, "")
+        .replace(/\}$/, "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+    return [];
+  } catch {
+    return [];
+  }
 }
 
 function parseAgentListJson(json: unknown): FactoryAgentListItem[] | null {
@@ -2503,6 +2539,14 @@ function parseAgentListJson(json: unknown): FactoryAgentListItem[] | null {
         name: r.name.trim(),
         description: typeof r.description === "string" ? r.description : "",
         agentType: typeof r.agentType === "string" ? r.agentType : "",
+        mode: typeof r.mode === "string" && r.mode.trim() ? r.mode.trim() : "primary",
+        model: typeof r.model === "string" ? r.model : "",
+        icon: typeof r.icon === "string" ? r.icon.trim() : "",
+        tools: stringListOf(r.tools),
+        skills: stringListOf(r.skills),
+        mcps: stringListOf(r.mcps),
+        stage: typeof r.stage === "string" && r.stage.trim() ? r.stage.trim() : "none",
+        blocking: r.blocking === true || r.blocking === "true",
       });
     }
     return out;
@@ -2675,6 +2719,340 @@ export async function saveFactoryAgentBody(
       ok: false,
       status: null,
       data: { name: typeof name === "string" ? name : "", body: "" },
+      error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+    };
+  }
+}
+
+
+// ── Agent catalogs: skills disponibles + bundles MCP por agente ──
+
+export interface FactorySkillEntry {
+  name: string;
+  description: string;
+  path: string;
+}
+
+export interface FactoryMcpServerSummary {
+  name: string;
+  type: "remote" | "local";
+  target: string;
+}
+
+export interface FactoryMcpBundleListItem {
+  name: string;
+  serverCount: number;
+  servers: FactoryMcpServerSummary[];
+}
+
+export interface FactoryMcpBundle {
+  name: string;
+  servers: Record<string, unknown>;
+}
+
+function isValidMcpBundleName(value: unknown): value is string {
+  try {
+    return typeof value === "string" && /^[a-z0-9][a-z0-9_-]*$/i.test(value.trim()) && value.trim().length <= 64;
+  } catch {
+    return false;
+  }
+}
+
+function parseSkillListJson(json: unknown): FactorySkillEntry[] | null {
+  try {
+    const rec = asRecord(json);
+    if (!rec || !Array.isArray(rec.skills)) return null;
+    const out: FactorySkillEntry[] = [];
+    for (const item of rec.skills) {
+      const r = asRecord(item);
+      if (!r || typeof r.name !== "string" || r.name.trim().length === 0) return null;
+      out.push({
+        name: r.name.trim(),
+        description: typeof r.description === "string" ? r.description : "",
+        path: typeof r.path === "string" ? r.path : "",
+      });
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+function parseMcpBundleListJson(json: unknown): FactoryMcpBundleListItem[] | null {
+  try {
+    const rec = asRecord(json);
+    if (!rec || !Array.isArray(rec.bundles)) return null;
+    const out: FactoryMcpBundleListItem[] = [];
+    for (const item of rec.bundles) {
+      const r = asRecord(item);
+      if (!r || typeof r.name !== "string" || r.name.trim().length === 0) return null;
+      const servers: FactoryMcpServerSummary[] = [];
+      if (Array.isArray(r.servers)) {
+        for (const s of r.servers) {
+          const sr = asRecord(s);
+          if (!sr || typeof sr.name !== "string") continue;
+          servers.push({
+            name: sr.name,
+            type: sr.type === "local" ? "local" : "remote",
+            target: typeof sr.target === "string" ? sr.target : "",
+          });
+        }
+      }
+      out.push({
+        name: r.name.trim(),
+        serverCount: typeof r.serverCount === "number" ? r.serverCount : servers.length,
+        servers,
+      });
+    }
+    return out;
+  } catch {
+    return null;
+  }
+}
+
+function parseMcpBundleJson(json: unknown): FactoryMcpBundle | null {
+  try {
+    const rec = asRecord(json);
+    if (!rec || typeof rec.name !== "string") return null;
+    const servers = asRecord(rec.servers);
+    if (!servers) return null;
+    return { name: rec.name.trim(), servers: servers as Record<string, unknown> };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * GET /factory/skills → catálogo de skills de factory/skills.
+ * Fallback [] con `ok:false` (offline → la UI muestra estado honesto).
+ * Nunca lanza.
+ */
+export async function getFactorySkills(
+  opts: FactoryClientOptions = {},
+): Promise<FactoryResult<FactorySkillEntry[]>> {
+  try {
+    const fallback: FactorySkillEntry[] = [];
+    const { port, fetchFn, timeoutMs } = await prepare(opts, FACTORY_AGENT_FILE_TIMEOUT_MS);
+    if (port === null || fetchFn === null) return unavailable(fallback);
+    const url = factoryUrl(port, "/factory/skills");
+    if (!url) return unavailable(fallback);
+    const label = "GET /factory/skills";
+    const raw = await requestRaw(url, {}, fetchFn, timeoutMs, label);
+    if (raw.transportError !== null || !isHttpOk(raw.status)) {
+      if (raw.transportError !== null) return transportFail(fallback, raw.transportError);
+      return httpFail(raw.status as number, fallback, raw.json, label);
+    }
+    const parsed = parseSkillListJson(raw.json);
+    if (!parsed) return badShape(raw.status as number, fallback, label);
+    return { ok: true, status: raw.status as number, data: parsed };
+  } catch (e) {
+    return {
+      ok: false,
+      status: null,
+      data: [],
+      error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+    };
+  }
+}
+
+/**
+ * GET /factory/mcps → bundles disponibles [{ name, serverCount, servers }].
+ * Fallback [] con `ok:false`. Nunca lanza.
+ */
+export async function listFactoryMcps(
+  opts: FactoryClientOptions = {},
+): Promise<FactoryResult<FactoryMcpBundleListItem[]>> {
+  try {
+    const fallback: FactoryMcpBundleListItem[] = [];
+    const { port, fetchFn, timeoutMs } = await prepare(opts, FACTORY_AGENT_FILE_TIMEOUT_MS);
+    if (port === null || fetchFn === null) return unavailable(fallback);
+    const url = factoryUrl(port, "/factory/mcps");
+    if (!url) return unavailable(fallback);
+    const label = "GET /factory/mcps";
+    const raw = await requestRaw(url, {}, fetchFn, timeoutMs, label);
+    if (raw.transportError !== null || !isHttpOk(raw.status)) {
+      if (raw.transportError !== null) return transportFail(fallback, raw.transportError);
+      return httpFail(raw.status as number, fallback, raw.json, label);
+    }
+    const parsed = parseMcpBundleListJson(raw.json);
+    if (!parsed) return badShape(raw.status as number, fallback, label);
+    return { ok: true, status: raw.status as number, data: parsed };
+  } catch (e) {
+    return {
+      ok: false,
+      status: null,
+      data: [],
+      error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+    };
+  }
+}
+
+/**
+ * GET /factory/mcps/:name → bundle completo ({ name, servers }).
+ * Fallback `{ name, servers: {} }` con `ok:false`. Nunca lanza.
+ */
+export async function getFactoryMcp(
+  name: string,
+  opts: FactoryClientOptions = {},
+): Promise<FactoryResult<FactoryMcpBundle>> {
+  try {
+    const fallback: FactoryMcpBundle = { name: typeof name === "string" ? name.trim() : "", servers: {} };
+    if (!isValidMcpBundleName(name)) return invalidId(fallback);
+    const { port, fetchFn, timeoutMs } = await prepare(opts, FACTORY_AGENT_FILE_TIMEOUT_MS);
+    if (port === null || fetchFn === null) return unavailable(fallback);
+    const url = factoryUrl(port, `/factory/mcps/${encodeURIComponent(name.trim())}`);
+    if (!url) return unavailable(fallback);
+    const label = "GET /factory/mcps/:name";
+    const raw = await requestRaw(url, {}, fetchFn, timeoutMs, label);
+    if (raw.transportError !== null || !isHttpOk(raw.status)) {
+      if (raw.transportError !== null) return transportFail(fallback, raw.transportError);
+      return httpFail(raw.status as number, fallback, raw.json, label);
+    }
+    const parsed = parseMcpBundleJson(raw.json);
+    if (!parsed) return badShape(raw.status as number, fallback, label);
+    return { ok: true, status: raw.status as number, data: parsed };
+  } catch (e) {
+    return {
+      ok: false,
+      status: null,
+      data: { name: typeof name === "string" ? name : "", servers: {} },
+      error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+    };
+  }
+}
+
+function prepareMcpServersPayload(
+  servers: Record<string, unknown>,
+): { payload: Record<string, unknown> } | { error: string } {
+  try {
+    if (!servers || typeof servers !== "object" || Array.isArray(servers) || Object.keys(servers).length === 0) {
+      return { error: "mcpServers debe ser un objeto con al menos un server" };
+    }
+    return { payload: { mcpServers: servers } };
+  } catch {
+    return { error: "mcpServers inválido" };
+  }
+}
+
+/**
+ * POST /factory/mcps `{ name, mcpServers }` → crea el bundle (409 duplicado).
+ * Fallback vacío con `ok:false`. Nunca lanza.
+ */
+export async function createFactoryMcp(
+  name: string,
+  servers: Record<string, unknown>,
+  opts: FactoryClientOptions = {},
+): Promise<FactoryResult<FactoryMcpBundle>> {
+  try {
+    const fallback: FactoryMcpBundle = { name: typeof name === "string" ? name.trim() : "", servers: {} };
+    if (!isValidMcpBundleName(name)) return invalidId(fallback);
+    const prepared = prepareMcpServersPayload(servers);
+    if ("error" in prepared) return { ok: false, status: null, data: fallback, error: prepared.error };
+    const { port, fetchFn, timeoutMs } = await prepare(opts, FACTORY_AGENT_FILE_TIMEOUT_MS);
+    if (port === null || fetchFn === null) return unavailable(fallback);
+    const url = factoryUrl(port, "/factory/mcps");
+    if (!url) return unavailable(fallback);
+    const label = "POST /factory/mcps";
+    const raw = await requestRaw(
+      url,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: name.trim(), ...prepared.payload }),
+      },
+      fetchFn,
+      timeoutMs,
+      label,
+    );
+    if (raw.transportError !== null || !isHttpOk(raw.status)) {
+      if (raw.transportError !== null) return transportFail(fallback, raw.transportError);
+      return httpFail(raw.status as number, fallback, raw.json, label);
+    }
+    const parsed = parseMcpBundleJson(raw.json);
+    if (!parsed) return badShape(raw.status as number, fallback, label);
+    return { ok: true, status: raw.status as number, data: parsed };
+  } catch (e) {
+    return {
+      ok: false,
+      status: null,
+      data: { name: typeof name === "string" ? name : "", servers: {} },
+      error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+    };
+  }
+}
+
+/**
+ * PUT /factory/mcps/:name `{ mcpServers }` → sobrescribe el bundle.
+ * Fallback vacío con `ok:false`. Nunca lanza.
+ */
+export async function saveFactoryMcp(
+  name: string,
+  servers: Record<string, unknown>,
+  opts: FactoryClientOptions = {},
+): Promise<FactoryResult<FactoryMcpBundle>> {
+  try {
+    const fallback: FactoryMcpBundle = { name: typeof name === "string" ? name.trim() : "", servers: {} };
+    if (!isValidMcpBundleName(name)) return invalidId(fallback);
+    const prepared = prepareMcpServersPayload(servers);
+    if ("error" in prepared) return { ok: false, status: null, data: fallback, error: prepared.error };
+    const { port, fetchFn, timeoutMs } = await prepare(opts, FACTORY_AGENT_FILE_TIMEOUT_MS);
+    if (port === null || fetchFn === null) return unavailable(fallback);
+    const url = factoryUrl(port, `/factory/mcps/${encodeURIComponent(name.trim())}`);
+    if (!url) return unavailable(fallback);
+    const label = "PUT /factory/mcps/:name";
+    const raw = await requestRaw(
+      url,
+      { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(prepared.payload) },
+      fetchFn,
+      timeoutMs,
+      label,
+    );
+    if (raw.transportError !== null || !isHttpOk(raw.status)) {
+      if (raw.transportError !== null) return transportFail(fallback, raw.transportError);
+      return httpFail(raw.status as number, fallback, raw.json, label);
+    }
+    const parsed = parseMcpBundleJson(raw.json);
+    if (!parsed) return badShape(raw.status as number, fallback, label);
+    return { ok: true, status: raw.status as number, data: parsed };
+  } catch (e) {
+    return {
+      ok: false,
+      status: null,
+      data: { name: typeof name === "string" ? name : "", servers: {} },
+      error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+    };
+  }
+}
+
+/**
+ * DELETE /factory/mcps/:name → elimina el bundle (409 si un agente lo usa).
+ * Fallback con `ok:false`. Nunca lanza.
+ */
+export async function deleteFactoryMcp(
+  name: string,
+  opts: FactoryClientOptions = {},
+): Promise<FactoryResult<{ deleted: string }>> {
+  try {
+    const fallback: { deleted: string } = { deleted: "" };
+    if (!isValidMcpBundleName(name)) return invalidId(fallback);
+    const { port, fetchFn, timeoutMs } = await prepare(opts, FACTORY_AGENT_FILE_TIMEOUT_MS);
+    if (port === null || fetchFn === null) return unavailable(fallback);
+    const url = factoryUrl(port, `/factory/mcps/${encodeURIComponent(name.trim())}`);
+    if (!url) return unavailable(fallback);
+    const label = "DELETE /factory/mcps/:name";
+    const raw = await requestRaw(url, { method: "DELETE" }, fetchFn, timeoutMs, label);
+    if (raw.transportError !== null || !isHttpOk(raw.status)) {
+      if (raw.transportError !== null) return transportFail(fallback, raw.transportError);
+      return httpFail(raw.status as number, fallback, raw.json, label);
+    }
+    const rec = asRecord(raw.json);
+    if (!rec || typeof rec.deleted !== "string") return badShape(raw.status as number, fallback, label);
+    return { ok: true, status: raw.status as number, data: { deleted: rec.deleted } };
+  } catch (e) {
+    return {
+      ok: false,
+      status: null,
+      data: { deleted: "" },
       error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
     };
   }
@@ -3152,6 +3530,128 @@ export async function postFactoryWorkflowSignal(
       return httpFail(raw.status as unknown as number, fallback, raw.json, label);
     }
     return { ok: true, status: raw.status, data: { ok: true } };
+  } catch (e) {
+    return {
+      ok: false,
+      status: null,
+      data: fallback,
+      error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+    };
+  }
+}
+
+// ── Dependencies (pr-agent CLI): estado machine-global + install explícito ──
+
+export interface FactoryDependencyTool {
+  name: string;
+  description: string;
+  installed: boolean;
+  version: string | null;
+  installable: boolean;
+  installCommand: string | null;
+  hint: string | null;
+}
+
+export interface FactoryDependenciesStatus {
+  tools: FactoryDependencyTool[];
+}
+
+function parseDependencyTool(value: unknown): FactoryDependencyTool | null {
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const r = value as Record<string, unknown>;
+    if (typeof r.name !== "string" || r.name.length === 0) return null;
+    const text = (v: unknown): string | null =>
+      typeof v === "string" && v.length > 0 ? v : null;
+    return {
+      name: r.name,
+      description: typeof r.description === "string" ? r.description : "",
+      installed: r.installed === true,
+      version: text(r.version),
+      installable: r.installable === true,
+      installCommand: text(r.installCommand),
+      hint: text(r.hint),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * GET /factory/dependencies/status. Fallback `{tools: []}`, nunca lanza.
+ */
+export async function getFactoryDependenciesStatus(
+  opts: FactoryClientOptions = {},
+): Promise<FactoryResult<FactoryDependenciesStatus>> {
+  const fallback: FactoryDependenciesStatus = { tools: [] };
+  try {
+    const { port, fetchFn, timeoutMs } = await prepare(opts, FACTORY_DEPENDENCIES_TIMEOUT_MS);
+    if (port === null || fetchFn === null) return unavailable(fallback);
+    const url = factoryUrl(port, "/factory/dependencies/status");
+    if (!url) return unavailable(fallback);
+    const label = "GET /factory/dependencies/status";
+    const raw = await requestRaw(url, {}, fetchFn, timeoutMs, label);
+    if (raw.transportError !== null || !isHttpOk(raw.status)) {
+      if (raw.transportError !== null) return transportFail(fallback, raw.transportError);
+      return httpFail(raw.status as number, fallback, raw.json, label);
+    }
+    const rec = asRecord(raw.json);
+    const list = rec && Array.isArray(rec.tools) ? rec.tools : [];
+    const tools: FactoryDependencyTool[] = [];
+    for (const item of list) {
+      const row = parseDependencyTool(item);
+      if (row) tools.push(row);
+    }
+    return { ok: true, status: raw.status as number, data: { tools } };
+  } catch (e) {
+    return {
+      ok: false,
+      status: null,
+      data: fallback,
+      error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+    };
+  }
+}
+
+export interface FactoryDependenciesInstall {
+  ok: boolean;
+  method?: string;
+  version?: string | null;
+  log?: string;
+  error?: string;
+}
+
+/**
+ * POST /factory/dependencies/pr-agent/install (install explícito a pedido
+ * humano; tarda hasta ~4 min). Fallback `{ok: false}`, nunca lanza.
+ */
+export async function postFactoryPrAgentInstall(
+  opts: FactoryClientOptions = {},
+): Promise<FactoryResult<FactoryDependenciesInstall>> {
+  const fallback: FactoryDependenciesInstall = { ok: false };
+  try {
+    const { port, fetchFn, timeoutMs } = await prepare(opts, FACTORY_DEPENDENCIES_INSTALL_TIMEOUT_MS);
+    if (port === null || fetchFn === null) return unavailable(fallback);
+    const url = factoryUrl(port, "/factory/dependencies/pr-agent/install");
+    if (!url) return unavailable(fallback);
+    const label = "POST /factory/dependencies/pr-agent/install";
+    const raw = await requestRaw(url, postJsonInit({}), fetchFn, timeoutMs, label);
+    if (raw.transportError !== null || !isHttpOk(raw.status)) {
+      if (raw.transportError !== null) return transportFail(fallback, raw.transportError);
+      return httpFail(raw.status as number, fallback, raw.json, label);
+    }
+    const rec = asRecord(raw.json) ?? {};
+    return {
+      ok: true,
+      status: raw.status as number,
+      data: {
+        ok: rec.ok === true,
+        method: typeof rec.method === "string" ? rec.method : undefined,
+        version: typeof rec.version === "string" ? rec.version : null,
+        log: typeof rec.log === "string" ? rec.log : undefined,
+        error: typeof rec.error === "string" ? rec.error : undefined,
+      },
+    };
   } catch (e) {
     return {
       ok: false,

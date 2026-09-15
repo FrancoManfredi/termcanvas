@@ -145,6 +145,17 @@ export function writeWorkItemJsonAtomic(item: WorkItem): void {  if (!item.dir) 
       // H-001 (aditivo): createdFiles top-level para igualdad exacta contra
       // disco (E2E-05). undefined se omite (jobs viejos, sin datos todavía).
       ...(item.createdFiles !== undefined ? { createdFiles: item.createdFiles } : {}),
+      // T01 (aditivo): isolation (branch/worktree/PR). undefined se omite;
+      // sin esto el panel pierde la jaula al reiniciar el daemon.
+      ...(item.isolation !== undefined ? { isolation: item.isolation } : {}),
+      // Engine (aditivo): gate humano + avance del run. undefined se omite;
+      // sin esto el gate/la línea de progreso se pierden al reiniciar.
+      ...((item as unknown as Record<string, unknown>).engineGate !== undefined
+        ? { engineGate: (item as unknown as Record<string, unknown>).engineGate }
+        : {}),
+      ...((item as unknown as Record<string, unknown>).engineRun !== undefined
+        ? { engineRun: (item as unknown as Record<string, unknown>).engineRun }
+        : {}),
       ...(Array.isArray(item.logs) ? { logsCount: item.logs.length } : {}),
     };
     fs.writeFileSync(tmp, JSON.stringify(payload, null, 2), "utf-8");
@@ -572,6 +583,191 @@ export function readWorkItemFromDir(jobDir: string): WorkItem | null {
       hookRuns = undefined;
     }
 
+    // Engine (aditivo, restore tolerante): gate humano + avance del run.
+    // Ausente/inválido → undefined (job viejo/legacy, nunca rompe).
+    let engineGate: WorkItem["engineGate"];
+    let engineRun: WorkItem["engineRun"];
+    try {
+      const rawGate = (parsed as Record<string, unknown>).engineGate;
+      if (rawGate && typeof rawGate === "object" && !Array.isArray(rawGate)) {
+        const g = rawGate as Record<string, unknown>;
+        if (
+          typeof g.nodeId === "string" && g.nodeId.trim() !== "" &&
+          typeof g.kind === "string" && g.kind.trim() !== "" &&
+          typeof g.message === "string" &&
+          typeof g.runId === "string" && g.runId !== ""
+        ) {
+          engineGate = {
+            nodeId: g.nodeId.trim().slice(0, 64),
+            kind: g.kind === "ask-human" ? "ask-human" : "spec-approval",
+            message: g.message.slice(0, 2000),
+            runId: g.runId.slice(0, 128),
+            ...(typeof g.attempt === "number" && Number.isInteger(g.attempt)
+              ? { attempt: g.attempt }
+              : {}),
+          };
+        }
+      }
+      const rawRun = (parsed as Record<string, unknown>).engineRun;
+      if (rawRun && typeof rawRun === "object" && !Array.isArray(rawRun)) {
+        const r = rawRun as Record<string, unknown>;
+        const status = r.status;
+        if (
+          typeof r.runId === "string" && r.runId !== "" &&
+          typeof r.workflow === "string" && r.workflow !== "" &&
+          (status === "pending" || status === "running" || status === "completed" ||
+            status === "failed" || status === "cancelled")
+        ) {
+          let nodeSessions: Record<string, string> | undefined;
+          try {
+            const rawNs = r.nodeSessions;
+            if (rawNs && typeof rawNs === "object" && !Array.isArray(rawNs)) {
+              const out: Record<string, string> = {};
+              for (const [key, value] of Object.entries(
+                rawNs as Record<string, unknown>,
+              )) {
+                if (
+                  typeof key === "string" && key.trim() !== "" && key.length <= 64 &&
+                  typeof value === "string" && value.trim() !== "" && value.length <= 128
+                ) {
+                  out[key.trim()] = value.trim();
+                }
+                if (Object.keys(out).length >= 50) break;
+              }
+              if (Object.keys(out).length > 0) nodeSessions = out;
+            }
+          } catch {
+            nodeSessions = undefined;
+          }
+          let nodeSessionRounds:
+            | Array<{ nodeId: string; iteration: number; sessionId: string }>
+            | undefined;
+          try {
+            const rawRounds = r.nodeSessionRounds;
+            if (Array.isArray(rawRounds)) {
+              const out: Array<{
+                nodeId: string;
+                iteration: number;
+                sessionId: string;
+              }> = [];
+              for (const entry of rawRounds) {
+                try {
+                  if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+                    continue;
+                  }
+                  const rec = entry as Record<string, unknown>;
+                  const nodeId =
+                    typeof rec.nodeId === "string" ? rec.nodeId.trim() : "";
+                  const iteration =
+                    typeof rec.iteration === "number" ? rec.iteration : NaN;
+                  const sid =
+                    typeof rec.sessionId === "string" ? rec.sessionId.trim() : "";
+                  if (
+                    nodeId === "" || nodeId.length > 64 ||
+                    !Number.isInteger(iteration) || iteration < 1 || iteration > 100 ||
+                    sid === "" || sid.length > 128
+                  ) {
+                    continue;
+                  }
+                  out.push({ nodeId, iteration, sessionId: sid });
+                } catch {
+                  // una ronda rota nunca aborta a las demás
+                }
+                if (out.length >= 50) break;
+              }
+              if (out.length > 0) nodeSessionRounds = out;
+            }
+          } catch {
+            nodeSessionRounds = undefined;
+          }
+          engineRun = {
+            runId: r.runId.slice(0, 128),
+            workflow: r.workflow.slice(0, 128),
+            status,
+            ...(typeof r.currentNodeId === "string" && r.currentNodeId !== ""
+              ? { currentNodeId: r.currentNodeId.slice(0, 64) }
+              : {}),
+            ...(Array.isArray(r.completedNodes)
+              ? {
+                  completedNodes: r.completedNodes
+                    .filter((n): n is string => typeof n === "string" && n !== "")
+                    .slice(0, 50),
+                }
+              : {}),
+            ...(Array.isArray(r.nodes)
+              ? {
+                  nodes: r.nodes
+                    .filter((n): n is string => typeof n === "string" && n !== "")
+                    .slice(0, 50),
+                }
+              : {}),
+            ...(nodeSessions !== undefined ? { nodeSessions } : {}),
+            ...(nodeSessionRounds !== undefined ? { nodeSessionRounds } : {}),
+            ...(typeof r.startedAt === "string" && r.startedAt !== ""
+              ? { startedAt: r.startedAt.slice(0, 64) }
+              : {}),
+          };
+        }
+      }
+    } catch {
+      engineGate = undefined;
+      engineRun = undefined;
+    }
+
+    // T01 isolation (restore tolerante): el writer lo guarda en job.json y la
+    // meta durable vive en el timeline. Sin esto, tras cada reinicio del
+    // daemon el summary pierde branch/worktree/PR aunque el worktree exista
+    // en disco (el panel dejaba de mostrar la jaula y su Delete).
+    let isolation: WorkItem["isolation"];
+    try {
+      const cleanIsolation = (raw: unknown): WorkItem["isolation"] | undefined => {
+        if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+        const r = raw as Record<string, unknown>;
+        const state = r.state;
+        if (
+          typeof r.branch !== "string" || r.branch === "" ||
+          typeof r.baseBranch !== "string" || r.baseBranch === "" ||
+          typeof r.worktreePath !== "string" || r.worktreePath === "" ||
+          typeof r.repoRoot !== "string" || r.repoRoot === "" ||
+          (state !== "created" && state !== "ready" && state !== "pr-open" &&
+            state !== "pr-merged" && state !== "cleaned") ||
+          typeof r.createdAt !== "string" || r.createdAt === ""
+        ) {
+          return undefined;
+        }
+        const prNumber = r.prNumber;
+        const hasPrNumber =
+          typeof prNumber === "number" && Number.isInteger(prNumber) && prNumber > 0;
+        return {
+          branch: r.branch.slice(0, 128),
+          baseBranch: r.baseBranch.slice(0, 128),
+          worktreePath: r.worktreePath.slice(0, 2048),
+          repoRoot: r.repoRoot.slice(0, 2048),
+          state,
+          createdAt: r.createdAt.slice(0, 64),
+          ...(hasPrNumber ? { prNumber } : {}),
+          ...(hasPrNumber && typeof r.prUrl === "string" && r.prUrl !== ""
+            ? { prUrl: r.prUrl.slice(0, 500) }
+            : {}),
+        };
+      };
+      isolation = cleanIsolation((parsed as Record<string, unknown>).isolation);
+      if (isolation === undefined) {
+        for (let i = timeline.length - 1; i >= 0 && isolation === undefined; i -= 1) {
+          try {
+            const meta = (timeline[i] as unknown as { meta?: unknown } | null)?.meta;
+            if (meta && typeof meta === "object" && !Array.isArray(meta)) {
+              isolation = cleanIsolation((meta as Record<string, unknown>).isolation);
+            }
+          } catch {
+            // una entrada rota no aborta el scan
+          }
+        }
+      }
+    } catch {
+      isolation = undefined;
+    }
+
     let logs: string[] = [];
     try {
       const logsPath = path.join(jobDir, "logs.ndjson");
@@ -631,6 +827,12 @@ export function readWorkItemFromDir(jobDir: string): WorkItem | null {
       ...(agentSessions !== undefined ? { agentSessions } : {}),
       // Hooks declarativos: última corrida por hook (validada, cap 20).
       ...(hookRuns !== undefined ? { hookRuns } : {}),
+      // Engine: gate + avance del run oficial (validados, restore tolerante).
+      ...(engineGate !== undefined ? { engineGate } : {}),
+      ...(engineRun !== undefined ? { engineRun } : {}),
+      // T01: isolation (job.json o fallback timeline) — la jaula sobrevive
+      // al reinicio del daemon.
+      ...(isolation !== undefined ? { isolation } : {}),
       dir: jobDir,
       dotDonePath,
       runnerId,

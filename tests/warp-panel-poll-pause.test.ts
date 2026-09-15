@@ -30,6 +30,12 @@ import {
 
 test("factory poll pauses in Agents, stays live elsewhere", () => {
   assert.equal(shouldEnableFactoryPoll("agents"), false);
+  // Workflows canvas is mock-only (read-only view): pausing keeps pan/zoom
+  // free of the 2.5s setWorkItems storm until the engine wiring lands.
+  assert.equal(shouldEnableFactoryPoll("workflows"), false);
+  // Dependencies is config-only (status on mount + manual Re-check + rare
+  // explicit install): pausing keeps the install transcript stable.
+  assert.equal(shouldEnableFactoryPoll("dependencies"), false);
   assert.equal(shouldEnableFactoryPoll("issues"), true);
   assert.equal(shouldEnableFactoryPoll("activity"), true);
   assert.equal(shouldEnableFactoryPoll("context"), true);

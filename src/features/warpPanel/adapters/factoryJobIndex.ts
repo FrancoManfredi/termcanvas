@@ -24,6 +24,7 @@
 import {
   isFactoryJobActive,
   isFactoryJobCompleted,
+  isFactoryJobRerunnable,
   readFactoryJobIssueRef,
 } from "./factoryIssueJobs";
 
@@ -173,6 +174,47 @@ export function findCompletedFactoryJobForIssueIndexed(
         if (ref === null || ref.issueNumber !== issueNumber) continue;
         if (!reposAgree(ref.repo, want)) continue;
         if (!isFactoryJobCompleted(job)) continue;
+        return job;
+      } catch {
+        // a broken entry never aborts the scan
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Indexed twin of the H0c lookup: finds the job linked to one issue that
+ * AMERITA Re-run (`isFactoryJobRerunnable`: run failed/cancelled, or job
+ * Cancelled with a live run) even though `isFactoryJobActive` excludes it.
+ * Same match semantics as the active/completed finders (issueRef number,
+ * repo agreement, first match in list order). Null when none — never throws.
+ */
+export function findRerunnableFactoryJobForIssueIndexed(
+  index: Map<number, unknown[]> | null | undefined,
+  issueNumber: number,
+  repo?: string | null,
+): unknown | null {
+  try {
+    if (!(index instanceof Map)) return null;
+    if (
+      typeof issueNumber !== "number" ||
+      !Number.isInteger(issueNumber) ||
+      issueNumber <= 0
+    ) {
+      return null;
+    }
+    const bucket = index.get(issueNumber);
+    if (!bucket) return null;
+    const want = cleanRepo(repo);
+    for (const job of bucket) {
+      try {
+        const ref = readFactoryJobIssueRef(job);
+        if (ref === null || ref.issueNumber !== issueNumber) continue;
+        if (!reposAgree(ref.repo, want)) continue;
+        if (!isFactoryJobRerunnable(job)) continue;
         return job;
       } catch {
         // a broken entry never aborts the scan

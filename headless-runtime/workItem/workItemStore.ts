@@ -599,13 +599,10 @@ export class WorkItemStore {
    */
   restoreFromDisk(): number {
     const count = scanAndRestoreBases(this.items);
-    if (count > 0) console.log(`[WorkItemStore] restaurados ${count} workItems desde disco`);
-    else console.log(`[WorkItemStore] no hay workItems previos en disco para restaurar`);
     // Retención C1: el restore puede traer cientos de terminales viejos —
     // se poda el excedente en el acto (disco intacto, `get()` rehidrata).
     try {
       const evicted = this.pruneTerminalFromMemory();
-      if (evicted > 0) console.log(`[WorkItemStore] retención: ${evicted} terminales fuera de memoria`);
     } catch {
       // noop
     }
@@ -914,6 +911,96 @@ export class WorkItemStore {
       const next: WorkItem = {
         ...current,
         agentSessions: sessions as WorkItem["agentSessions"],
+        updatedAt: new Date().toISOString(),
+      };
+      this.items.set(jobId, next);
+      try {
+        writeWorkItemJsonAtomic(next);
+      } catch {
+        // best-effort: disco nunca rompe el flujo
+      }
+    } catch {
+      // nunca lanza
+    }
+  }
+
+  /**
+   * Sesión "viva" del job (`sessionId`/`dashboardUrl`/`directory`) — espejo
+   * del `syncSessionFieldsAndPersist` del cascarón para que el engineBridge
+   * attachee las sesiones de sus nodos con el mismo contrato de UI. Job
+   * inexistente → no-op. Persiste best-effort, nunca lanza.
+   */
+  setSessionFields(
+    jobId: string,
+    fields: { sessionId?: string; dashboardUrl?: string; directory?: string },
+  ): void {
+    try {
+      if (typeof jobId !== "string" || jobId.length === 0) return;
+      const current = this.items.get(jobId);
+      if (!current) return;
+      const next: WorkItem = { ...current };
+      if (typeof fields.sessionId === "string" && fields.sessionId.length > 0) {
+        next.sessionId = fields.sessionId;
+      }
+      if (
+        typeof fields.dashboardUrl === "string" &&
+        fields.dashboardUrl.length > 0
+      ) {
+        next.dashboardUrl = fields.dashboardUrl;
+      }
+      if (typeof fields.directory === "string" && fields.directory.length > 0) {
+        next.directory = fields.directory;
+      }
+      next.updatedAt = new Date().toISOString();
+      this.items.set(jobId, next);
+      try {
+        writeWorkItemJsonAtomic(next);
+      } catch {
+        // best-effort: disco nunca rompe el flujo
+      }
+    } catch {
+      // nunca lanza
+    }
+  }
+
+  /**
+   * Engine (aditivo): gate humano pendiente del run oficial. `null` limpia
+   * (gate respondido / run terminal). Job inexistente → no-op. Persiste
+   * job.json best-effort, nunca lanza.
+   */
+  setEngineGate(jobId: string, gate: WorkItem["engineGate"]): void {
+    try {
+      if (typeof jobId !== "string" || jobId.length === 0) return;
+      const current = this.items.get(jobId);
+      if (!current) return;
+      const next: WorkItem = {
+        ...current,
+        engineGate: gate ?? null,
+        updatedAt: new Date().toISOString(),
+      };
+      this.items.set(jobId, next);
+      try {
+        writeWorkItemJsonAtomic(next);
+      } catch {
+        // best-effort: disco nunca rompe el flujo
+      }
+    } catch {
+      // nunca lanza
+    }
+  }
+
+  /**
+   * Engine (aditivo): avance del run oficial (nodo actual + completados).
+   * `null` limpia (sin run). Job inexistente → no-op. Persiste best-effort.
+   */
+  setEngineRun(jobId: string, run: WorkItem["engineRun"]): void {
+    try {
+      if (typeof jobId !== "string" || jobId.length === 0) return;
+      const current = this.items.get(jobId);
+      if (!current) return;
+      const next: WorkItem = {
+        ...current,
+        engineRun: run ?? null,
         updatedAt: new Date().toISOString(),
       };
       this.items.set(jobId, next);

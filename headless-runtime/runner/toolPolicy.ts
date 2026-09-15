@@ -40,7 +40,11 @@ export const IMPLEMENT_TOOLS = {
   bash: true,
   glob: true,
   grep: true,
+  list: true,
   webfetch: true,
+  websearch: true,
+  todowrite: true,
+  lsp: true,
 } as const;
 
 /**
@@ -74,6 +78,14 @@ export type Toolset = Record<string, boolean>;
  * Fuente única de estos literales (los roles fijos usan los sets de
  * arriba; los hooks custom usan `toolsetFromList`). Orden canónico
  * preservado para mensajes estables.
+ *
+ * Notas (engine v2):
+ * - `write` es legacy: opencode fusiona write/edit/apply_patch en el
+ *   permiso `edit`. Se sigue aceptando (fold a edit) para no romper
+ *   agentes existentes, pero la UI ya no lo ofrece.
+ * - `task` no está: los agentes factory nunca delegan (compone el
+ *   orquestador); `skill` se otorga automáticamente con la allowlist de
+ *   skills; `question` no tiene quién responda en un job automático.
  */
 export const AGENT_TOOL_KEYS: readonly string[] = [
   "read",
@@ -82,7 +94,11 @@ export const AGENT_TOOL_KEYS: readonly string[] = [
   "bash",
   "glob",
   "grep",
+  "list",
   "webfetch",
+  "websearch",
+  "todowrite",
+  "lsp",
 ];
 
 /**

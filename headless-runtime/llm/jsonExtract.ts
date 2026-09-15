@@ -7,8 +7,14 @@
  * narrado + eco de tool-call + JSON). Estrategia: escanear TODOS los
  * candidatos con llaves balanceadas (una pasada, sin `for`/`while` por
  * regla LOOPS, respetando strings/escapes con stack de inicios) y preferir
- * el que parsea Y trae alguna de las `preferKeys` (ej. `verdict`,
- * `decision`); fallback al primer objeto que parsee. Puro, nunca lanza.
+ * el objeto que trae alguna de las `preferKeys` por PRESENCIA de clave
+ * (`green` booleano y `findings` array matchean, no solo strings). Entre
+ * varios candidatos gana el top-level más externo y último: en un JSON
+ * anidado el objeto interno cierra primero, y esa era la bomba (el review
+ * `{"green":true,"findings":[...,"reverify":{...}]}` devolvía el
+ * `reverify` y la validación pedía `green`). Sin match: último top-level
+ * parseable (la respuesta va al final); sin ningún top-level, el primer
+ * parseable (compat). Puro, nunca lanza.
  */
 
 /**
@@ -22,7 +28,7 @@ export function extractBalancedJSONObject(
   try {
     if (!mixed || typeof mixed !== "string") return null;
     const s = mixed as string;
-    const candidates: string[] = [];
+    const spans: Array<{ start: number; end: number }> = [];
     const starts: number[] = [];
     let inStr: string | null = null;
     let esc = false;
@@ -44,31 +50,50 @@ export function extractBalancedJSONObject(
       if (c === "}") {
         if (starts.length === 0) return;
         const from = starts.pop() as number;
-        candidates.push(s.substring(from, idx + 1));
+        spans.push({ start: from, end: idx + 1 });
       }
     });
+    interface ParsedCandidate {
+      start: number;
+      end: number;
+      text: string;
+      record: Record<string, unknown>;
+    }
+    const parsed: ParsedCandidate[] = spans
+      .map((span): ParsedCandidate | null => {
+        const text = s.substring(span.start, span.end);
+        try {
+          const value = JSON.parse(text) as unknown;
+          if (value === null || typeof value !== "object" || Array.isArray(value)) {
+            return null;
+          }
+          return { ...span, text, record: value as Record<string, unknown> };
+        } catch {
+          return null;
+        }
+      })
+      .filter((cand): cand is ParsedCandidate => cand !== null)
+      .sort((a, b) => a.start - b.start);
+    if (parsed.length === 0) return null;
+    const isTopLevel = (cand: ParsedCandidate): boolean =>
+      !parsed.some(
+        (other) =>
+          other !== cand && other.start <= cand.start && cand.end <= other.end,
+      );
     const wants: readonly string[] = Array.isArray(preferKeys) ? preferKeys : [];
-    let firstParseable: string | null = null;
-    let preferred: string | null = null;
-    candidates.forEach((cand) => {
-      if (preferred !== null) return;
-      try {
-        const p = JSON.parse(cand) as unknown;
-        if (p === null || typeof p !== "object" || Array.isArray(p)) return;
-        if (firstParseable === null) firstParseable = cand;
-        if (wants.length === 0) {
-          preferred = cand;
-          return;
-        }
-        const rec = p as Record<string, unknown>;
-        if (wants.some((k) => typeof rec[k] === "string")) {
-          preferred = cand;
-        }
-      } catch {
-        // no parsea: sigue al siguiente candidato
+    if (wants.length > 0) {
+      const matches = parsed.filter((cand) =>
+        wants.some((key) => typeof key === "string" && key in cand.record),
+      );
+      if (matches.length > 0) {
+        const topMatches = matches.filter(isTopLevel);
+        const pool = topMatches.length > 0 ? topMatches : matches;
+        return pool[pool.length - 1].text;
       }
-    });
-    return preferred ?? firstParseable;
+    }
+    const top = parsed.filter(isTopLevel);
+    if (top.length > 0) return top[top.length - 1].text;
+    return parsed[0].text;
   } catch {
     return null;
   }

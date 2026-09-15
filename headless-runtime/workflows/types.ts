@@ -60,6 +60,12 @@ export interface WorkflowRun {
   finishedAt?: string;
   inputs: Record<string, unknown>;
   args: string;
+  /**
+   * cwd efectivo del run (jail de aislamiento o anchor). Se persiste para
+   * que `resume` restaure el directorio original en vez de caer al cwd del
+   * daemon que resumió (bug run #125: implementer arrancó en termcanvas).
+   */
+  cwd?: string;
   nodes: Record<string, NodeState>;
   error?: string;
   result?: RunResult;
@@ -88,6 +94,11 @@ export interface WorkflowRun {
 export type WorkflowEventType =
   | "run_started"
   | "node_started"
+  /**
+   * La sesión del nodo ya existe (creada o reutilizada) y el mensaje está
+   * por enviarse: Agent Sessions la habilita acá, no al completar la fase.
+   */
+  | "node_session_attached"
   | "node_completed"
   | "node_failed"
   | "node_skipped"

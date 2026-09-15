@@ -46,11 +46,27 @@ test("read deniega solo secretos (lockfiles/dist legibles para contexto)", () =>
   assert.ok(!(PROTECTED_READ_PATHS as readonly string[]).includes("pnpm-lock.yaml"), "lockfiles legibles");
 });
 
-test("bash deniega cuelgues, no builds normales", () => {
+test("bash deniega cuelgues y git destructivo, no builds ni git read-only", () => {
   for (const p of ["*--watch*", "*tail -f*", "npm run dev*", "pnpm dev*"]) {
     assert.ok((FORBIDDEN_SHELL_PATTERNS as readonly string[]).includes(p), `bash deniega ${p}`);
   }
-  for (const cmd of ["pnpm test", "pnpm build", "git status --porcelain", "npx tsc --noEmit"]) {
+  for (const p of [
+    "*git restore*",
+    "*git checkout --*",
+    "*git reset --hard*",
+    "*git clean*",
+    "*git push*",
+  ]) {
+    assert.ok((FORBIDDEN_SHELL_PATTERNS as readonly string[]).includes(p), `bash deniega ${p}`);
+  }
+  for (const cmd of [
+    "pnpm test",
+    "pnpm build",
+    "git status --porcelain",
+    "git diff --stat",
+    "git diff -- js/store.js",
+    "npx tsc --noEmit",
+  ]) {
     const hit = (FORBIDDEN_SHELL_PATTERNS as readonly string[]).some((pat) => {
       const re = new RegExp(`^${pat.replace(/\*/g, ".*")}$`);
       return re.test(cmd);

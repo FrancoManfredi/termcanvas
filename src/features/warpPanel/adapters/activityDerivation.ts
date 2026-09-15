@@ -81,7 +81,8 @@ import {
  *   cannot advance the same issue at once — the human gate unblocks
  *   first). The F-A signal comes from `readFactoryJobHumanNeed` on the
  *   SAME matched poll-list job (never a second match), and it never fires
- *   without a live linked job (`factoryActive` must hold).
+ *   without a linked job: `factoryLinked` (active OR rerunnable/dead-run,
+ *   H0c) or `factoryActive` must hold.
  * - Legacy nodes without state fall through (never inferred closed): only an
  *   exact `"CLOSED"` maps to done.
  */
@@ -125,6 +126,7 @@ const VALID_AWAITING: readonly AwaitingAction[] = [
   "triage-respond",
   "ask-human",
   "resume",
+  "rerun",
 ];
 
 const VALID_FACTORY_AWAITING: readonly FactoryAwaitingKind[] = [
@@ -132,6 +134,7 @@ const VALID_FACTORY_AWAITING: readonly FactoryAwaitingKind[] = [
   "triage-respond",
   "ask-human",
   "resume",
+  "rerun",
 ];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -250,12 +253,17 @@ function effectiveInputsForIssue(
  * cannot verify — an honest generic row beats a precise-looking lie.
  *
  * `factoryAwaiting` carries the human-gate kind for that SAME job (from
- * `readFactoryJobHumanNeed` — spec-approval / triage-respond / ask-human).
- * A waiting job is not progressing, so it maps 1:1 onto the same-named
- * `awaitingAction` ahead of the generic I3 row (rows F-A1–F-A4). Junk
- * values fall back to no gate (never invented); the gate additionally
- * requires `factoryActive`, so it can never fire without a live linked
- * job.
+ * `readFactoryJobHumanNeed` — spec-approval / triage-respond / ask-human /
+ * rerun). A waiting or dead job is not progressing, so it maps 1:1 onto
+ * the same-named `awaitingAction` ahead of the generic I3 row (rows F-A).
+ * Junk values fall back to no gate (never invented); the gate additionally
+ * requires `factoryLinked` (a linked job: active OR rerunnable H0c) or
+ * `factoryActive`, so it can never fire without a linked job.
+ *
+ * `factoryLinked` marks a job linked to the issue that is NOT active but
+ * still needs the human — the H0c dead-run Re-run case (`engineRun`
+ * failed/cancelled). It only relaxes the F-A gate; I3 keeps using
+ * `factoryActive` so a dead run never claims in-progress.
  *
  * `factoryCompleted` marks a TERMINAL `Complete` factory job linked to the
  * issue (matched by `issueRef` in the existing `useWorkItemStore` poll
@@ -282,6 +290,8 @@ export function deriveActivityStatus(
   factoryAwaiting?: FactoryAwaitingKind | string | null,
   factoryCompleted?: boolean | null,
   optimisticReady?: boolean | null,
+  factoryLinked?: boolean | null,
+  factoryPrMerged?: boolean | null,
 ): DerivedActivity {
   const result = deriveActivityStatusInner(
     issueNumber,
@@ -292,12 +302,15 @@ export function deriveActivityStatus(
     factoryAwaiting,
     factoryCompleted,
     optimisticReady,
+    factoryLinked,
+    factoryPrMerged,
   );
   try {
     activityLog("deriveActivityStatus", {
       issueNumber,
       issueState: issueState ?? null,
       factoryActive: factoryActive ?? null,
+      factoryLinked: factoryLinked ?? null,
       factoryAwaiting: factoryAwaiting ?? null,
       factoryCompleted: factoryCompleted ?? null,
       optimisticReady: optimisticReady ?? null,
@@ -322,6 +335,8 @@ function deriveActivityStatusInner(
   factoryAwaiting?: FactoryAwaitingKind | string | null,
   factoryCompleted?: boolean | null,
   optimisticReady?: boolean | null,
+  factoryLinked?: boolean | null,
+  factoryPrMerged?: boolean | null,
 ): DerivedActivity {
   const snap = safeSnapshot(review);
   const inputs = effectiveInputsForIssue(issueNumber, snap);
@@ -330,9 +345,12 @@ function deriveActivityStatusInner(
     : [];
 
   // D — done is NEVER invented: real merge evidence or a CLOSED node only.
+  // `factoryPrMerged` es evidencia real: el daemon lo confirmó con
+  // `gh pr view` (close-out externo, isolation.state="pr-merged").
   if (
     inputs.prState === "MERGED" ||
     (inputs.prNumber !== null && mergedNumbers.includes(inputs.prNumber)) ||
+    factoryPrMerged === true ||
     issueState === "CLOSED"
   ) {
     return { status: "done" };
@@ -368,12 +386,14 @@ function deriveActivityStatusInner(
   }
 
   // F-A — the linked factory job waits for the human (spec approval,
-  // triage answers, or an ask_human review decision / pending ask_human
-  // notification — see `readFactoryJobHumanNeed`). A waiting job is not
-  // progressing: YOUR TURN wins over the generic I3 row below. The gate
-  // needs a live linked job; junk kinds fall through to I3.
+  // triage answers, an ask_human review decision / pending ask_human
+  // notification, or a dead-run Re-run — see `readFactoryJobHumanNeed`).
+  // A waiting job is not progressing: YOUR TURN wins over the generic I3
+  // row below. The gate needs a linked job: ACTIVE (factoryActive) OR
+  // linked-but-dead (factoryLinked, H0c rerun — a failed `engineRun` is not
+  // active, but still needs the human). Junk kinds fall through to I3.
   const awaitingGate: FactoryAwaitingKind | null =
-    factoryActive === true &&
+    (factoryLinked === true || factoryActive === true) &&
     typeof factoryAwaiting === "string" &&
     (VALID_FACTORY_AWAITING as readonly string[]).includes(factoryAwaiting)
       ? (factoryAwaiting as FactoryAwaitingKind)

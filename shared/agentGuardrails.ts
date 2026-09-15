@@ -58,11 +58,18 @@ export const PROTECTED_READ_PATHS: readonly string[] = [
 ];
 
 /**
- * Comandos shell denegados: patrones que cuelgan la tool `bash` esperando
- * stdin o un pipe que nunca cierra (dev servers, watchers, `tail -f`).
- * El watchdog del turno (180s idle) los mataría igual, pero tarde y con
- * tokens quemados: el deny los frena ANTES de ejecutar, sin humano.
- * `pnpm test` / `pnpm build` normales no matchean ninguno.
+ * Comandos shell denegados:
+ * - Patrones que cuelgan la tool `bash` esperando stdin o un pipe que nunca
+ *   cierra (dev servers, watchers, `tail -f`). El watchdog del turno (180s
+ *   idle) los mataría igual, pero tarde y con tokens quemados: el deny los
+ *   frena ANTES de ejecutar, sin humano. `pnpm test` / `pnpm build` normales
+ *   no matchean ninguno.
+ * - Git destructivo (defensa en profundidad, WS4): el agente IMPLEMENT vive
+ *   en un worktree aislado y jamás debe tocar el checkout base ni reescribir
+ *   historia. Es best-effort por patrón de comando (no path-aware): el fix
+ *   real es que la evidencia la capture el sistema y que los pedidos
+ *   `reverify` del review los ejecute el engine contra su allowlist
+ *   read-only, nunca el agente.
  */
 export const FORBIDDEN_SHELL_PATTERNS: readonly string[] = [
   "*--watch*",
@@ -71,6 +78,15 @@ export const FORBIDDEN_SHELL_PATTERNS: readonly string[] = [
   "pnpm dev*",
   "pnpm run dev*",
   "yarn dev*",
+  // Git destructivo: restaurar/resetear/limpiar/pushear el repo.
+  "*git restore*",
+  "*git checkout --*",
+  "*git reset --hard*",
+  "*git reset --keep*",
+  "*git clean*",
+  "*git push*",
+  "*git branch -D*",
+  "*git branch --delete --force*",
 ];
 
 function denyMap(patterns: readonly string[]): Record<string, string> {

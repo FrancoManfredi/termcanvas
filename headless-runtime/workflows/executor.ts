@@ -33,11 +33,13 @@ import {
 } from "./nodes/deterministic";
 import { createOpencodeAiRunner, type AiNodeRunner } from "./nodes/ai";
 import { runShellCommand } from "./nodes/shell";
+import { runAllowlistedReverify } from "./reverify";
 import { loadWorkflow } from "./loader";
 import { expandIncludes } from "./expand";
 import { prepareWorkflowWorktree } from "./isolation";
 import { extractBalancedJSONObject, stripJsonFences } from "../llm/jsonExtract";
-import { validateAgainstSchema } from "./jsonSchema";
+import { validateAgainstSchema, type JsonSchemaLike } from "./jsonSchema";
+import { resolveAgentModel } from "../factory/opencodeAgentSync";
 
 export interface LoadedWorkflow {
   def: WorkflowDefinition;
@@ -147,22 +149,59 @@ function readCommandFile(loaded: LoadedWorkflow, name: string): string {
 }
 
 /**
+ * Keys `required` del schema del nodo: le dicen al extractor balanceado qué
+ * objeto es "la respuesta" (por presencia de clave). Sin esto, un nodo con
+ * findings anidados devolvía el objeto interno más chico (bug run review:
+ * `reverify` elegido sobre `{green, findings}`).
+ */
+function preferKeysFromSchema(schema: JsonSchemaLike | undefined): string[] {
+  try {
+    const required = schema?.required;
+    if (!Array.isArray(required)) return [];
+    return required.filter(
+      (key): key is string => typeof key === "string" && key.length > 0,
+    );
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Parseo tolerante de la salida IA cuando el nodo declara output_format:
- * JSON directo → sin fences → objeto balanceado embebido en prosa.
+ * JSON directo → fences markdown (el ÚLTIMO parseable: el modelo cita
+ * código antes de la respuesta) → fences sueltos → objeto balanceado
+ * embebido en prosa, prefiriendo las keys del schema.
  * Devuelve undefined si no hay JSON utilizable.
  */
-function parseStructuredOutput(raw: string): unknown {
-  const candidates = [raw, stripJsonFences(raw)];
-  for (const candidate of candidates) {
-    if (!candidate) continue;
+function parseStructuredOutput(raw: string, schema?: JsonSchemaLike): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    // sigue con fences / extractor
+  }
+  const fences = [...raw.matchAll(/```(?:json)?\s*([\s\S]*?)\s*```/gi)];
+  for (let index = fences.length - 1; index >= 0; index -= 1) {
+    const block = (fences[index][1] ?? "").trim();
+    if (block.length === 0) continue;
     try {
-      return JSON.parse(candidate);
+      return JSON.parse(block);
+    } catch {
+      // fence sin JSON (código citado): siguiente
+    }
+  }
+  const stripped = stripJsonFences(raw);
+  if (stripped.length > 0 && stripped !== raw.trim()) {
+    try {
+      return JSON.parse(stripped);
     } catch {
       // sigue con el extractor balanceado
     }
   }
-  for (const candidate of [raw, stripJsonFences(raw)]) {
-    const extracted = extractBalancedJSONObject(candidate);
+  for (const candidate of [raw, stripped]) {
+    const extracted = extractBalancedJSONObject(
+      candidate,
+      preferKeysFromSchema(schema),
+    );
     if (extracted === null) continue;
     try {
       return JSON.parse(extracted);
@@ -171,6 +210,70 @@ function parseStructuredOutput(raw: string): unknown {
     }
   }
   return undefined;
+}
+
+/**
+ * Ronda previa de un `loop_group` para `$LOOP_HISTORY` y el bloque
+ * auto-inyectado (WS1): nada mecánico, solo lo completado de esa ronda.
+ */
+interface LoopHistoryEntry {
+  iteration: number;
+  nodes: Record<string, { output: string; outputJson?: unknown }>;
+}
+
+const LOOP_HISTORY_MAX_ITERATIONS = 5;
+const LOOP_HISTORY_MAX_CHARS_PER_NODE = 2_000;
+const LOOP_HISTORY_MAX_TOTAL_CHARS = 12_000;
+
+function trimHistoryText(text: string, max: number): string {
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}\n…[truncado]`;
+}
+
+/**
+ * Bloque de historial para el prompt de un nodo IA dentro de un loop_group.
+ * Presupuesto total acotado, rondas más recientes primero (las viejas se
+ * descartan antes que las nuevas). Sin historial → "" (prompt intacto).
+ */
+function renderLoopHistoryBlock(history: LoopHistoryEntry[]): string {
+  if (!Array.isArray(history) || history.length === 0) return "";
+  const header =
+    "--- HISTORIAL DE RONDAS PREVIAS (no repitas trabajo ya hecho ni revirtás fixes de rondas previas; si un hallazgo previo ya no aplica, justificá por qué) ---";
+  const footer = "--- FIN DEL HISTORIAL ---";
+  const budget =
+    LOOP_HISTORY_MAX_TOTAL_CHARS - header.length - footer.length - 2;
+  const chunks: string[] = [];
+  let used = 0;
+  for (const entry of history
+    .slice(-LOOP_HISTORY_MAX_ITERATIONS)
+    .reverse()) {
+    const lines: string[] = [`Ronda ${entry.iteration}:`];
+    for (const [nodeId, state] of Object.entries(entry.nodes)) {
+      let text = state.output;
+      if (state.outputJson !== undefined) {
+        try {
+          text = JSON.stringify(state.outputJson);
+        } catch {
+          text = state.output;
+        }
+      }
+      if (typeof text !== "string" || text.trim() === "") continue;
+      lines.push(
+        `[${nodeId}] ${trimHistoryText(text, LOOP_HISTORY_MAX_CHARS_PER_NODE)}`,
+      );
+    }
+    const chunk = lines.join("\n");
+    if (used + chunk.length + 1 > budget) {
+      if (chunks.length === 0) {
+        chunks.push(trimHistoryText(chunk, Math.max(0, budget - 1)));
+      }
+      break;
+    }
+    chunks.push(chunk);
+    used += chunk.length + 1;
+  }
+  chunks.reverse();
+  return [header, ...chunks, footer].join("\n");
 }
 
 export async function runWorkflow(
@@ -183,13 +286,13 @@ export async function runWorkflow(
     );
   }
   const def = loaded.def;
-  let inputs = resolveInputs(def, opts.inputs);
   const expanded = expandIncludes(def, (name) =>
     loadWorkflow(name, { repoRoot: opts.repoRoot ?? opts.cwd }),
   );
   validateWorkflow(expanded.def);
   const store = new WorkflowRunStore(opts.runsDir);
   let run: WorkflowRun;
+  let inputs: Record<string, unknown>;
   if (opts.resumeRunId) {
     const existing = store.load(opts.resumeRunId);
     if (!existing) {
@@ -201,10 +304,17 @@ export async function runWorkflow(
       );
     }
     run = existing;
-    inputs = existing.inputs ?? inputs;
+    // Los inputs del run existente son la fuente (sus `required` ya se
+    // validaron al crearlo): resolver DESPUÉS de cargarlos evita el falso
+    // "input requerido" en resume de workflows con inputs obligatorios.
+    inputs = resolveInputs(def, {
+      ...(existing.inputs ?? {}),
+      ...(opts.inputs ?? {}),
+    });
     for (const [nodeId, state] of Object.entries(run.nodes)) {
       if (state.status !== "completed") delete run.nodes[nodeId];
     }
+    run.inputs = inputs;
     run.status = "running";
     run.error = undefined;
     run.finishedAt = undefined;
@@ -214,6 +324,7 @@ export async function runWorkflow(
     run.sourcePath = loaded.sourcePath;
     store.save(run);
   } else {
+    inputs = resolveInputs(def, opts.inputs);
     run = store.create({
       workflow: def.name,
       description: def.description,
@@ -249,6 +360,10 @@ export async function runWorkflow(
   } else if (opts.resumeRunId && run.worktree) {
     effectiveCwd = run.worktree.path;
   }
+  // Persistir el cwd efectivo: un resume de un run `inherit` (sin worktree
+  // propio) lo recupera desde run.json en vez de caer al cwd del daemon.
+  run.cwd = effectiveCwd;
+  store.save(run);
 
   const emit = (type: WorkflowEventType, nodeId?: string, data?: Record<string, unknown>) => {
     const event: WorkflowEvent = {
@@ -311,13 +426,17 @@ export async function runWorkflow(
     node: WorkflowNode,
     prompt: string,
     sessionOverride?: string | null,
+    sessionMeta?: Record<string, unknown>,
   ): Promise<NodeExecutionResult> =>
     aiRunner({
       runId: run.id,
       nodeId: node.id,
       cwd: effectiveCwd,
       prompt,
-      model: node.model ?? def.model,
+      // Precedencia de modelo (fix modelo del foreman ignorado): el nodo y
+      // el workflow pinean primero; si no, manda el modelo del agente (la
+      // identidad por default); sin modelo del agente, opencode usa el suyo.
+      model: node.model ?? def.model ?? resolveAgentModel(node.agent) ?? undefined,
       effort: node.effort ?? def.effort,
       agent: node.agent,
       systemPrompt: node.systemPrompt,
@@ -335,6 +454,18 @@ export async function runWorkflow(
       repoRoot: opts.repoRoot ?? opts.cwd,
       workflowDir: loaded.dir,
       scopeDir: path.join(artifacts.artifactsDir, "scopes", node.id),
+      onSessionCreated: (sessionId: string) => {
+        // Agent Sessions se habilita al ENVIAR el mensaje, no al completar.
+        // `iteration` (loops): número de ronda 1-based para que el panel
+        // distinga las sesiones de cada ronda del mismo nodo.
+        emit("node_session_attached", node.id, {
+          sessionId,
+          ...(typeof node.agent === "string" && node.agent !== ""
+            ? { agent: node.agent }
+            : {}),
+          ...(sessionMeta !== undefined ? sessionMeta : {}),
+        });
+      },
     });
 
   const executeLoop = async (
@@ -357,12 +488,13 @@ export async function runWorkflow(
         node,
         prompt,
         loop.fresh_context ? null : sessionId,
+        { iteration },
       );
       lastResult = result;
       if (!loop.fresh_context && result.sessionId) sessionId = result.sessionId;
       let outputJson = result.outputJson;
       if (outputJson === undefined && node.output_format) {
-        outputJson = parseStructuredOutput(result.output);
+        outputJson = parseStructuredOutput(result.output, node.output_format);
       }
       if (outputJson !== undefined && node.output_format) {
         const schemaError = validateAgainstSchema(outputJson, node.output_format);
@@ -517,6 +649,8 @@ export async function runWorkflow(
     }
     const groupGraph = buildLayers(group.nodes);
     let prevStates: Record<string, NodeState> = {};
+    /** Rondas completadas del grupo (WS1): fuente de `$LOOP_HISTORY`. */
+    const history: LoopHistoryEntry[] = [];
     let lastResult: NodeExecutionResult = { output: "" };
     let cancelSignal: NodeCancelSignal | null = null;
     let groupCost = 0;
@@ -533,10 +667,15 @@ export async function runWorkflow(
       for (const [id, state] of Object.entries(prevStates)) {
         loopPrev[id] = { output: state.output, outputJson: state.outputJson };
       }
+      // WS1: bloque anti-regresión auto-inyectado en cada nodo IA del cuerpo.
+      // `history` solo tiene rondas previas (se apila al cerrar la ronda).
+      const historyBlock =
+        group.history === false ? "" : renderLoopHistoryBlock(history);
       const groupVarCtx = (): VarContext => ({
         ...buildVarCtx(groupNode.id),
         nodes: { ...run.nodes, ...iterationStates },
         loopPrev,
+        loopHistory: history,
       });
 
       for (const layer of groupGraph.layers) {
@@ -544,6 +683,10 @@ export async function runWorkflow(
           layer.map(async (subId) => {
             const subNode = groupGraph.byId.get(subId);
             if (!subNode) return;
+            // F16: id namespaced (`build.implement`) para eventos, sesiones y
+            // artefactos — el stepper y Agent Sessions leen lo mismo que
+            // `run.nodes` (que ya guarda `${group}.${sub}`).
+            const namespacedId = `${groupNode.id}.${subId}`;
             if (subNode.when) {
               let whenTrue = false;
               try {
@@ -560,6 +703,7 @@ export async function runWorkflow(
                   attempts: 0,
                   skipReason: `when: ${subNode.when}`,
                 };
+                emit("node_skipped", namespacedId, { reason: `when: ${subNode.when}` });
                 return;
               }
             }
@@ -575,6 +719,7 @@ export async function runWorkflow(
                 attempts: 0,
                 skipReason: trigger.skipReason,
               };
+              emit("node_skipped", namespacedId, { reason: trigger.skipReason });
               return;
             }
             const maxAttempts = subNode.retry?.max_attempts ?? 1;
@@ -587,15 +732,52 @@ export async function runWorkflow(
               startedAt: nowIso(),
             };
             iterationStates[subId] = state;
+            emit("node_started", namespacedId);
             for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
               state.attempts = attempt;
               try {
-                const result = await executeBody(subNode, groupVarCtx());
+                const result = await executeBody(
+                  { ...subNode, id: namespacedId },
+                  groupVarCtx(),
+                  historyBlock,
+                  { iteration },
+                );
                 state.status = "completed";
                 state.finishedAt = nowIso();
                 state.output = result.output;
                 if (result.outputJson !== undefined) {
                   state.outputJson = result.outputJson;
+                } else if (subNode.output_format) {
+                  const parsed = parseStructuredOutput(
+                    result.output,
+                    subNode.output_format,
+                  );
+                  if (parsed === undefined) {
+                    throw new NodeExecutionError(
+                      subId,
+                      "output no contiene JSON válido y el nodo declara output_format",
+                    );
+                  }
+                  state.outputJson = parsed;
+                }
+                if (subNode.output_format && state.outputJson !== undefined) {
+                  const schemaError = validateAgainstSchema(
+                    state.outputJson,
+                    subNode.output_format,
+                  );
+                  if (schemaError) {
+                    throw new NodeExecutionError(
+                      subId,
+                      `output_format inválido: ${schemaError}`,
+                    );
+                  }
+                }
+                if (subNode.output_type) {
+                  artifacts.writeNodeSidecar(
+                    namespacedId,
+                    subNode.output_type,
+                    result.output,
+                  );
                 }
                 if (result.sessionId) state.sessionId = result.sessionId;
                 if (typeof result.costUsd === "number") {
@@ -609,6 +791,12 @@ export async function runWorkflow(
                   groupCacheWrite += result.usage.cacheWriteTokens ?? 0;
                   hasGroupTokens = true;
                 }
+                emit("node_completed", namespacedId, {
+                  attempts: attempt,
+                  outputPreview: redactSecrets(result.output.slice(0, 4_000)),
+                  sessionId: result.sessionId,
+                  costUsd: result.costUsd,
+                });
                 return;
               } catch (error) {
                 if (error instanceof NodeCancelSignal) {
@@ -616,6 +804,10 @@ export async function runWorkflow(
                   state.finishedAt = nowIso();
                   state.error = error.message;
                   cancelSignal = cancelSignal ?? error;
+                  emit("node_failed", namespacedId, {
+                    cancelled: true,
+                    reason: error.message,
+                  });
                   return;
                 }
                 const message =
@@ -630,6 +822,7 @@ export async function runWorkflow(
                 state.status = "failed";
                 state.finishedAt = nowIso();
                 state.error = message;
+                emit("node_failed", namespacedId, { error: redactSecrets(message) });
                 return;
               }
             }
@@ -643,6 +836,58 @@ export async function runWorkflow(
           ...state,
           id: `${groupNode.id}.${subId}`,
         };
+      }
+      // WS3b: reverify system-owned — los findings estructurados del review
+      // pueden pedir comandos read-only; los corre el ENGINE (allowlist) en el
+      // worktree y la evidencia entra al historial de la próxima ronda.
+      let reverifyEntry: { output: string } | null = null;
+      if (group.reverify !== false && !cancelSignal) {
+        const requestedFindings: unknown[] = [];
+        for (const inner of groupGraph.nodes) {
+          const subState = iterationStates[inner.id];
+          if (subState?.status !== "completed") continue;
+          const findings = (
+            subState.outputJson as { findings?: unknown } | undefined
+          )?.findings;
+          if (Array.isArray(findings)) requestedFindings.push(...findings);
+        }
+        if (requestedFindings.length > 0) {
+          try {
+            const reverified = await runAllowlistedReverify(
+              requestedFindings,
+              effectiveCwd,
+              { env: baseEnv, signal: opts.signal },
+            );
+            if (reverified) reverifyEntry = { output: reverified.evidence };
+          } catch {
+            // best-effort: el reverify jamás rompe el loop
+          }
+        }
+      }
+      // WS1: cerrar la ronda — queda disponible como historial/`$LOOP_PREV`
+      // para la próxima iteración (orden topológico estable, no de carrera).
+      const historyEntry: LoopHistoryEntry = { iteration, nodes: {} };
+      for (const inner of groupGraph.nodes) {
+        const subState = iterationStates[inner.id];
+        if (
+          subState?.status !== "completed" ||
+          typeof subState.output !== "string" ||
+          subState.output.trim() === ""
+        ) {
+          continue;
+        }
+        historyEntry.nodes[inner.id] = {
+          output: subState.output,
+          ...(subState.outputJson !== undefined
+            ? { outputJson: subState.outputJson }
+            : {}),
+        };
+      }
+      if (reverifyEntry) {
+        historyEntry.nodes.reverify = reverifyEntry;
+      }
+      if (Object.keys(historyEntry.nodes).length > 0) {
+        history.push(historyEntry);
       }
       prevStates = iterationStates;
       store.save(run);
@@ -684,6 +929,7 @@ export async function runWorkflow(
         ...buildVarCtx(groupNode.id),
         nodes: { ...run.nodes, ...iterationStates },
         loopPrev,
+        loopHistory: history,
       };
       if (group.until) {
         try {
@@ -882,9 +1128,26 @@ export async function runWorkflow(
     return { output: JSON.stringify(values), outputJson: values };
   };
 
+  /** Meta de ronda para `node_session_attached` (solo iteración válida 1-based). */
+  const sessionMetaFor = (
+    execMeta: { iteration?: number } | undefined,
+  ): Record<string, unknown> | undefined => {
+    const iteration = execMeta?.iteration;
+    if (
+      typeof iteration !== "number" ||
+      !Number.isInteger(iteration) ||
+      iteration < 1
+    ) {
+      return undefined;
+    }
+    return { iteration };
+  };
+
   const executeBody = (
     node: WorkflowNode,
     varCtx: VarContext,
+    promptSuffix?: string,
+    execMeta?: { iteration?: number },
   ): Promise<NodeExecutionResult> => {
     const nodeEnv: NodeJS.ProcessEnv = {
       ...baseEnv,
@@ -901,12 +1164,27 @@ export async function runWorkflow(
       artifactsDir: artifacts.artifactsDir,
       stateDir: artifacts.stateDir,
     };
+    /** WS1: el historial del loop_group viaja pegado al prompt IA. */
+    const withSuffix = (prompt: string): string =>
+      typeof promptSuffix === "string" && promptSuffix.length > 0
+        ? `${prompt}\n\n${promptSuffix}`
+        : prompt;
     if (node.prompt !== undefined) {
-      return runAiNode(node, resolveTemplate(node.prompt, varCtx));
+      return runAiNode(
+        node,
+        withSuffix(resolveTemplate(node.prompt, varCtx)),
+        undefined,
+        sessionMetaFor(execMeta),
+      );
     }
     if (node.command !== undefined) {
       const commandText = readCommandFile(loaded, node.command);
-      return runAiNode(node, resolveTemplate(commandText, varCtx));
+      return runAiNode(
+        node,
+        withSuffix(resolveTemplate(commandText, varCtx)),
+        undefined,
+        sessionMetaFor(execMeta),
+      );
     }
     if (node.loop !== undefined) {
       return executeLoop(node, varCtx);
@@ -1030,7 +1308,7 @@ export async function runWorkflow(
         if (result.outputJson !== undefined) {
           state.outputJson = result.outputJson;
         } else if (node.output_format) {
-          const parsed = parseStructuredOutput(result.output);
+          const parsed = parseStructuredOutput(result.output, node.output_format);
           if (parsed === undefined) {
             throw new NodeExecutionError(
               node.id,

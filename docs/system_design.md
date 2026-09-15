@@ -41,10 +41,10 @@ Normalización: `providerID.trim().toLowerCase()`, `modelID.trim().toLowerCase()
 
 | Implement (`modelRef`) | Reviewer primario | Fallback si primario no disponible (auth/404/timeout) |
 |---|---|---|
-| `opencode-go / muse-spark-1.2-contributor` (default) | `opencode-go / big-pickle` | `anthropic / claude-sonnet-4-20250514` |
-| `opencode-go / big-pickle` | `opencode-go / muse-spark-1.2-contributor` | `openai / gpt-4o` |
+| `opencode-go / muse-spark-1.3-contributor` (default) | `opencode-go / big-pickle` | `anthropic / claude-sonnet-4-20250514` |
+| `opencode-go / big-pickle` | `opencode-go / muse-spark-1.3-contributor` | `openai / gpt-4o` |
 | `anthropic / *` (cualquier `modelID`) | `openai / gpt-4o` | `opencode-go / big-pickle` |
-| `openai / *` | `anthropic / claude-sonnet-4-20250514` | `opencode-go / muse-spark-1.2-contributor` |
+| `openai / *` | `anthropic / claude-sonnet-4-20250514` | `opencode-go / muse-spark-1.3-contributor` |
 | ausente / desconocido | `opencode-go / big-pickle` (si implement efectivo fue `muse-spark`) sino `muse-spark` | `anthropic / claude-sonnet-4-20250514` |
 
 Reglas:

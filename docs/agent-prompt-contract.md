@@ -1,5 +1,10 @@
 # Contrato mínimo del prompt por agente
 
+> Doctrina vigente: **el contrato de salida vive en el mensaje/turno, nunca
+> en el `agent.md`**. El body es identidad + método + calidad; el turno trae
+> las keys exactas del cierre. Una sola fuente: no hay dos reglas que se
+> interfieran.
+>
 > Si querés agregar un agente (o editar el prompt de uno existente), esto es
 > lo único que NO puede faltar. Todo lo demás —rol, reglas, ejemplos,
 > tono— es libre.
@@ -8,11 +13,11 @@
 
 La rúbrica es libre, **el cierre es contrato**: cada agente debe responder
 en prosa para humanos y cerrar con UN bloque ` ```json ` con las keys
-exactas de su schema. El orquestador extrae el bloque (`extractBalancedJSONObject`
+exactas que pide SU TURNO (mensaje del nodo o turno legacy). El orquestador extrae el bloque (`extractBalancedJSONObject`
 + `preferKeys`), lo valida con zod y lo guarda en el sidecar. La prosa es lo
 que se ve en la sesión; el bloque es lo que lee la máquina.
 
-## Tabla por agente
+## Tabla por agente (keys que declara cada turno)
 
 | Agente | Keys exactas del bloque | Enums / tipos que valida zod | Sidecar | Si falla |
 |---|---|---|---|---|
@@ -39,20 +44,22 @@ que se ve en la sesión; el bloque es lo que lee la máquina.
 
 - `description`: requerido por opencode; se muestra en el `@` autocomplete.
 - `agentType`: vocabulario cerrado (`FOREMAN|TRIAGE|SPEC|IMPLEMENT|REVIEW|VERIFY`).
-- `mode`: `subagent` o `all` (`all` = también en el picker, para uso interactivo directo; el headless no lo lee).
+- `mode`: `primary` (default; agente primario de las sesiones de TermCanvas),
+  `subagent` o `all`.
 - `model`: default cuando el job no trae uno (`auto-disjoint` solo vale en REVIEW;
-  sin forma `provider/model` el espejo opencode lo omite).
+  sin forma `provider/model` el config inline lo omite).
 - `tools`: `{read,glob,grep}` para solo-lectura; solo `implement` lleva escritura.
-  El espejo opencode lo traduce a `permission` con `"*": deny` primero.
+  El config inline lo traduce a `permission` con `"*": deny` primero.
 - Sin `maxRetries` (doctrina sin-límites: los reintentos los decide el transporte).
 
-## Espejo opencode (source: `factory/agents/<name>/agent.md`)
+## Config inline (source: `factory/agents/<name>/agent.md`)
 
-El `agent.md` es la única fuente de verdad. `pnpm sync:agents` lo traduce a
-`.opencode/agents/<name>.md` (dir local gitignored, se regenera siempre) y desde
-entonces es un agente opencode real: `@<nombre>`, Task tool e identidad de
-sesión en el headless (con fallback a sesión plana). Receta completa para un
-agente nuevo: `factory/agents/README.md`.
+El `agent.md` es la única fuente de verdad. El daemon lo inyecta como
+`Config.agent` en el server efímero (`buildFactoryAgentsConfig`): el opencode
+del usuario nunca los ve y no hay espejos en disco. Desde ahí es un agente
+opencode real (primary): identidad de sesión en el headless y picker dentro de
+las sesiones de TermCanvas. Validación sin escritura: `pnpm validate:agents`.
+Receta completa para un agente nuevo: `factory/agents/README.md`.
 
 ## A futuro: `outputSchema` en el frontmatter
 

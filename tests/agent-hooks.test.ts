@@ -62,16 +62,10 @@ test("toolsetFromList: otorga conocidas, descarta desconocidas, vacío → {}", 
 
 // ── Descubrimiento real ──
 
-test("discoverHookAgents(post-review) encuentra al playwright-tester advisory sin escritura", () => {
+test("discoverHookAgents(post-review) ya no tiene playwright-tester (retirado)", () => {
   const found = discoverHookAgents("post-review");
   const tester = found.find((a) => a.name === "playwright-tester");
-  assert.ok(tester, "el piloto se descubre por directorio");
-  assert.equal(tester.stage, "post-review");
-  assert.equal(tester.blocking, false, "advisory por default");
-  assert.equal(tester.tools.read, true);
-  assert.equal(tester.tools.bash, true);
-  assert.equal(tester.tools.write, undefined, "sin escritura");
-  assert.equal(tester.tools.edit, undefined, "sin escritura");
+  assert.equal(tester, undefined, "el piloto fue retirado del repo");
 });
 
 test("discoverHookAgents(pre-build/post-build) vacíos hoy (cero costo)", () => {
@@ -313,20 +307,17 @@ test("camino LLM: respuesta sin JSON trae raw head en detail", async () => {
   }
 });
 
-test("hookStagesExtras + listDeclaredHookStages: stages reales del disco", () => {
+test("hookStagesExtras + listDeclaredHookStages: sin playwright-tester retirado", () => {
   const stages = listDeclaredHookStages();
-  assert.ok(stages.includes("post-review"), "el piloto declara post-review");
+  assert.equal(stages.includes("post-review"), false, "playwright-tester retirado = sin stage");
   const extras = hookStagesExtras() as {
     hookStages?: string[];
     hookAgents?: Array<{ name: string; stage: string; blocking?: boolean }>;
   };
-  assert.ok(Array.isArray(extras.hookStages), "forma {hookStages}");
-  assert.ok((extras.hookStages ?? []).includes("post-review"));
-  assert.ok(Array.isArray(extras.hookAgents), "forma {hookAgents} (nombre visible)");
+  // Sin agentes hook, la forma honesta es {} (o arrays vacíos): nunca inventa.
+  assert.equal((extras.hookStages ?? []).includes("post-review"), false);
   const pilot = (extras.hookAgents ?? []).find((a) => a.name === "playwright-tester");
-  assert.ok(pilot, "el roster incluye playwright-tester");
-  assert.equal(pilot?.stage, "post-review");
-  assert.equal(pilot?.blocking, false);
+  assert.equal(pilot, undefined, "el roster ya no incluye playwright-tester");
 });
 
 test("roster hook: agente nuevo y cambio de stage en tiempo real (revisión)", () => {

@@ -43,7 +43,7 @@ export function resolveJobModel(modelRef?: ModelRef): ModelRef {
     }
   } catch {}
   // Espejo del default del Foreman (valor ya establecido en factory.yaml y foreman.ts).
-  return { providerID: "opencode-go", modelID: "muse-spark-1.2-contributor" };
+  return { providerID: "opencode-go", modelID: "muse-spark-1.3-contributor" };
 }
 
 /**

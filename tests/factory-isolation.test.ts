@@ -24,18 +24,24 @@ import {
   buildIsolationBranchName,
   buildPrBody,
   buildPrTitle,
+  cleanDetailUrl,
   decideWorktreeDelete,
   effectiveWorktreeFor,
+  extractDispositions,
+  extractNotVerified,
+  extractReportSection,
   isPactIsolationJob,
   parseIssueTitleFromPrompt,
   parseWorktreeDeletePath,
   prGuard,
   readIsolationFromTimeline,
   readPrFromTimeline,
+  reportIntro,
   sanitizeIsolationIssueRef,
   shouldIsolate,
   slugifyIssueTitle,
 } from "../headless-runtime/factory/isolation/isolationStore.ts";
+import { buildPrDetailsFromJob } from "../headless-runtime/factory/isolation/gitHubPr.ts";
 import {
   ensureIsolatedWorktree,
   isWorkingTreeDirty,
@@ -44,12 +50,18 @@ import {
   GIT_WORKTREE_ADD_TIMEOUT_MS,
 } from "../headless-runtime/factory/isolation/gitWorktree.ts";
 import {
+  checkReviewStale,
   commitWorktreeChanges,
   countBranchCommitsVsBase,
   gateAcceptOnBranchDiff,
+  maybePublishReviewReportForJob,
   openPrForJob,
+  publishReviewReport,
+  readPrHead,
   readPrState,
+  readReviewReportFromTimeline,
   readWorktreeStatusPorcelain,
+  verifyCreatedPr,
   GIT_COMMIT_TIMEOUT_MS,
   GIT_PUSH_TIMEOUT_MS,
   GIT_REV_LIST_TIMEOUT_MS,
@@ -58,6 +70,7 @@ import {
   GH_PR_VIEW_TIMEOUT_MS,
 } from "../headless-runtime/factory/isolation/gitHubPr.ts";
 import { workItemStore } from "../headless-runtime/workItem/workItemStore.ts";
+import { buildReviewReport } from "../headless-runtime/review/reviewReport.ts";
 
 // ── Branch parity (mirror of buildIssueBranchName) ──
 
@@ -360,6 +373,113 @@ test("pr body carries Closes #N without title", () => {
   const body = buildPrBody(7);
   assert.ok(body.includes("Closes #7"));
   assert.ok(body.includes("Resolve issue #7"));
+});
+
+// ── PR estilo guía de review (secciones Wirasm) ──
+
+const IMPL_REPORT = [
+  "Arreglado el parseo corrupto en `js/store.js`: try/catch + backup.",
+  "Archivos: `js/store.js`, `tests/store.corrupt.test.js`.",
+  "",
+  "## Review guidance",
+  "- Empezar por: `js/store.js:41` — el parseo con try/catch.",
+  "- Orden de revisión sugerido: store, luego tests.",
+  "- Zonas de baja atención: test de humo.",
+  "- Riesgo conocido o incertidumbre: ninguno.",
+  "- No verificado: nada pendiente.",
+  "",
+  "## Otro",
+  "ruido posterior",
+].join("\n");
+
+test("extractReportSection: bloque por heading, case-insensitive, corta en el próximo", () => {
+  const got = extractReportSection(IMPL_REPORT, ["review guidance"]);
+  assert.ok(got.includes("js/store.js:41"), "contenido de la sección");
+  assert.ok(!got.includes("ruido posterior"), "corta en el próximo heading");
+  assert.equal(
+    extractReportSection(IMPL_REPORT, ["guía de revisión"]),
+    "",
+    "sin alias inventados",
+  );
+  assert.equal(extractReportSection(IMPL_REPORT, []), "");
+  assert.equal(extractReportSection(null, ["review guidance"]), "");
+  assert.equal(extractReportSection("sin headings", ["review guidance"]), "");
+});
+
+test("reportIntro: solo lo previo al primer heading, recortado", () => {
+  const intro = reportIntro(IMPL_REPORT, 1200);
+  assert.ok(intro.includes("Arreglado el parseo"), "intro presente");
+  assert.ok(!intro.includes("Empezar por"), "sin secciones");
+  assert.equal(reportIntro(null), "");
+});
+
+test("extractNotVerified: línea explícita o Nothing material", () => {
+  assert.equal(
+    extractNotVerified("- No verificado: el edge del backup.\n- Otro: x"),
+    "el edge del backup.",
+  );
+  assert.equal(
+    extractNotVerified("- No verificado: nada pendiente."),
+    "Nothing material.",
+  );
+  assert.equal(extractNotVerified("sin línea"), "");
+  assert.equal(extractNotVerified(""), "");
+});
+
+test("pr body estilo guía: secciones solo con datos", () => {
+  const body = buildPrBody(412, "Fix kanban count", {
+    summary: "Review OK: el cambio cumple el issue.",
+    reviewer: "opencode/big-pickle",
+    implementReport: IMPL_REPORT,
+    files: ["js/store.js"],
+    verification: {
+      overall: "pass",
+      steps: [{ name: "test", command: "pnpm test", status: "pass" }],
+    },
+    branch: "issue-412-x",
+    baseBranch: "main",
+  });
+  assert.ok(body.includes("## Problem and outcome"));
+  assert.ok(body.includes("- **Issue:** #412"));
+  assert.ok(body.includes("- **Outcome:** Review OK: el cambio cumple el issue."));
+  assert.ok(body.includes("## Solution"));
+  assert.ok(body.includes("## Review guidance"));
+  assert.ok(body.includes("js/store.js:41"));
+  assert.ok(body.includes("## Changed files"));
+  assert.ok(body.includes("## Validation"));
+  assert.ok(body.includes("- **Not verified:** Nothing material."));
+  assert.ok(body.includes("## Delivery considerations"));
+  assert.ok(body.includes("issue-412-x"));
+  assert.ok(body.includes("Reviewed by `opencode/big-pickle`."));
+  assert.ok(body.includes("Closes #412"));
+});
+
+test("pr body sin datos: solo problema honesto + Closes", () => {
+  const body = buildPrBody(7);
+  assert.ok(body.includes("## Problem and outcome"));
+  assert.ok(body.includes("- **Issue:** #7"));
+  assert.ok(!body.includes("## Solution"), "sin solución inventada");
+  assert.ok(!body.includes("## Review guidance"));
+  assert.ok(!body.includes("## Delivery considerations"));
+  assert.ok(!body.includes("Nothing material"), "sin cobertura que no existe");
+});
+
+test("buildPrDetailsFromJob: implementReport alimenta solution/guidance", () => {
+  const { details } = buildPrDetailsFromJob({
+    lastReview: { summary: "Review OK", reviewerModel: "opencode/big-pickle" },
+    timeline: [
+      { meta: { implementReport: IMPL_REPORT } },
+      { meta: { createdFiles: ["js/store.js"] } },
+    ],
+    isolation: { branch: "issue-412-x", baseBranch: "main" },
+  });
+  assert.equal(details.implementReport, IMPL_REPORT);
+  assert.equal(details.branch, "issue-412-x");
+  assert.equal(details.baseBranch, "main");
+  const body = buildPrBody(412, "Fix", details);
+  assert.ok(body.includes("## Review guidance"));
+  assert.ok(body.includes("js/store.js:41"));
+  assert.ok(body.includes("## Solution"));
 });
 
 test("pr title shape", () => {
@@ -923,12 +1043,16 @@ test("exec: openPr pushes once then creates with Closes body (no merge primitive
   assert.deepEqual([...(pushes[0]?.args ?? [])], ["push", "-u", "origin", "issue-412-x"]);
   const creates = calls.filter((c) => c.cmd === "gh");
   // PR create + best-effort `pr edit --add-label review:pendiente` (fix #69:
-  // el PR de factory nace etiquetado para que el panel lo derive sin watcher).
-  assert.equal(creates.length, 2);
-  const ghArgs = [...(creates[0]?.args ?? [])];
+  // el PR de factory nace etiquetado para que el panel lo derive sin watcher)
+  // + best-effort lookups `pr view` (anti-duplicado previo y verificación
+  // post-create P1: con este fake no-JSON fallan en parseo y se sigue).
+  const sub = (c: { args: readonly string[] }): string =>
+    String(c.args[1] ?? "");
+  assert.equal(creates.filter((c) => sub(c) === "create").length, 1);
+  const ghArgs = [...(creates.find((c) => sub(c) === "create")?.args ?? [])];
   assert.deepEqual(ghArgs.slice(0, 2), ["pr", "create"]);
   assert.ok(!ghArgs.some((a) => a.includes("merge")));
-  const labelCall = creates[1];
+  const labelCall = creates.find((c) => sub(c) === "edit");
   assert.deepEqual([...(labelCall?.args ?? [])].slice(0, 2), ["pr", "edit"]);
   assert.ok((labelCall?.args ?? []).some((a) => String(a).includes("review:pendiente")));
   assert.equal(written.length, 1);
@@ -1034,12 +1158,15 @@ test("pre-check: zero commits vs base reports nothing-to-propose without push/pr
     // No PR URL is ever invented on this path.
     assert.ok(!got.error.includes("http"));
   }
-  // Only read-only probes ran (rev-list + status) — no push, no gh.
-  assert.equal(calls.length, 2);
+  // Only read-only probes ran (rev-list + status + best-effort gh view
+  // anti-duplicado P1, que falla en este fake y sigue) — no push, no gh create.
+  assert.equal(calls.length, 3);
   assert.equal(calls[0]?.cmd, "git");
   assert.ok((calls[0]?.args ?? []).includes("rev-list"));
   assert.equal(calls[1]?.cmd, "git");
   assert.ok((calls[1]?.args ?? []).includes("status"));
+  assert.ok(!calls.some((c) => c.cmd === "git" && c.args[0] === "push"));
+  assert.ok(!calls.some((c) => c.cmd === "gh" && c.args[1] === "create"));
 });
 
 test("pre-check: non-empty branch proceeds to push + pr create", async () => {
@@ -1179,9 +1306,11 @@ test("exec: dirty worktree → add+commit del sistema antes de push+pr", async (
   assert.deepEqual(kinds, [
     "git rev-list",
     "git status",
+    "gh pr",
     "git add",
     "git commit",
     "git push",
+    "gh pr",
     "gh pr",
     "gh pr",
   ]);
@@ -1190,6 +1319,34 @@ test("exec: dirty worktree → add+commit del sistema antes de push+pr", async (
   const cargs = [...(commit?.args ?? [])];
   assert.ok(cargs.includes("factory: implement issue #9 (handoff)"));
   assert.ok(cargs.includes("user.name=termcanvas-factory"));
+});
+
+test("exec: PR con ' M js/app.js' commitea el path completo, no 's/app.js' (bug run #125)", async () => {
+  const { calls, run } = fakeGit({
+    "git rev-list": { stdout: "0\n" },
+    "git status": { stdout: " M js/app.js\n" },
+    "git add": { stdout: "" },
+    "git -c": { stdout: "[issue-125-x abc1234] factory: implement\n" },
+    "git push": { stdout: "" },
+    gh: { stdout: "https://github.com/o/r/pull/125\n" },
+  });
+  const got = await openPrForJob({
+    repoPath: "/r/wt",
+    branch: "issue-125-ux",
+    baseBranch: "main",
+    issueNumber: 125,
+    run,
+    writeBodyFile: () => {},
+    unlinkBodyFile: () => {},
+  });
+  assert.equal(got.ok, true);
+  const add = calls.find((c) => c.cmd === "git" && c.args[0] === "add");
+  const addArgs = [...(add?.args ?? [])];
+  assert.ok(
+    addArgs.includes("js/app.js"),
+    `git add con path completo: ${addArgs.join(" ")}`,
+  );
+  assert.ok(!addArgs.includes("s/app.js"), "nunca el path mutilado");
 });
 
 // ── Commit selectivo (fix PRs +1M líneas: node_modules/logs/.agents/dist fuera) ──
@@ -1223,7 +1380,21 @@ test("commit: isCommittablePath excluye ruido y acepta código", async () => {
     parsePorcelainPaths(' M src/a.ts\n?? node_modules/x.js\nR  old.ts -> new.ts\n'),
     ["src/a.ts", "node_modules/x.js", "new.ts"],
   );
+  // Primera línea sin offset XY (trim() aguas arriba: `"M js/app.js"`): el
+  // path sale completo, nunca mutilado a `"s/app.js"` (bug run #125).
+  assert.deepEqual(
+    parsePorcelainPaths("M js/app.js\n?? src/b.ts\n"),
+    ["js/app.js", "src/b.ts"],
+  );
   assert.deepEqual(parsePorcelainPaths(null), []);
+});
+
+test("status: readWorktreeStatusPorcelain preserva el offset XY de la primera línea", async () => {
+  const { run } = fakeGit({
+    "git status": { stdout: " M js/app.js\r\n?? src/b.ts\r\n" },
+  });
+  const status = await readWorktreeStatusPorcelain({ repoPath: "/r/wt", run });
+  assert.equal(status, " M js/app.js\n?? src/b.ts");
 });
 
 test("exec: commit selectivo deja fuera node_modules/logs (sin -A ciego)", async () => {
@@ -1387,5 +1558,551 @@ test("gate: trabajo sucio o commits permiten el accept (fail-open honesto)", asy
     state: "created",
   });
   assert.deepEqual(await gateAcceptOnBranchDiff("job-gate-norev01", dirtyRun), { ok: true });
+  workItemStore.clear();
+});
+
+// ── P1: PR estilo prp-pr (título outcome, validación honesta, links, anti-duplicado) ──
+
+test("p1: título outcome-first en lenguaje de comportamiento", () => {
+  assert.equal(
+    buildPrTitle(412, "Fix kanban count", "El conteo del kanban ya suma bien\nsegunda línea"),
+    "Resolve issue #412 — El conteo del kanban ya suma bien",
+  );
+  assert.equal(
+    buildPrTitle(412, "Fix kanban count"),
+    "Resolve issue #412 — Fix kanban count",
+  );
+  assert.equal(buildPrTitle(412, "", ""), "Resolve issue #412");
+  assert.equal(buildPrTitle(412, null, null), "Resolve issue #412");
+  const long = `x${"y".repeat(300)}`;
+  assert.ok((buildPrTitle(1, "t", long).split("— ")[1] ?? "").length <= 120);
+});
+
+test("p1: cleanDetailUrl solo acepta http(s)", () => {
+  assert.equal(cleanDetailUrl("https://github.com/o/r/issues/1"), "https://github.com/o/r/issues/1");
+  assert.equal(cleanDetailUrl("/abs/plans/x.plan.md"), "");
+  assert.equal(cleanDetailUrl("C:\\plans\\x.md"), "");
+  assert.equal(cleanDetailUrl(""), "");
+  assert.equal(cleanDetailUrl(null), "");
+});
+
+test("p1: plan URL verificada viaja a ## Links; path local jamás", () => {
+  const withUrl = buildPrBody(5, "T", { planUrl: "https://github.com/o/r/issues/5#issuecomment-1" });
+  assert.ok(withUrl.includes("## Links"));
+  assert.ok(withUrl.includes("- Plan: https://github.com/o/r/issues/5#issuecomment-1"));
+  const withPath = buildPrBody(5, "T", { planUrl: "/abs/plans/x.plan.md" });
+  assert.ok(!withPath.includes("## Links"));
+  assert.ok(!withPath.includes("/abs/plans"));
+});
+
+test("p1: validación honesta sin steps corridos (nada pendiente sin cobertura)", () => {
+  const report = ["Intro.", "", "## Review guidance", "- No verificado: nada pendiente."].join("\n");
+  const body = buildPrBody(9, "T", { implementReport: report });
+  assert.ok(body.includes("## Validation"));
+  assert.ok(!body.includes("Nothing material."));
+  assert.ok(body.includes("no verification steps ran"));
+});
+
+test("p1: Nothing material solo con steps reales", () => {
+  const body = buildPrBody(9, "T", {
+    implementReport: IMPL_REPORT,
+    verification: { overall: "pass", steps: [{ name: "test", command: "pnpm test", status: "pass" }] },
+  });
+  assert.ok(body.includes("- **Not verified:** Nothing material."));
+});
+
+test("p1: buildPrDetailsFromJob recoge planPublication http e ignora paths", () => {
+  const { details } = buildPrDetailsFromJob({
+    timeline: [
+      { meta: { planPublication: "https://github.com/o/r/issues/5#issuecomment-9" } },
+    ],
+  });
+  assert.equal(details.planUrl, "https://github.com/o/r/issues/5#issuecomment-9");
+  const local = buildPrDetailsFromJob({ timeline: [{ meta: { planUrl: "./plans/x.md" } }] });
+  assert.equal((local.details as Record<string, unknown>).planUrl, undefined);
+});
+
+test("p1: PR abierto existente se reutiliza sin push ni create", async () => {
+  const calls: Array<{ cmd: string; args: readonly string[] }> = [];
+  const run = async (
+    cmd: string,
+    args: readonly string[],
+    _opts: { cwd: string; timeoutMs: number },
+  ) => {
+    calls.push({ cmd, args });
+    if (cmd === "git" && args[0] === "rev-list") return { stdout: "2\n", stderr: "" };
+    if (cmd === "git" && args[0] === "status") return { stdout: "", stderr: "" };
+    if (cmd === "gh" && args[0] === "pr" && args[1] === "view") {
+      return {
+        stdout: JSON.stringify({ state: "OPEN", number: 77, url: "https://github.com/o/r/pull/77" }),
+        stderr: "",
+      };
+    }
+    throw new Error(`must not be called: ${cmd} ${args.join(" ")}`);
+  };
+  const got = await openPrForJob({
+    repoPath: "/r/wt",
+    branch: "issue-5-x",
+    baseBranch: "main",
+    issueNumber: 5,
+    run,
+    writeBodyFile: () => {
+      throw new Error("must not write a body when reusing");
+    },
+    unlinkBodyFile: () => {},
+  });
+  assert.deepEqual(got, {
+    ok: true,
+    prNumber: 77,
+    prUrl: "https://github.com/o/r/pull/77",
+    duplicate: true,
+  });
+  assert.ok(!calls.some((c) => c.cmd === "git" && c.args[0] === "push"));
+  assert.ok(!calls.some((c) => c.cmd === "gh" && c.args[1] === "create"));
+});
+
+test("p1: verifyCreatedPr confirma número/URL/base/head/draft", async () => {  const run = async () => ({
+    stdout: JSON.stringify({
+      number: 77,
+      url: "https://github.com/o/r/pull/77",
+      state: "OPEN",
+      baseRefName: "main",
+      headRefName: "issue-5-x",
+      isDraft: false,
+    }),
+    stderr: "",
+  });
+  assert.deepEqual(await verifyCreatedPr({ repoPath: "/r", prNumber: 77, run }), {
+    state: "open",
+    base: "main",
+    head: "issue-5-x",
+    draft: false,
+    url: "https://github.com/o/r/pull/77",
+  });
+  const junk = async () => ({ stdout: "not json", stderr: "" });
+  assert.equal(await verifyCreatedPr({ repoPath: "/r", prNumber: 77, run: junk }), null);
+  const mismatch = async () => ({
+    stdout: JSON.stringify({ number: 78, url: "https://x/78", state: "OPEN" }),
+    stderr: "",
+  });
+  assert.equal(await verifyCreatedPr({ repoPath: "/r", prNumber: 77, run: mismatch }), null);
+});
+
+// ── P2: dispositions del loop (parser + espejo en PR body) ──
+
+const IMPL_REPORT_DISP = [
+  "Cambio X en `a.ts`.",
+  "",
+  "## Review guidance",
+  "- Empezar por: `a.ts:1` — el cambio.",
+  "- No verificado: nada pendiente.",
+  "",
+  "## Dispositions",
+  "- f1: FIXED — se movió el parseo a try/catch en a.ts:41.",
+  "- f2: NOT_A_FINDING — el path ya valida con isSafe en b.ts:12.",
+  "- f3: TRACKED_FOLLOW_UP — issue #45 (rate-limit separado).",
+  "- f4: DECLINED — preferencia de naming, se mantiene la convención.",
+  "- f1: FIXED — duplicado que se ignora.",
+  "- f9: deferred pelado que no parsea.",
+].join("\n");
+
+test("p2: extractDispositions parsea estados terminales, dedupea e ignora junk", () => {
+  const got = extractDispositions(IMPL_REPORT_DISP);
+  assert.deepEqual(
+    got.map((d) => d.id),
+    ["f1", "f2", "f3", "f4"],
+  );
+  assert.deepEqual(
+    got.map((d) => d.disposition),
+    ["FIXED", "NOT_A_FINDING", "TRACKED_FOLLOW_UP", "DECLINED"],
+  );
+  assert.ok(got[0]?.reason.includes("try/catch"));
+  assert.equal(extractDispositions("sin secciones").length, 0);
+  assert.equal(extractDispositions(IMPL_REPORT).length, 0, "sin sección no hay tabla");
+  assert.equal(extractDispositions(null).length, 0);
+});
+
+test("p2: PR body espeja ## Review dispositions solo con datos", () => {
+  const body = buildPrBody(11, "T", {
+    implementReport: IMPL_REPORT_DISP,
+    verification: { overall: "pass", steps: [{ name: "test", command: "pnpm test", status: "pass" }] },
+  });
+  assert.ok(body.includes("## Review dispositions"));
+  assert.ok(body.includes("| Finding | Disposition | Reason |"));
+  assert.ok(body.includes("`f1` | FIXED"));
+  assert.ok(body.includes("`f3` | TRACKED_FOLLOW_UP"));
+  const plain = buildPrBody(11, "T", { implementReport: IMPL_REPORT });
+  assert.ok(!plain.includes("## Review dispositions"), "sin sección no hay tabla");
+});
+
+// ── P3b: publicación del review report (siempre, idempotente por head) ──
+
+const P3B_LOCAL = buildReviewReport({
+  pr: 0,
+  base: "main",
+  head: "issue-5-x",
+  verdict: "READY TO MERGE",
+  summary: "OK.",
+  findings: [],
+  validation: [{ command: "pnpm test", result: "PASS", evidence: "12 passed" }],
+  scopes: ["tests"],
+});
+
+const P3B_URL = "https://github.com/o/r/pull/77#issuecomment-9";
+
+function p3bCommentBody(head: string): string {
+  return [
+    "<!--",
+    "prp-review-id: pr-77",
+    "pr: 77",
+    "base: main",
+    "head: issue-5-x",
+    "reviewed: 2026-09-14T00:00:00.000Z",
+    `reviewed_head: ${head}`,
+    "verdict: READY TO MERGE",
+    "open_findings: 0",
+    "scopes: [tests]",
+    "publication: pending",
+    "-->",
+    "",
+    "## Ready to merge",
+  ].join("\n");
+}
+
+test("p3b: publica y verifica la URL releyendo comentarios", async () => {
+  const calls: Array<{ cmd: string; args: readonly string[] }> = [];
+  const written: Array<{ file: string; body: string }> = [];
+  let commented = false;
+  const run = async (
+    cmd: string,
+    args: readonly string[],
+    _opts: { cwd: string; timeoutMs: number },
+  ) => {
+    calls.push({ cmd, args });
+    if (cmd === "git") return { stdout: "abc123\n", stderr: "" };
+    if (cmd === "gh" && args[1] === "comment") {
+      commented = true;
+      return { stdout: `${P3B_URL}\n`, stderr: "" };
+    }
+    if (cmd === "gh" && args[1] === "view") {
+      return {
+        stdout: JSON.stringify({
+          comments: commented ? [{ body: p3bCommentBody("abc123"), url: P3B_URL }] : [],
+        }),
+        stderr: "",
+      };
+    }
+    throw new Error(`unexpected: ${cmd} ${args.join(" ")}`);
+  };
+  const got = await publishReviewReport({
+    repoPath: "/r/wt",
+    prNumber: 77,
+    branch: "issue-5-x",
+    body: P3B_LOCAL,
+    run,
+    writeBodyFile: (file, body) => {
+      written.push({ file, body });
+    },
+    unlinkBodyFile: () => {},
+  });
+  assert.deepEqual(got, { ok: true, url: P3B_URL, duplicate: false });
+  assert.equal(written.length, 1);
+  assert.ok(written[0]?.body.includes("prp-review-id: pr-77"));
+  assert.ok(written[0]?.body.includes("reviewed_head: abc123"));
+  assert.ok(written[0]?.body.includes("pr: 77"));
+});
+
+test("p3b: marcador del mismo head se reutiliza sin comentar", async () => {
+  let comments = 0;
+  const run = async (cmd: string, args: readonly string[]) => {
+    if (cmd === "git") return { stdout: "abc123\n", stderr: "" };
+    if (cmd === "gh" && args[1] === "view") {
+      return {
+        stdout: JSON.stringify({
+          comments: [{ body: p3bCommentBody("abc123"), url: P3B_URL }],
+        }),
+        stderr: "",
+      };
+    }
+    if (cmd === "gh" && args[1] === "comment") {
+      comments += 1;
+      return { stdout: `${P3B_URL}\n`, stderr: "" };
+    }
+    throw new Error("unexpected");
+  };
+  const got = await publishReviewReport({
+    repoPath: "/r/wt",
+    prNumber: 77,
+    branch: "issue-5-x",
+    body: P3B_LOCAL,
+    run,
+    writeBodyFile: () => {},
+    unlinkBodyFile: () => {},
+  });
+  assert.deepEqual(got, { ok: true, url: P3B_URL, duplicate: true });
+  assert.equal(comments, 0);
+});
+
+test("p3b: sin confirmación del marcador no se reporta URL", async () => {
+  const run = async (cmd: string, args: readonly string[]) => {
+    if (cmd === "git") return { stdout: "abc123\n", stderr: "" };
+    if (cmd === "gh" && args[1] === "comment") return { stdout: "sin url acá\n", stderr: "" };
+    if (cmd === "gh" && args[1] === "view") {
+      return { stdout: JSON.stringify({ comments: [] }), stderr: "" };
+    }
+    throw new Error("unexpected");
+  };
+  const got = await publishReviewReport({
+    repoPath: "/r/wt",
+    prNumber: 77,
+    branch: "issue-5-x",
+    body: P3B_LOCAL,
+    run,
+    writeBodyFile: () => {},
+    unlinkBodyFile: () => {},
+  });
+  assert.equal(got.ok, false);
+  assert.equal((await publishReviewReport({ repoPath: "", prNumber: 77, body: P3B_LOCAL, run })).ok, false);
+  assert.equal((await publishReviewReport({ repoPath: "/r", prNumber: 0, body: P3B_LOCAL, run })).ok, false);
+});
+
+test("p3b: readReviewReportFromTimeline toma el último con reporte", () => {
+  assert.equal(readReviewReportFromTimeline([]), null);
+  assert.equal(readReviewReportFromTimeline(null), null);
+  const got = readReviewReportFromTimeline([
+    { meta: { reviewReport: { verdict: "NEEDS FIXES" } } },
+    { meta: { reviewReport: { verdict: "READY TO MERGE", report: P3B_LOCAL } } },
+  ]);
+  assert.equal(got?.verdict, "READY TO MERGE");
+});
+
+function p3bJob(id: string, reportMeta: Record<string, unknown>): void {
+  try {
+    workItemStore.clear();
+  } catch {}
+  const created = workItemStore.create({ id, prompt: "p", worktree: "C:/tmp/p3b" });
+  try {
+    (workItemStore.get(id) as unknown as Record<string, unknown>).isolation = {
+      branch: "issue-5-x",
+      baseBranch: "main",
+      worktreePath: "C:/tmp/p3b-wt",
+      repoRoot: "C:/tmp/p3b",
+      prNumber: 77,
+      prUrl: "https://github.com/o/r/pull/77",
+      state: "pr-open",
+      createdAt: "2026-09-14T00:00:00.000Z",
+    };
+  } catch {}
+  try {
+    workItemStore.appendEvent(created.id, "runner", "review report: READY TO MERGE (0 open)", {
+      reviewReport: reportMeta,
+    } as unknown as Record<string, unknown>);
+  } catch {}
+}
+
+test("p3b: hook publica con reporte y salta sin reporte o ya publicado", async () => {
+  // Sin reporte → skip honesto, cero spawns.
+  p3bJob("job-p3b-noreport01", { verdict: "READY TO MERGE" });
+  const noCalls: Array<unknown> = [];
+  const noRun = async () => {
+    noCalls.push(1);
+    return { stdout: "", stderr: "" };
+  };
+  assert.deepEqual(await maybePublishReviewReportForJob("job-p3b-noreport01", { run: noRun }), {
+    published: false,
+    skipped: "no-report",
+  });
+  assert.equal(noCalls.length, 0);
+
+  // Ya publicado para el mismo head → skip sin gh.
+  p3bJob("job-p3b-dup01", {
+    verdict: "READY TO MERGE",
+    publication: P3B_URL,
+    publishedHead: "abc123",
+    report: P3B_LOCAL,
+  });
+  const dupCalls: Array<unknown> = [];
+  const revRun = async () => {
+    dupCalls.push(1);
+    return { stdout: "abc123\n", stderr: "" };
+  };
+  assert.deepEqual(await maybePublishReviewReportForJob("job-p3b-dup01", { run: revRun }), {
+    published: false,
+    skipped: "already-published",
+  });
+  assert.ok(dupCalls.length <= 1, "solo el probe de head, sin gh");
+
+  // Head nuevo → publica y deja evento con URL.
+  p3bJob("job-p3b-pub01", {
+    verdict: "READY TO MERGE",
+    publication: "pending",
+    report: P3B_LOCAL,
+  });
+  let commented = false;
+  const pubRun = async (cmd: string, args: readonly string[]) => {
+    if (cmd === "git") return { stdout: "def456\n", stderr: "" };
+    if (cmd === "gh" && args[1] === "comment") {
+      commented = true;
+      return { stdout: `${P3B_URL}\n`, stderr: "" };
+    }
+    if (cmd === "gh" && args[1] === "view") {
+      return {
+        stdout: JSON.stringify({
+          comments: commented ? [{ body: p3bCommentBody("def456"), url: P3B_URL }] : [],
+        }),
+        stderr: "",
+      };
+    }
+    throw new Error("unexpected");
+  };
+  const pub = await maybePublishReviewReportForJob("job-p3b-pub01", { run: pubRun });
+  assert.deepEqual(pub, { published: true, url: P3B_URL, duplicate: false });
+  const events = workItemStore.get("job-p3b-pub01")?.timeline ?? [];
+  assert.ok(events.some((e) => e.message.includes("review report published")));
+  workItemStore.clear();
+});
+
+// ── Fix L: stale-check (head actual vs reviewed_head, on-demand) ──
+
+const STALE_HEAD = "abc123def456abc123def456abc123def456abcd";
+const STALE_NEW = "def456abc123def456abc123def456abc123abcd";
+
+function staleReport(head: string): string {
+  return buildReviewReport({
+    pr: 77,
+    base: "main",
+    head: "issue-5-x",
+    reviewedHead: head,
+    verdict: "READY TO MERGE",
+    summary: "OK.",
+    findings: [],
+    validation: [],
+    scopes: [],
+    publication: P3B_URL,
+  });
+}
+
+function staleJob(id: string, report: unknown): void {
+  try {
+    workItemStore.clear();
+  } catch {}
+  const created = workItemStore.create({ id, prompt: "p", worktree: "C:/tmp/stale" });
+  try {
+    (workItemStore.get(id) as unknown as Record<string, unknown>).isolation = {
+      branch: "issue-5-x",
+      baseBranch: "main",
+      worktreePath: "C:/tmp/stale-wt",
+      repoRoot: "C:/tmp/stale",
+      prNumber: 77,
+      prUrl: "https://github.com/o/r/pull/77",
+      state: "pr-open",
+      createdAt: "2026-09-14T00:00:00.000Z",
+    };
+  } catch {}
+  try {
+    workItemStore.appendEvent(created.id, "runner", "review report: READY TO MERGE (0 open)", {
+      reviewReport: { verdict: "READY TO MERGE", openFindings: 0, publication: P3B_URL, report },
+    } as unknown as Record<string, unknown>);
+  } catch {}
+}
+
+test("stale: readPrHead lee headRefOid y valida forma", async () => {
+  const run = async () => ({
+    stdout: JSON.stringify({ headRefOid: STALE_NEW, number: 77, url: "https://github.com/o/r/pull/77" }),
+    stderr: "",
+  });
+  const got = await readPrHead({ repoPath: "/r", prNumber: 77, run });
+  assert.deepEqual(got, {
+    ok: true,
+    headOid: STALE_NEW,
+    prNumber: 77,
+    prUrl: "https://github.com/o/r/pull/77",
+  });
+  const junk = async () => ({ stdout: "not json", stderr: "" });
+  assert.equal((await readPrHead({ repoPath: "/r", prNumber: 77, run: junk })).ok, false);
+  const noOid = async () => ({ stdout: JSON.stringify({ number: 77 }), stderr: "" });
+  assert.equal((await readPrHead({ repoPath: "/r", prNumber: 77, run: noOid })).ok, false);
+  assert.equal((await readPrHead({ repoPath: "", prNumber: 77, run })).ok, false);
+});
+
+test("stale: mismo head → fresh, sin evento", async () => {
+  staleJob("job-stale-fresh01", staleReport(STALE_HEAD));
+  const run = async (cmd: string) => {
+    if (cmd === "git") return { stdout: `${STALE_HEAD}\n`, stderr: "" };
+    return {
+      stdout: JSON.stringify({ headRefOid: STALE_HEAD, number: 77 }),
+      stderr: "",
+    };
+  };
+  const got = await checkReviewStale("job-stale-fresh01", { run });
+  assert.deepEqual(got, {
+    checked: true,
+    stale: false,
+    reviewedHead: STALE_HEAD,
+    prNumber: 77,
+  });
+  const events = workItemStore.get("job-stale-fresh01")?.timeline ?? [];
+  assert.ok(!events.some((e) => e.message.includes("review stale")), "fresh no emite evento");
+  workItemStore.clear();
+});
+
+test("stale: head nuevo → evento durable e idempotente", async () => {
+  staleJob("job-stale-old01", staleReport(STALE_HEAD));
+  const run = async (cmd: string) => {
+    if (cmd === "git") return { stdout: `${STALE_NEW}\n`, stderr: "" };
+    return {
+      stdout: JSON.stringify({ headRefOid: STALE_NEW, number: 77 }),
+      stderr: "",
+    };
+  };
+  const first = await checkReviewStale("job-stale-old01", { run });
+  assert.deepEqual(first, {
+    checked: true,
+    stale: true,
+    reviewedHead: STALE_HEAD,
+    currentHead: STALE_NEW,
+    prNumber: 77,
+  });
+  const second = await checkReviewStale("job-stale-old01", { run });
+  assert.deepEqual(second, first, "segunda llamada no duplica");
+  const events = workItemStore.get("job-stale-old01")?.timeline ?? [];
+  assert.equal(
+    events.filter((e) => e.message.includes("review stale")).length,
+    1,
+    "un solo evento de stale",
+  );
+  workItemStore.clear();
+});
+
+test("stale: sin reporte, sin publish o gh caído → unchecked honesto", async () => {
+  staleJob("job-stale-norep01", { verdict: "x" } as unknown as Record<string, unknown>);
+  const run = async () => ({ stdout: "{}", stderr: "" });
+  assert.deepEqual(await checkReviewStale("job-stale-norep01", { run }), {
+    checked: false,
+    reason: "no-report",
+  });
+  staleJob(
+    "job-stale-nopub01",
+    buildReviewReport({
+      pr: 0, base: "m", head: "h", verdict: "READY TO MERGE",
+      summary: "x", findings: [], validation: [], scopes: [],
+    }),
+  );
+  assert.deepEqual(await checkReviewStale("job-stale-nopub01", { run }), {
+    checked: false,
+    reason: "not-published",
+  });
+  staleJob("job-stale-nogh01", staleReport(STALE_HEAD));
+  const badRun = async () => {
+    throw new Error("gh: command not found");
+  };
+  assert.deepEqual(await checkReviewStale("job-stale-nogh01", { run: badRun }), {
+    checked: false,
+    reason: "head-unreadable",
+  });
+  assert.deepEqual(await checkReviewStale("job-no-existe", { run }), {
+    checked: false,
+    reason: "unknown-job",
+  });
   workItemStore.clear();
 });

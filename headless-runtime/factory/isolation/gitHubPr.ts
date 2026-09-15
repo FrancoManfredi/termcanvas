@@ -20,6 +20,7 @@ import path from "node:path";
 import { workItemStore } from "../../workItem/workItemStore";
 import type { WorkItem } from "../../../shared/types/workItem";
 import { buildPrBody, buildPrTitle, prGuard, parseIssueTitleFromPrompt, type PrBodyDetails } from "./isolationStore";
+import { refreshReviewReportMeta, parseReviewReportMeta } from "../../review/reviewReport";
 
 /** Bound G02: `git push -u origin <branch>`, single attempt. */
 export const GIT_PUSH_TIMEOUT_MS = 30000;
@@ -44,6 +45,12 @@ export const GH_PR_CLOSE_TIMEOUT_MS = 15000;
 
 /** Bound for best-effort post-create labeling (`gh pr edit --add-label`). */
 export const GH_PR_LABEL_TIMEOUT_MS = 15000;
+
+/** Bound G07: `gh pr comment` + comment verification, single attempt each. */
+export const GH_PR_COMMENT_TIMEOUT_MS = 30000;
+
+/** Bound for the publish head probe (`git rev-parse <branch>`). */
+export const GIT_REV_PARSE_TIMEOUT_MS = 10000;
 
 /** Cycle label for a brand-new reviewable PR (canvas parity). */
 const REVIEW_LABEL_PENDING = "review:pendiente";
@@ -149,7 +156,18 @@ export interface OpenPrForJobInput {
 }
 
 export type OpenPrForJobResult =
-  | { ok: true; prNumber: number; prUrl: string }
+  | {
+      ok: true;
+      prNumber: number;
+      prUrl: string;
+      /** True when the PR already existed open (reused, nothing created). */
+      duplicate?: true;
+      /** Post-create verification (best-effort; absent when unverifiable). */
+      state?: string;
+      base?: string;
+      head?: string;
+      draft?: boolean;
+    }
   | { ok: false; error: string; manualHint: string };
 
 function manualPushHint(branch: string): string {
@@ -222,9 +240,13 @@ export async function countBranchCommitsVsBase(input: {
 }
 
 /**
- * Worktree sucio o limpio (`git status --porcelain`, trimmed). Null cuando
- * el probe falla (git ausente, no-repo, timeout) — el caller decide
- * fail-open. Read-only, nunca lanza.
+ * Worktree sucio o limpio (`git status --porcelain`). Recorta SOLO la cola
+ * (CRLF normalizado, sin newlines finales): el espacio líder de la primera
+ * línea es el offset `XY` del formato (`" M archivo"`) y un `trim()` completo
+ * lo borraba — `parsePorcelainPaths` cortaba de más y `js/app.js` se volvía
+ * `s/app.js` (bug run #125: `git add` explotaba y el PR jamás se abría).
+ * `""` = limpio. Null cuando el probe falla (git ausente, no-repo, timeout)
+ * — el caller decide fail-open. Read-only, nunca lanza.
  */
 export async function readWorktreeStatusPorcelain(input: {
   repoPath: string;
@@ -237,7 +259,9 @@ export async function readWorktreeStatusPorcelain(input: {
       cwd: repoPath,
       timeoutMs: GIT_STATUS_TIMEOUT_MS,
     });
-    return String(out?.stdout ?? "").trim();
+    return String(out?.stdout ?? "")
+      .replace(/\r\n/g, "\n")
+      .replace(/\s+$/, "");
   } catch {
     return null;
   }
@@ -302,8 +326,11 @@ export function isCommittablePath(p: unknown): boolean {
 
 /**
  * Parsea `git status --porcelain` a rutas relativas (pura, nunca lanza).
- * Soporta `XY PATH`, renombres `R  old -> new` (toma el destino) y paths
- * entrecomillados. Deduplica, acota a `COMMIT_MAX_PATHS`, ignora basura.
+ * Soporta `XY PATH`, renombres `R  old -> new` (toma el destino), paths
+ * entrecomillados y la primera línea sin el offset `XY` (texto que pasó por
+ * un `trim()` aguas arriba: `"M archivo"` → path desde index 2, jamás
+ * mutilado a `"s/archivo"`). Deduplica, acota a `COMMIT_MAX_PATHS`, ignora
+ * basura.
  */
 export function parsePorcelainPaths(porcelain: unknown): string[] {
   try {
@@ -312,7 +339,18 @@ export function parsePorcelainPaths(porcelain: unknown): string[] {
     const seen = new Set<string>();
     for (const rawLine of porcelain.split("\n")) {
       try {
-        const line = rawLine.length > 3 ? rawLine.slice(3) : rawLine.trim();
+        // Offset `XY` canónico: el separador vive en index 2. Si no es un
+        // espacio pero la línea abre con un status + espacio (`"M ruta"`,
+        // primera línea trimeada por un caller), el path arranca en 2.
+        const statusLost =
+          rawLine.length >= 3 &&
+          rawLine[2] !== " " &&
+          rawLine[1] === " " &&
+          "MADRCU?!".includes(rawLine[0] as string);
+        const line =
+          rawLine.length >= 3
+            ? rawLine.slice(statusLost ? 2 : 3)
+            : rawLine.trim();
         let rel = line.trim();
         if (rel.length === 0) continue;
         const arrow = rel.indexOf(" -> ");
@@ -524,6 +562,74 @@ export async function gateAcceptOnBranchDiff(
   }
 }
 
+/** Post-create verification of a fresh PR (best-effort, never throws). */
+export interface CreatedPrVerification {
+  state: string;
+  base: string;
+  head: string;
+  draft: boolean;
+  url: string;
+}
+
+export async function verifyCreatedPr(input: {
+  repoPath: string;
+  prNumber: number;
+  run: GhExecRun;
+}): Promise<CreatedPrVerification | null> {
+  try {
+    const repoPath = typeof input?.repoPath === "string" ? input.repoPath : "";
+    const n = input?.prNumber;
+    if (
+      repoPath.trim().length === 0 ||
+      typeof n !== "number" ||
+      !Number.isInteger(n) ||
+      n <= 0
+    ) {
+      return null;
+    }
+    const out = await input.run(
+      "gh",
+      [
+        "pr",
+        "view",
+        String(n),
+        "--json",
+        "number,url,state,baseRefName,headRefName,isDraft",
+      ],
+      { cwd: repoPath, timeoutMs: GH_PR_VIEW_TIMEOUT_MS },
+    );
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(String(out?.stdout ?? "").trim()) as Record<
+        string,
+        unknown
+      >;
+    } catch {
+      return null;
+    }
+    if (typeof parsed.number !== "number" || parsed.number !== n) return null;
+    if (typeof parsed.url !== "string" || parsed.url.length === 0) return null;
+    const raw = typeof parsed.state === "string" ? parsed.state.toUpperCase() : "";
+    const state =
+      raw === "OPEN"
+        ? "open"
+        : raw === "MERGED"
+          ? "merged"
+          : raw === "CLOSED"
+            ? "closed"
+            : "unknown";
+    return {
+      state,
+      base: typeof parsed.baseRefName === "string" ? parsed.baseRefName : "",
+      head: typeof parsed.headRefName === "string" ? parsed.headRefName : "",
+      draft: parsed.isDraft === true,
+      url: parsed.url as string,
+    };
+  } catch {
+    return null;
+  }
+}
+
 function parseCreateOutput(stdout: string): {
   prNumber: number;
   prUrl: string;
@@ -588,7 +694,14 @@ export async function openPrForJob(
         manualHint: "",
       };
     }
-    const title = buildPrTitle(n, input?.title);
+    // Title is outcome-first (prp-pr): the accepted outcome leads in
+    // behavior language when known; the issue title stays the fallback.
+    const detailsSummary =
+      input?.details &&
+      typeof (input.details as PrBodyDetails).summary === "string"
+        ? (input.details as PrBodyDetails).summary
+        : undefined;
+    const title = buildPrTitle(n, input?.title, detailsSummary);
     const hint = manualPrHint(branch, baseBranch, n, title);
     // Matriz de propuesta (orquestador commitea, el LLM nunca):
     // - worktree SUCIO → commit SELECTIVO del SISTEMA (identidad local
@@ -608,6 +721,31 @@ export async function openPrForJob(
     const status = await readWorktreeStatusPorcelain({ repoPath, run }).catch(
       () => null,
     );
+    // Anti-duplicate (prp-pr): an open PR for this branch is reused, never
+    // recreated. The lookup is best-effort: an unreadable answer fails open
+    // to the push/PR attempt below (its error stays honest).
+    try {
+      const existing = await readPrState({ repoPath, branch, run }).catch(
+        () => null,
+      );
+      if (
+        existing !== null &&
+        existing.ok &&
+        existing.state === "open" &&
+        typeof existing.prNumber === "number" &&
+        typeof existing.prUrl === "string" &&
+        existing.prUrl.length > 0
+      ) {
+        return {
+          ok: true,
+          prNumber: existing.prNumber,
+          prUrl: existing.prUrl,
+          duplicate: true,
+        };
+      }
+    } catch {
+      // best-effort; fall through to the push/PR attempt
+    }
     if (status !== "" && status !== null) {
       const committed = await commitWorktreeChanges({
         repoPath,
@@ -708,10 +846,29 @@ export async function openPrForJob(
         manualHint: `gh pr view ${branch} --json number,url`,
       };
     }
+    // Post-create verification (prp-pr): read the PR back and confirm it
+    // exists with the intended head. Best-effort: never blocks the handoff.
+    const verified = await verifyCreatedPr({
+      repoPath,
+      prNumber: parsed.prNumber,
+      run,
+    }).catch(() => null);
     // The PR exists now: tag it pendiente best-effort so the panel can
     // derive it without a live watcher (factory path has no terminal).
     await applyPendingLabelBestEffort(run, repoPath, parsed.prNumber);
-    return { ok: true, prNumber: parsed.prNumber, prUrl: parsed.prUrl };
+    return {
+      ok: true,
+      prNumber: parsed.prNumber,
+      prUrl: parsed.prUrl,
+      ...(verified !== null
+        ? {
+            state: verified.state,
+            ...(verified.base.length > 0 ? { base: verified.base } : {}),
+            ...(verified.head.length > 0 ? { head: verified.head } : {}),
+            draft: verified.draft,
+          }
+        : {}),
+    };
   } catch (e) {
     return { ok: false, error: sliceError(e), manualHint: "" };
   }
@@ -896,14 +1053,591 @@ export async function readPrState(input: {
   }
 }
 
+/** Head SHA del PR (`gh pr view --json headRefOid`). Espejo de readPrState. */
+export type ReadPrHeadResult =
+  | { ok: true; headOid: string; prNumber?: number; prUrl?: string }
+  | { ok: false; error: string };
+
+/**
+ * Lee el head actual del PR (best-effort, nunca lanza). Sirve al
+ * stale-check del review: compara contra el `reviewed_head` del último
+ * reporte canónico.
+ */
+export async function readPrHead(input: {
+  repoPath: string;
+  prNumber?: number;
+  prUrl?: string;
+  branch?: string;
+  run?: GhExecRun;
+}): Promise<ReadPrHeadResult> {
+  const run: GhExecRun = input?.run ?? defaultRun;
+  try {
+    const repoPath =
+      typeof input?.repoPath === "string" ? input.repoPath : "";
+    if (repoPath.trim().length === 0) {
+      return { ok: false, error: "repoPath is required" };
+    }
+    const sel =
+      typeof input?.prNumber === "number" &&
+      Number.isInteger(input.prNumber) &&
+      (input.prNumber as number) > 0
+        ? String(input.prNumber)
+        : typeof input?.prUrl === "string" && input.prUrl.length > 0
+          ? (input.prUrl as string)
+          : typeof input?.branch === "string" && input.branch.length > 0
+            ? (input.branch as string)
+            : "";
+    if (sel.length === 0) {
+      return { ok: false, error: "prNumber/prUrl/branch is required" };
+    }
+    const out = await run(
+      "gh",
+      ["pr", "view", sel, "--json", "headRefOid,number,url"],
+      { cwd: repoPath, timeoutMs: GH_PR_VIEW_TIMEOUT_MS },
+    );
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(String(out?.stdout ?? "").trim()) as Record<string, unknown>;
+    } catch {
+      return { ok: false, error: "pr view output unreadable" };
+    }
+    const oid = typeof parsed.headRefOid === "string" ? (parsed.headRefOid as string).trim() : "";
+    if (!/^[0-9a-f]{4,64}$/i.test(oid)) {
+      return { ok: false, error: "pr head unreadable" };
+    }
+    const res: { ok: true; headOid: string; prNumber?: number; prUrl?: string } = {
+      ok: true,
+      headOid: oid,
+    };
+    if (
+      typeof parsed.number === "number" &&
+      Number.isInteger(parsed.number) &&
+      (parsed.number as number) > 0
+    ) {
+      res.prNumber = parsed.number as number;
+    }
+    if (typeof parsed.url === "string" && (parsed.url as string).length > 0) {
+      res.prUrl = parsed.url as string;
+    }
+    return res;
+  } catch (e) {
+    return { ok: false, error: sliceError(e) };
+  }
+}
+
+/** Resultado del stale-check del review (on-demand, nunca automático). */
+export type ReviewStaleOutcome =
+  | { checked: true; stale: boolean; reviewedHead: string; currentHead?: string; prNumber: number }
+  | { checked: false; reason: string };
+
+/**
+ * Fix L — compara el head actual del PR contra el `reviewed_head` del
+ * último reporte canónico del timeline. Divergencia → evento durable
+ * `review stale` (el panel lo muestra vía Activity) y el veredicto
+ * publicado queda explícitamente vencido. Sin reporte, sin PR publicado
+ * o con `gh` caído → `{checked:false}` honesto (fail-open, sin evento).
+ * Re-review siempre a pedido humano, nunca automático: cero timers,
+ * cero polling. Nunca lanza.
+ */
+export async function checkReviewStale(
+  jobId: unknown,
+  opts?: { repoPath?: unknown; prNumber?: unknown; run?: GhExecRun },
+): Promise<ReviewStaleOutcome> {
+  try {
+    if (typeof jobId !== "string" || jobId.length === 0) {
+      return { checked: false, reason: "unknown-job" };
+    }
+    const job = workItemStore.get(jobId);
+    if (!job) return { checked: false, reason: "unknown-job" };
+    const stored = readReviewReportFromTimeline(
+      (job as unknown as { timeline?: unknown }).timeline,
+    );
+    if (!stored || typeof stored.report !== "string") {
+      return { checked: false, reason: "no-report" };
+    }
+    const meta = parseReviewReportMeta(stored.report as string);
+    if (!meta) return { checked: false, reason: "no-meta" };
+    if (!/^https?:\/\/\S+$/.test(meta.publication)) {
+      return { checked: false, reason: "not-published" };
+    }
+    if (meta.reviewed_head === "" || meta.reviewed_head === "unknown") {
+      return { checked: false, reason: "no-reviewed-head" };
+    }
+    const iso = (job as WorkItem).isolation as unknown as Record<string, unknown> | undefined;
+    const repoPath =
+      typeof opts?.repoPath === "string" && (opts.repoPath as string).length > 0
+        ? (opts.repoPath as string)
+        : iso && typeof iso.worktreePath === "string"
+          ? (iso.worktreePath as string)
+          : "";
+    const prNumber =
+      typeof opts?.prNumber === "number" && Number.isInteger(opts.prNumber)
+        ? (opts.prNumber as number)
+        : iso && typeof iso.prNumber === "number"
+          ? (iso.prNumber as number)
+          : meta.pr > 0
+            ? meta.pr
+            : 0;
+    if (repoPath.trim().length === 0 || prNumber <= 0) {
+      return { checked: false, reason: "no-pr-target" };
+    }
+    const run: GhExecRun = opts?.run ?? defaultRun;
+    const head = await readPrHead({ repoPath, prNumber, run }).catch(() => null);
+    if (!head || !head.ok) {
+      return { checked: false, reason: "head-unreadable" };
+    }
+    if (head.headOid.toLowerCase() === meta.reviewed_head.toLowerCase()) {
+      return { checked: true, stale: false, reviewedHead: meta.reviewed_head, prNumber };
+    }
+    // Idempotencia: la misma divergencia ya quedó registrada → no duplicar.
+    try {
+      const timeline = (job as unknown as { timeline?: unknown }).timeline;
+      if (Array.isArray(timeline)) {
+        const dup = [...timeline].reverse().find((e) => {
+          try {
+            const m = (e as Record<string, unknown> | null)?.meta as unknown;
+            if (!m || typeof m !== "object" || Array.isArray(m)) return false;
+            const s = (m as Record<string, unknown>).reviewStale as unknown;
+            if (!s || typeof s !== "object" || Array.isArray(s)) return false;
+            const rec = s as Record<string, unknown>;
+            return (
+              rec.currentHead === head.headOid &&
+              (rec as Record<string, unknown>).reviewedHead === meta.reviewed_head
+            );
+          } catch {
+            return false;
+          }
+        });
+        if (dup) {
+          return {
+            checked: true,
+            stale: true,
+            reviewedHead: meta.reviewed_head,
+            currentHead: head.headOid,
+            prNumber,
+          };
+        }
+      }
+    } catch {
+      // best-effort; sigue al evento
+    }
+    const short = (sha: string): string => sha.slice(0, 12);
+    try {
+      workItemStore.appendEvent(
+        jobId,
+        "system",
+        `review stale — new head since ${short(meta.reviewed_head)} (current ${short(head.headOid)}): el veredicto publicado vale para el head revisado, pedí re-review antes de mergear`,
+        {
+          reviewStale: {
+            reviewedHead: meta.reviewed_head,
+            currentHead: head.headOid,
+            prNumber,
+          },
+        } as unknown as Record<string, unknown>,
+      );
+    } catch {
+      // best-effort; el resultado igual informa stale
+    }
+    return {
+      checked: true,
+      stale: true,
+      reviewedHead: meta.reviewed_head,
+      currentHead: head.headOid,
+      prNumber,
+    };
+  } catch {
+    return { checked: false, reason: "stale-check-failed" };
+  }
+}
+
+/**
+ * P3b — publicación del review report canónico en el PR (siempre,
+ * best-effort, nunca bloquea el handoff).
+ *
+ * Idempotencia por head: el comentario lleva `prp-review-id: pr-N` más
+ * `reviewed_head: <sha>`; si ese marcador ya existe en los comentarios
+ * del PR se reutiliza su URL sin comentar de nuevo. La URL solo se
+ * reporta cuando el comentario se verifica releyendo el PR (nunca
+ * inventada). Todo exportado nunca lanza.
+ */
+
+export interface PublishReviewInput {
+  readonly repoPath: string;
+  readonly prNumber: number;
+  readonly branch?: unknown;
+  readonly headSha?: unknown;
+  readonly body: string;
+  readonly run?: GhExecRun;
+  readonly writeBodyFile?: (file: string, body: string) => void;
+  readonly unlinkBodyFile?: (file: string) => void;
+}
+
+export type PublishReviewResult =
+  | { ok: true; url: string; duplicate: boolean }
+  | { ok: false; error: string };
+
+interface PrCommentLike {
+  body: string;
+  url: string;
+}
+
+/** Lee los comentarios del PR (`gh pr view --comments`). Null si ilegible. */
+async function readPrComments(input: {
+  repoPath: string;
+  prNumber: number;
+  run: GhExecRun;
+}): Promise<PrCommentLike[] | null> {
+  try {
+    const out = await input.run(
+      "gh",
+      ["pr", "view", String(input.prNumber), "--json", "comments"],
+      { cwd: input.repoPath, timeoutMs: GH_PR_VIEW_TIMEOUT_MS },
+    );
+    let parsed: Record<string, unknown>;
+    try {
+      parsed = JSON.parse(String(out?.stdout ?? "").trim()) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+    const list = parsed.comments;
+    if (!Array.isArray(list)) return null;
+    return list
+      .map((c) => {
+        try {
+          if (!c || typeof c !== "object" || Array.isArray(c)) return null;
+          const rec = c as Record<string, unknown>;
+          if (typeof rec.body !== "string") return null;
+          return {
+            body: rec.body as string,
+            url: typeof rec.url === "string" ? (rec.url as string) : "",
+          };
+        } catch {
+          return null;
+        }
+      })
+      .filter((c): c is PrCommentLike => c !== null)
+      .slice(0, 100);
+  } catch {
+    return null;
+  }
+}
+
+/** Head SHA de la rama (`git rev-parse`). "unknown" cuando no se resuelve. */
+async function resolvePublishHead(input: {
+  repoPath: string;
+  branch: string;
+  run: GhExecRun;
+}): Promise<string> {
+  try {
+    if (input.branch.trim().length === 0) return "unknown";
+    const out = await input.run("git", ["rev-parse", input.branch], {
+      cwd: input.repoPath,
+      timeoutMs: GIT_REV_PARSE_TIMEOUT_MS,
+    });
+    const sha = String(out?.stdout ?? "").trim();
+    return /^[0-9a-f]{4,64}$/i.test(sha) ? sha : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+function reviewMarker(prNumber: number, head: string): { idMark: string; headMark: string } {
+  return {
+    idMark: `prp-review-id: pr-${prNumber}`,
+    headMark: `reviewed_head: ${head}`,
+  };
+}
+
+/**
+ * Publica el reporte en el PR y verifica la URL releyendo los comentarios.
+ * Nunca lanza.
+ */
+export async function publishReviewReport(
+  input: PublishReviewInput,
+): Promise<PublishReviewResult> {
+  const run: GhExecRun = input?.run ?? defaultRun;
+  const writeFile =
+    input?.writeBodyFile ??
+    ((file: string, body: string) => {
+      fs.writeFileSync(file, body, "utf-8");
+    });
+  const unlinkFile =
+    input?.unlinkBodyFile ??
+    ((file: string) => {
+      fs.unlinkSync(file);
+    });
+  try {
+    const repoPath = typeof input?.repoPath === "string" ? input.repoPath : "";
+    const n = input?.prNumber;
+    const body = typeof input?.body === "string" ? input.body : "";
+    if (
+      repoPath.trim().length === 0 ||
+      typeof n !== "number" ||
+      !Number.isInteger(n) ||
+      n <= 0 ||
+      body.trim().length === 0
+    ) {
+      return { ok: false, error: "repoPath/prNumber/body are required" };
+    }
+    const branch = typeof input?.branch === "string" ? input.branch : "";
+    const head =
+      typeof input?.headSha === "string" && (input.headSha as string).trim().length > 0
+        ? (input.headSha as string).trim().slice(0, 120)
+        : await resolvePublishHead({ repoPath, branch, run }).catch(() => "unknown");
+    const { idMark, headMark } = reviewMarker(n, head);
+    const finalBody = refreshReviewReportMeta(body, { pr: n, reviewedHead: head });
+    // Idempotencia: el marcador de este head ya publicado se reutiliza.
+    try {
+      const existing = await readPrComments({ repoPath, prNumber: n, run }).catch(
+        () => null,
+      );
+      const hit = (existing ?? []).find(
+        (c) => c.body.includes(idMark) && c.body.includes(headMark),
+      );
+      if (hit && hit.url.length > 0) {
+        return { ok: true, url: hit.url, duplicate: true };
+      }
+    } catch {
+      // best-effort; sigue al comment
+    }
+    const bodyFile = path.join(
+      os.tmpdir(),
+      `termcanvas-review-${n}-${Date.now().toString(36)}.md`,
+    );
+    try {
+      writeFile(bodyFile, finalBody);
+    } catch (e) {
+      return {
+        ok: false,
+        error: sliceError(
+          `review body write failed: ${e instanceof Error ? e.message : String(e)}`,
+        ),
+      };
+    }
+    let commentStdout = "";
+    try {
+      const created = await run("gh", ["pr", "comment", String(n), "--body-file", bodyFile], {
+        cwd: repoPath,
+        timeoutMs: GH_PR_COMMENT_TIMEOUT_MS,
+      });
+      commentStdout = String(created?.stdout ?? "");
+    } catch (e) {
+      try {
+        unlinkFile(bodyFile);
+      } catch {
+        // Best-effort temp cleanup.
+      }
+      return {
+        ok: false,
+        error: sliceError(
+          `pr comment failed: ${e instanceof Error ? e.message : String(e)}`,
+        ),
+      };
+    }
+    try {
+      unlinkFile(bodyFile);
+    } catch {
+      // Best-effort temp cleanup.
+    }
+    // Verificación: el marcador debe existir en los comentarios del PR.
+    // La URL sale del stdout del comment o del comentario verificado.
+    const urlHit = commentStdout.match(/https?:\/\/\S+/);
+    const stdoutUrl = urlHit ? urlHit[0].replace(/[),.;]+$/, "") : "";
+    try {
+      const after = await readPrComments({ repoPath, prNumber: n, run }).catch(
+        () => null,
+      );
+      const confirmed = (after ?? []).find(
+        (c) => c.body.includes(idMark) && c.body.includes(headMark),
+      );
+      if (!confirmed) {
+        return { ok: false, error: "review comment not confirmed on the PR (publication pending)" };
+      }
+      const url = stdoutUrl.length > 0 ? stdoutUrl : confirmed.url;
+      if (url.length === 0) {
+        return { ok: false, error: "review comment confirmed but url unreadable (publication pending)" };
+      }
+      return { ok: true, url, duplicate: false };
+    } catch {
+      return { ok: false, error: "review comment verification failed (publication pending)" };
+    }
+  } catch (e) {
+    return { ok: false, error: sliceError(e) };
+  }
+}
+
+/** Outcome del publish post-Complete (best-effort, idempotente por head). */
+export type PublishReviewOutcome =
+  | { published: true; url: string; duplicate: boolean }
+  | { published: false; skipped?: string; error?: string };
+
+/**
+ * Lee el último `reviewReport` del timeline (lo escribe el espejo del
+ * engine en P3a). Null cuando no hay reporte canónico. Puro, nunca lanza.
+ */
+export function readReviewReportFromTimeline(
+  timeline: unknown,
+): { verdict?: unknown; openFindings?: unknown; publication?: unknown; publishedHead?: unknown; report?: unknown } | null {
+  try {
+    if (!Array.isArray(timeline)) return null;
+    const entries = [...timeline].reverse();
+    const found = entries
+      .map((e) => {
+        try {
+          const meta = (e as Record<string, unknown> | null)?.meta as unknown;
+          if (!meta || typeof meta !== "object" || Array.isArray(meta)) return null;
+          const holder = (meta as Record<string, unknown>).reviewReport;
+          if (!holder || typeof holder !== "object" || Array.isArray(holder)) return null;
+          const rec = holder as Record<string, unknown>;
+          return typeof rec.report === "string" && rec.report !== "" ? rec : null;
+        } catch {
+          return null;
+        }
+      })
+      .filter((x): x is Record<string, unknown> => x !== null)
+      .at(0);
+    if (!found) return null;
+    return found as {
+      verdict?: unknown;
+      openFindings?: unknown;
+      publication?: unknown;
+      publishedHead?: unknown;
+      report?: unknown;
+    } | null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Post-`Complete`: publica el reporte canónico en el PR, siempre que haya
+ * reporte y PR. Idempotente por head SHA (mismo head ya publicado → skip).
+ * Best-effort: un publish fallido deja `publication: pending` y nunca
+ * voltea el handoff del PR. Nunca lanza.
+ */
+export async function maybePublishReviewReportForJob(
+  jobId: unknown,
+  opts?: { repoPath?: unknown; prNumber?: unknown; branch?: unknown; run?: GhExecRun },
+): Promise<PublishReviewOutcome> {
+  try {
+    if (typeof jobId !== "string" || jobId.length === 0) {
+      return { published: false, skipped: "bad-id" };
+    }
+    const job = workItemStore.get(jobId);
+    if (!job) return { published: false, skipped: "unknown-job" };
+    const stored = readReviewReportFromTimeline(
+      (job as unknown as { timeline?: unknown }).timeline,
+    );
+    if (!stored || typeof stored.report !== "string") {
+      return { published: false, skipped: "no-report" };
+    }
+    const iso = (job as WorkItem).isolation as unknown as Record<string, unknown> | undefined;
+    const repoPath =
+      typeof opts?.repoPath === "string" && (opts.repoPath as string).length > 0
+        ? (opts.repoPath as string)
+        : iso && typeof iso.worktreePath === "string"
+          ? (iso.worktreePath as string)
+          : "";
+    const branch =
+      typeof opts?.branch === "string" && (opts.branch as string).length > 0
+        ? (opts.branch as string)
+        : iso && typeof iso.branch === "string"
+          ? (iso.branch as string)
+          : "";
+    const prNumber =
+      typeof opts?.prNumber === "number" && Number.isInteger(opts.prNumber)
+        ? (opts.prNumber as number)
+        : iso && typeof iso.prNumber === "number"
+          ? (iso.prNumber as number)
+          : 0;
+    if (repoPath.trim().length === 0 || prNumber <= 0) {
+      return { published: false, skipped: "no-pr-target" };
+    }
+    const run: GhExecRun = opts?.run ?? defaultRun;
+    const head = await resolvePublishHead({ repoPath, branch, run }).catch(
+      () => "unknown",
+    );
+    const prevPub = typeof stored.publication === "string" ? stored.publication : "";
+    const prevHead = typeof stored.publishedHead === "string" ? stored.publishedHead : "";
+    if (/^https?:\/\/\S+$/.test(prevPub) && prevHead !== "" && prevHead === head) {
+      return { published: false, skipped: "already-published" };
+    }
+    const res = await publishReviewReport({
+      repoPath,
+      prNumber,
+      branch,
+      headSha: head,
+      body: stored.report as string,
+      run,
+    });
+    if (!res.ok) {
+      try {
+        workItemStore.appendEvent(
+          jobId,
+          "system",
+          `review report publish failed: ${res.error}`.slice(0, 500),
+          { reviewReport: { ...stored, publication: "pending" } } as unknown as Record<
+            string,
+            unknown
+          >,
+        );
+      } catch {
+        // best-effort
+      }
+      return { published: false, error: res.error };
+    }
+    const refreshed = refreshReviewReportMeta(stored.report as string, {
+      pr: prNumber,
+      reviewedHead: head,
+      publication: res.url,
+    });
+    try {
+      const dir = (job as unknown as { dir?: unknown }).dir;
+      if (typeof dir === "string" && dir.length > 0) {
+        fs.writeFileSync(path.join(dir, "review-report.md"), refreshed, "utf-8");
+      }
+    } catch {
+      // archivo best-effort: el evento durable es el registro
+    }
+    try {
+      workItemStore.appendEvent(
+        jobId,
+        "system",
+        res.duplicate
+          ? `review report already published ${res.url} (reused)`
+          : `review report published ${res.url}`,
+        {
+          reviewReport: {
+            ...(stored as Record<string, unknown>),
+            publication: res.url,
+            publishedHead: head,
+            report: refreshed.slice(0, 20000),
+          },
+        } as unknown as Record<string, unknown>,
+      );
+    } catch {
+      // best-effort
+    }
+    return { published: true, url: res.url, duplicate: res.duplicate };
+  } catch (e) {
+    try {
+      return {
+        published: false,
+        error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+      };
+    } catch {
+      return { published: false, error: "publish hook failed" };
+    }
+  }
+}
+
 /**
  * Abandon path (NO es merge: cerrar sin mergear no completa nada — la regla
  * Warp "ninguna primitiva que complete un PR" sigue intacta, el merge humano
  * sigue solo en Electron/GitHub UI). Cierra el PR abierto del job/branch
  * para el teardown del discard. Idempotente: PR ya cerrado/ausente →
  * `closed: false` honesto, nunca error. Nunca lanza.
- */
-export interface ClosePrForJobInput {
+ */export interface ClosePrForJobInput {
   readonly repoPath: string;
   readonly prNumber?: number;
   readonly branch?: string;
@@ -987,7 +1721,12 @@ export type CompletedPrOutcome =
  * verification report from the timeline. All optional — a junk job still
  * gets the honest minimal PR. Puro, nunca lanza.
  */
-function buildPrDetailsFromJob(job: unknown): {
+/**
+ * Detalles del PR desde el job: summary del review aceptado, archivos,
+ * verificación y reporte del implement (timeline). Exportado para tests.
+ * Puro, nunca lanza.
+ */
+export function buildPrDetailsFromJob(job: unknown): {
   title: string | undefined;
   details: PrBodyDetails;
 } {
@@ -997,9 +1736,15 @@ function buildPrDetailsFromJob(job: unknown): {
       prompt?: unknown;
       lastReview?: Record<string, unknown> | null;
       timeline?: Array<{ meta?: Record<string, unknown> }>;
+      isolation?: {
+        branch?: unknown;
+        baseBranch?: unknown;
+      } | null;
     };
     let createdFiles: string[] = [];
     let verification: unknown = null;
+    let implementReport = "";
+    let planUrl: string | undefined;
     const rev = [...(rec.timeline ?? [])].reverse();
     for (const e of rev) {
       const m = e?.meta;
@@ -1010,13 +1755,39 @@ function buildPrDetailsFromJob(job: unknown): {
       if (createdFiles.length === 0 && Array.isArray(m.createdFiles)) {
         createdFiles = (m.createdFiles as unknown[]).map(String).slice(0, 50);
       }
-      if (verification && createdFiles.length > 0) break;
+      if (
+        implementReport === "" &&
+        typeof m.implementReport === "string" &&
+        m.implementReport.trim() !== ""
+      ) {
+        implementReport = m.implementReport.slice(0, 3000);
+      }
+      // Verified published-plan URL only (local paths never qualify; the
+      // body renderer re-validates the http(s) shape before printing).
+      if (planUrl === undefined) {
+        const cand =
+          typeof m.planPublication === "string"
+            ? m.planPublication
+            : typeof m.planUrl === "string"
+              ? m.planUrl
+              : "";
+        if (/^https?:\/\/\S+$/.test(cand.trim())) planUrl = cand.trim().slice(0, 500);
+      }
+      if (verification && createdFiles.length > 0 && implementReport !== "" && planUrl !== undefined) break;
     }
     const review =
       rec.lastReview && typeof rec.lastReview === "object" ? rec.lastReview : null;
     const summary = typeof review?.summary === "string" ? review.summary : undefined;
     const reviewer =
       typeof review?.reviewerModel === "string" ? review.reviewerModel : undefined;
+    const branch =
+      rec.isolation && typeof rec.isolation.branch === "string"
+        ? rec.isolation.branch
+        : undefined;
+    const baseBranch =
+      rec.isolation && typeof rec.isolation.baseBranch === "string"
+        ? rec.isolation.baseBranch
+        : undefined;
     return {
       title: undefined,
       details: {
@@ -1024,6 +1795,10 @@ function buildPrDetailsFromJob(job: unknown): {
         ...(reviewer ? { reviewer } : {}),
         ...(createdFiles.length > 0 ? { files: createdFiles } : {}),
         ...(verification ? { verification } : {}),
+        ...(implementReport !== "" ? { implementReport } : {}),
+        ...(branch ? { branch } : {}),
+        ...(baseBranch ? { baseBranch } : {}),
+        ...(planUrl ? { planUrl } : {}),
       },
     };
   } catch {
@@ -1125,11 +1900,21 @@ export async function maybeOpenPrForCompletedJob(
       } catch {
         // Memory fast path is best-effort; the timeline event is the record.
       }
+      // Verified routing detail (prp-pr): base <- head plus ready/draft
+      // when the post-create verification answered; duplicates are explicit.
+      const route =
+        typeof res.base === "string" && res.base.length > 0
+          ? ` (${res.base} <- ${typeof res.head === "string" && res.head.length > 0 ? res.head : iso.branch}, ${res.draft === true ? "draft" : "ready"})`
+          : "";
+      const msg =
+        res.duplicate === true
+          ? `pr already exists #${res.prNumber} ${res.prUrl} (reused, no duplicate opened)`
+          : `pr opened #${res.prNumber} ${res.prUrl}${route}`;
       try {
         workItemStore.appendEvent(
           jobId,
           "system",
-          `pr opened #${res.prNumber} ${res.prUrl}`,
+          msg,
           { pr: { prNumber: res.prNumber, prUrl: res.prUrl } } as unknown as Record<
             string,
             unknown
@@ -1137,6 +1922,17 @@ export async function maybeOpenPrForCompletedJob(
         );
       } catch {
         // The memory record above already carries the outcome.
+      }
+      // P3b (default publicar-siempre): con el PR asegurado, publica el
+      // reporte canónico de review. Best-effort: nunca voltea el handoff.
+      try {
+        await maybePublishReviewReportForJob(jobId, {
+          repoPath: iso.worktreePath,
+          prNumber: res.prNumber,
+          branch: iso.branch,
+        });
+      } catch {
+        // best-effort; el PR ya quedó abierto
       }
       return { opened: true, prNumber: res.prNumber, prUrl: res.prUrl };
     }
@@ -1163,3 +1959,6 @@ export async function maybeOpenPrForCompletedJob(
     }
   }
 }
+
+/** Runner por defecto re-exportado para el reconciliador de merges. */
+export { defaultRun as defaultGhRun };

@@ -1,29 +1,44 @@
 /**
- * Alta de agentes en la UI (pura, sin DOM): validación del modal,
- * conversión a input del POST y dirty-check de los campos frontmatter.
- * Los componentes TSX se importan por sus exports puros (cero render).
+ * Alta de agentes en la UI (pura, sin DOM): validación del diálogo,
+ * conversión a input del POST y mapeo draft ↔ frontmatter del editor.
+ * Los componentes TSX no se renderizan acá (cero DOM).
  */
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  AGENT_STAGE_OPTIONS,
   AGENT_TOOL_OPTIONS,
-  AGENT_TYPE_OPTIONS,
   EMPTY_NEW_AGENT_FORM,
   newAgentFormToInput,
   validateNewAgentInput,
   type NewAgentForm,
-} from "../src/features/warpPanel/components/newAgentForm.ts";
-import { isAgentConfigDirty } from "../src/features/warpPanel/components/AgentConfig.tsx";
-import type { AgentConfigData } from "../src/features/warpPanel/types.ts";
+} from "../src/features/warpPanel/agents/newAgentForm.ts";
+import {
+  draftFromAgentFull,
+  draftToFrontmatter,
+  formatModelShort,
+  isAgentDraftDirty,
+  normalizeToolsForUi,
+} from "../src/features/warpPanel/agents/agentDraft.ts";
+import type { AgentDraft } from "../src/features/warpPanel/types.ts";
 
 function form(over: Partial<NewAgentForm> = {}): NewAgentForm {
   return { ...EMPTY_NEW_AGENT_FORM, tools: [...EMPTY_NEW_AGENT_FORM.tools], ...over };
 }
 
-test("vocabularios UI espejan el backend (tools + stages)", () => {
-  assert.deepEqual([...AGENT_TOOL_OPTIONS].sort(), ["bash", "edit", "glob", "grep", "read", "webfetch", "write"]);
-  assert.deepEqual([...AGENT_STAGE_OPTIONS].sort(), ["none", "post-build", "post-review", "pre-build"]);
+test("vocabulario UI: tools reales de opencode, sin write legacy", () => {
+  assert.deepEqual([...AGENT_TOOL_OPTIONS].sort(), [
+    "bash",
+    "edit",
+    "glob",
+    "grep",
+    "list",
+    "lsp",
+    "read",
+    "todowrite",
+    "webfetch",
+    "websearch",
+  ]);
+  assert.ok(!AGENT_TOOL_OPTIONS.includes("write"), "write no se ofrece (se pliega en edit)");
 });
 
 test("validate: vacío pide nombre+descripción+prompt", () => {
@@ -47,60 +62,114 @@ test("validate: nombre con espacios/slash y model sin barra fallan", () => {
   );
 });
 
-test("validate: tools desconocidas y stage inválido fallan", () => {
+test("validate: tools desconocidas fallan", () => {
   const bad = validateNewAgentInput(
-    form({ name: "t", description: "d", body: "b", tools: ["read", "rayos-x"], stage: "al-espacio" }),
+    form({ name: "t", description: "d", body: "b", tools: ["read", "rayos-x"] }),
   );
   assert.ok(bad.some((e) => e.includes("Unknown tools")));
-  assert.ok(bad.some((e) => e.includes("Invalid stage")));
 });
 
-test("tipos elegibles: VERIFY y CUSTOM (core singletons fuera)", () => {
-  assert.deepEqual([...AGENT_TYPE_OPTIONS], ["VERIFY", "CUSTOM"]);
-});
-
-test("newAgentFormToInput: VERIFY + advisory por default, blocking solo con stage", () => {
+test("newAgentFormToInput: CUSTOM + primary + hooks neutralizados", () => {
   const input = newAgentFormToInput(form({ name: " tester ", description: "d", body: "b" }));
   assert.equal(input.name, "tester");
-  assert.equal((input.frontmatter as Record<string, unknown>).agentType, "VERIFY");
+  assert.equal((input.frontmatter as Record<string, unknown>).agentType, "CUSTOM");
+  assert.equal((input.frontmatter as Record<string, unknown>).mode, "primary");
+  assert.equal((input.frontmatter as Record<string, unknown>).stage, "none");
   assert.equal((input.frontmatter as Record<string, unknown>).blocking, false);
+  assert.deepEqual((input.frontmatter as Record<string, unknown>).skills, [], "sin skills");
+  assert.deepEqual((input.frontmatter as Record<string, unknown>).mcps, [], "sin mcps");
   assert.ok(!("model" in (input.frontmatter as Record<string, unknown>)), "model vacío no viaja");
-  const blocking = newAgentFormToInput(
-    form({ name: "t", description: "d", body: "b", stage: "post-review", blocking: true, model: "x/y" }),
+  const withModel = newAgentFormToInput(
+    form({ name: "t", description: "d", body: "b", model: "opencode/big-pickle" }),
   );
-  assert.equal((blocking.frontmatter as Record<string, unknown>).blocking, true);
-  assert.equal((blocking.frontmatter as Record<string, unknown>).model, "x/y");
-  const none = newAgentFormToInput(
-    form({ name: "t", description: "d", body: "b", stage: "none", blocking: true }),
-  );
-  assert.equal((none.frontmatter as Record<string, unknown>).blocking, false, "sin stage no hay blocking");
-  const custom = newAgentFormToInput(
-    form({ name: "t", description: "d", body: "b", agentType: "CUSTOM" }),
-  );
-  assert.equal((custom.frontmatter as Record<string, unknown>).agentType, "CUSTOM");
-  assert.deepEqual(validateNewAgentInput(form({ name: "t", description: "d", body: "b", agentType: "JEFECITO" })).some((e) => e.includes("agent type")), true);
+  assert.equal((withModel.frontmatter as Record<string, unknown>).model, "opencode/big-pickle");
 });
 
-function config(overrides: Partial<AgentConfigData> = {}): AgentConfigData {
+function draft(over: Partial<AgentDraft> = {}): AgentDraft {
   return {
+    name: "triage",
     description: "d",
+    agentType: "TRIAGE",
+    model: "",
+    icon: "",
+    tools: ["read"],
+    skills: [],
     mcps: [],
-    secrets: [],
-    harness: "Warp",
-    model: "m",
-    runner: "default",
-    host: "Warp hosted",
     prompt: "p",
-    automations: [],
-    ...overrides,
+    ...over,
   };
 }
 
-test("isAgentConfigDirty: campos frontmatter nuevos participan", () => {
-  assert.equal(isAgentConfigDirty(config(), config()), false);
-  assert.equal(isAgentConfigDirty(config(), config({ tools: ["read"] })), true);
-  assert.equal(isAgentConfigDirty(config({ tools: ["read", "bash"] }), config({ tools: ["bash", "read"] })), false, "orden no ensucia");
-  assert.equal(isAgentConfigDirty(config(), config({ stage: "post-review" })), true);
-  assert.equal(isAgentConfigDirty(config(), config({ blocking: true })), true);
-  assert.equal(isAgentConfigDirty(config(), config({ mode: "subagent" })), true);
+test("normalizeToolsForUi: write legacy se pliega en edit, desconocidas fuera", () => {
+  assert.deepEqual(normalizeToolsForUi(["read", "write", "edit"]), ["read", "edit"]);
+  assert.deepEqual(normalizeToolsForUi("{read,glob}"), ["read", "glob"]);
+  assert.deepEqual(normalizeToolsForUi({ read: true, task: true }), ["read"], "task no entra");
+  assert.deepEqual(normalizeToolsForUi(undefined), []);
+});
+
+test("draftFromAgentFull: normaliza frontmatter real (arrays, record y crudos)", () => {
+  const parsed = draftFromAgentFull({
+    name: "review",
+    body: "Body real.",
+    frontmatter: {
+      description: "  Revisa.  ",
+      agentType: "review",
+      model: "opencode/big-pickle",
+      icon: "shield",
+      tools: { read: true, write: true, glob: true },
+      skills: ["code-review", "repo-conventions"],
+      mcps: "{github, fs}",
+    },
+  });
+  assert.equal(parsed.description, "Revisa.");
+  assert.equal(parsed.agentType, "REVIEW", "el tipo se preserva interno (oculto en UI)");
+  assert.equal(parsed.icon, "shield");
+  assert.deepEqual(parsed.tools.sort(), ["edit", "glob", "read"], "write se pliega en edit");
+  assert.deepEqual(parsed.skills, ["code-review", "repo-conventions"]);
+  assert.deepEqual(parsed.mcps, ["github", "fs"]);
+  assert.equal(parsed.prompt, "Body real.");
+
+  const junk = draftFromAgentFull({ name: "x", body: "b", frontmatter: { agentType: "NOPE" } } as never);
+  assert.equal(junk.agentType, "CUSTOM", "tipo inválido cae a CUSTOM");
+  assert.equal(junk.icon, "");
+});
+
+test("draftToFrontmatter: primary siempre, hooks neutralizados, icon viaja", () => {
+  const fm = draftToFrontmatter(draft({ model: " p/m ", icon: "shield" }));
+  assert.deepEqual(fm, {
+    description: "d",
+    agentType: "TRIAGE",
+    mode: "primary",
+    model: "p/m",
+    icon: "shield",
+    tools: ["read"],
+    skills: [],
+    mcps: [],
+    stage: "none",
+    blocking: false,
+  });
+});
+
+test("isAgentDraftDirty: campos visibles, orden-insensible; junk = dirty", () => {
+  assert.equal(isAgentDraftDirty(draft(), draft()), false);
+  assert.equal(isAgentDraftDirty(draft(), draft({ tools: ["read", "bash"] })), true);
+  assert.equal(
+    isAgentDraftDirty(draft({ tools: ["read", "bash"] }), draft({ tools: ["bash", "read"] })),
+    false,
+    "orden no ensucia",
+  );
+  assert.equal(isAgentDraftDirty(draft(), draft({ skills: ["code-review"] })), true);
+  assert.equal(isAgentDraftDirty(draft(), draft({ mcps: ["github"] })), true);
+  assert.equal(isAgentDraftDirty(draft(), draft({ model: "x/y" })), true);
+  assert.equal(isAgentDraftDirty(draft(), draft({ icon: "shield" })), true);
+  assert.equal(isAgentDraftDirty(draft(), draft({ prompt: "otro" })), true);
+  assert.equal(isAgentDraftDirty(draft(), draft({ description: "x" })), true);
+  assert.equal(isAgentDraftDirty(draft(), null as unknown as AgentDraft), true);
+  assert.equal(isAgentDraftDirty(null as unknown as AgentDraft, draft()), true);
+});
+
+test("formatModelShort: model id sin provider, default para vacío", () => {
+  assert.equal(formatModelShort("opencode-go/muse-spark-1.3-contributor"), "muse-spark-1.3-contributor");
+  assert.equal(formatModelShort("auto-disjoint"), "auto-disjoint");
+  assert.equal(formatModelShort(""), "default");
 });

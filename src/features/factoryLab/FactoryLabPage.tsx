@@ -38,12 +38,12 @@ const DEFAULT_PROMPT = "Test Factory tildes ñ → 😀";
 const FETCH_TIMEOUT_MS = 3000;
 const PROVIDER_TIMEOUT_MS = 5000;
 
-const DEFAULT_MODEL_VALUE = "opencode-go/muse-spark-1.2-contributor";
+const DEFAULT_MODEL_VALUE = "opencode-go/muse-spark-1.3-contributor";
 
 const REQUIRED_MODELS: Array<{ providerID: string; modelID: string }> = [
   { providerID: "opencode", modelID: "big-pickle" },
   { providerID: "opencode", modelID: "muse-spark-1.2" },
-  { providerID: "opencode-go", modelID: "muse-spark-1.2-contributor" },
+  { providerID: "opencode-go", modelID: "muse-spark-1.3-contributor" },
 ];
 
 function resolveWindowActiveProjectPath(): string | null {
@@ -266,7 +266,7 @@ function buildMinimalCatalog(): ModelCatalog {
       id: "opencode-go",
       name: "opencode-go",
       models: {
-        "muse-spark-1.2-contributor": { id: "muse-spark-1.2-contributor", providerID: "opencode-go", name: "muse-spark-1.2-contributor", status: "active", variants: {} },
+        "muse-spark-1.3-contributor": { id: "muse-spark-1.3-contributor", providerID: "opencode-go", name: "muse-spark-1.3-contributor", status: "active", variants: {} },
         "glm-5.2": { id: "glm-5.2", providerID: "opencode-go", name: "glm-5.2", status: "active", variants: {} },
       },
     },
@@ -742,7 +742,7 @@ export function FactoryLabPage() {
       } else {
         // fallback defensivo: si no hay slash, usa default
         providerID = "opencode-go";
-        modelID = "muse-spark-1.2-contributor";
+        modelID = "muse-spark-1.3-contributor";
       }
 
       const body: Record<string, unknown> = {

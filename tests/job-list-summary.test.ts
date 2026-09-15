@@ -153,6 +153,46 @@ test("summary passes extras through and never throws on junk", () => {
   assert.equal(typeof junk, "object");
 });
 
+test("summary projects engine gate and run (aditivo, sanidad)", () => {
+  const s = toListSummary(
+    item({
+      status: "Review",
+      engineGate: {
+        nodeId: "approve",
+        kind: "spec-approval",
+        message: "aprobar?",
+        runId: "run-b1",
+        attempt: 2,
+      },
+      engineRun: {
+        runId: "run-b1",
+        workflow: "factory-default",
+        status: "running",
+        currentNodeId: "approve",
+        completedNodes: ["triage", "spec"],
+        nodes: ["triage", "spec", "approve", "implement", "verify", "review"],
+        nodeSessions: { triage: "ses-t1", spec: "ses-s1" },
+        startedAt: "2026-09-01T00:00:00.000Z",
+      },
+    }),
+  );
+  const gate = s.engineGate as Record<string, unknown>;
+  assert.equal(gate.kind, "spec-approval");
+  assert.equal(gate.nodeId, "approve");
+  assert.equal(gate.message, "aprobar?");
+  assert.equal(gate.attempt, 2);
+  const run = s.engineRun as Record<string, unknown>;
+  assert.equal(run.status, "running");
+  assert.equal(run.currentNodeId, "approve");
+  assert.deepEqual(run.completedNodes, ["triage", "spec"]);
+  assert.deepEqual(run.nodeSessions, { triage: "ses-t1", spec: "ses-s1" });
+  const junk = toListSummary(
+    item({ engineGate: { kind: "spec-approval" }, engineRun: "nope" }),
+  );
+  assert.ok(!("engineGate" in junk), "gate incompleto no se proyecta");
+  assert.ok(!("engineRun" in junk), "run basura no se proyecta");
+});
+
 // ─── projectSummaryTimeline: una pasada, cuatro proyecciones ─────────────
 
 function entry(meta: Record<string, unknown>, at = "2026-09-02T00:00:00.000Z"): unknown {

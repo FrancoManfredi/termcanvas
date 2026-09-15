@@ -57,9 +57,6 @@ async function main(): Promise<void> {
   const config = loadConfig();
   const startedAt = Date.now();
 
-  console.log(
-    `[headless] starting — workspace=${config.workspaceDir} taskId=${config.taskId ?? "none"}`,
-  );
 
   const ptyManager = new PtyManager();
   const telemetryService = new TelemetryService();
@@ -89,7 +86,6 @@ async function main(): Promise<void> {
       secret: process.env.TERMCANVAS_WEBHOOK_SECRET?.trim() || undefined,
       eventBus,
     });
-    console.log(`[headless] webhook service active -> ${webhookUrl}`);
   }
 
   // State persistence
@@ -105,7 +101,6 @@ async function main(): Promise<void> {
         for (const project of sanitizeProjectsForPersistence(saved)) {
           projectStore.addProject(project);
         }
-        console.log(`[headless] loaded ${saved.length} project(s) from state`);
       }
     }
   } catch (err) {
@@ -131,7 +126,6 @@ async function main(): Promise<void> {
   });
 
   const port = await apiServer.start(config.port, config.host);
-  console.log(`[headless] API server listening on ${config.host}:${port}`);
 
   eventBus.emit("server_started", {
     host: config.host,
@@ -144,7 +138,6 @@ async function main(): Promise<void> {
     fs.mkdirSync(dataDir, { recursive: true });
   }
   fs.writeFileSync(portFile, String(port), "utf-8");
-  console.log(`[headless] port file written: ${portFile}`);
 
   let heartbeat: Heartbeat | null = null;
   if (config.resultCallbackUrl) {
@@ -168,9 +161,6 @@ async function main(): Promise<void> {
       },
     });
     heartbeat.start();
-    console.log(
-      `[headless] heartbeat started -> ${config.resultCallbackUrl}`,
-    );
   }
 
   // Graceful shutdown

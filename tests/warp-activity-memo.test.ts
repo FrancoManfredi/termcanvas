@@ -23,8 +23,11 @@ import assert from "node:assert/strict";
 import {
   activityFactoryStageText,
   declaredHookAgentsByLane,
+  factoryEngineStageText,
   humanizeAgentName,
+  isDiscardableSection,
   isSameActivityCardProps,
+  parseGateMessage,
   type ActivityCardProps,
 } from "../src/features/warpPanel/components/ActivityPanel.tsx";
 import { shouldForcePrLookupOnMount, splitBatches } from "../src/features/warpPanel/hooks/useActivity.ts";
@@ -97,6 +100,27 @@ test("rendered content changes re-render", () => {
     false,
   );
   assert.equal(
+    isSameActivityCardProps(
+      props(),
+      props({
+        issue: row({
+          factory: {
+            stage: "building",
+            stageLabel: "Building",
+            engineRun: {
+              runId: "r",
+              workflow: "w",
+              status: "running",
+              currentNodeId: "build.review",
+            },
+          },
+        }),
+      }),
+    ),
+    false,
+    "cambio de nodo del engine re-renderiza",
+  );
+  assert.equal(
     isSameActivityCardProps(props(), props({ selected: true })),
     false,
   );
@@ -137,6 +161,77 @@ test("activityFactoryStageText prefers stageLabel, falls back to stage", () => {
     activityFactoryStageText({} as unknown as Issue),
     null,
   );
+});
+
+test("activityFactoryStageText: el nodo EXACTO del engine manda sobre el legacy", () => {
+  const withRun = row({
+    factory: {
+      stage: "building",
+      stageLabel: "Building",
+      engineRun: {
+        runId: "run-1",
+        workflow: "fix-issue",
+        status: "running",
+        currentNodeId: "build.review",
+      },
+    },
+  });
+  assert.equal(activityFactoryStageText(withRun), "review", "nodo namespaced → leaf");
+  const withGate = row({
+    factory: {
+      stage: "building",
+      stageLabel: "Building",
+      engineGateNodeId: "build.verify",
+      engineRun: { runId: "run-1", workflow: "fix-issue", status: "running" },
+    },
+  });
+  assert.equal(activityFactoryStageText(withGate), "verify", "gate pendiente manda");
+  assert.equal(
+    activityFactoryStageText(
+      row({
+        factory: {
+          stageLabel: "Review",
+          engineRun: { runId: "r", workflow: "w", status: "running" },
+        },
+      }),
+    ),
+    "Review",
+    "sin nodo actual cae al stageLabel del daemon",
+  );
+  assert.equal(
+    factoryEngineStageText({ engineRun: "junk" }),
+    null,
+    "junk honesto",
+  );
+  assert.equal(
+    factoryEngineStageText({ engineRun: { currentNodeId: "build.implement" } }),
+    "implement",
+  );
+});
+
+test("parseGateMessage: separa prosa + summary/steps del JSON embebido", () => {
+  const parts = parseGateMessage(
+    'Aprobar el plan y continuar?\n\n{"summary":"Evitar pérdida","steps":["Uno","Dos"]}',
+  );
+  assert.equal(parts.text, "Aprobar el plan y continuar?");
+  assert.equal(parts.summary, "Evitar pérdida");
+  assert.deepEqual(parts.steps, ["Uno", "Dos"]);
+
+  assert.deepEqual(parseGateMessage("Aprobar la spec"), {
+    text: "Aprobar la spec",
+    summary: null,
+    steps: [],
+  });
+  assert.deepEqual(parseGateMessage(null), { text: "", summary: null, steps: [] });
+  assert.equal(parseGateMessage("{ no json }").text, "{ no json }", "JSON roto → crudo");
+  assert.equal(
+    parseGateMessage('X {"foo":1}').text,
+    'X {"foo":1}',
+    "JSON sin summary/steps → crudo",
+  );
+  const braceText = parseGateMessage('Usar {llaves} y luego {"summary":"s","steps":["p"]}');
+  assert.equal(braceText.summary, "s", "llaves en la prosa no bloquean el payload real");
+  assert.equal(braceText.steps.length, 1);
 });
 
 test("humanizeAgentName: slug → nombre visible (Title Case), junk a ''", () => {
@@ -189,4 +284,32 @@ test("splitBatches chunks mount lookups without losing rows", () => {
   assert.deepEqual(splitBatches([1, 2], 12), [[1, 2]]);
   assert.deepEqual(splitBatches(null as never, 12), []);
   assert.deepEqual(splitBatches([1, 2, 3], 0), [[1, 2, 3]]);
+});
+
+test("onDiscardRequest estabilidad: ref estable baila, closure nuevo re-renderiza", () => {
+  const stableMenu = (_issue: Issue, _x: number, _y: number): void => {};
+  assert.equal(
+    isSameActivityCardProps(
+      props({ onDiscardRequest: stableMenu }),
+      props({ onDiscardRequest: stableMenu }),
+    ),
+    true,
+  );
+  assert.equal(
+    isSameActivityCardProps(
+      props({ onDiscardRequest: stableMenu }),
+      props({ onDiscardRequest: (_issue: Issue, _x: number, _y: number): void => {} }),
+    ),
+    false,
+  );
+});
+
+test("isDiscardableSection: In Progress / Awaiting / Ready solamente", () => {
+  assert.equal(isDiscardableSection("in-progress"), true);
+  assert.equal(isDiscardableSection("awaiting"), true);
+  assert.equal(isDiscardableSection("ready"), true);
+  assert.equal(isDiscardableSection("pending"), false);
+  assert.equal(isDiscardableSection("done"), false);
+  assert.equal(isDiscardableSection(null), false);
+  assert.equal(isDiscardableSection("junk"), false);
 });

@@ -164,10 +164,14 @@ export type JobDiscardOk = {
 export type JobDiscardErr = { ok: false; code: 404 | 409 | 500; error: string };
 
 /**
- * Teardown completo del job parado. Guards: 404 ausente, 409 solo si ya
- * está descartado (Cancelled) o si está en curso (lock de Building). Los
- * demás estados (incluido Complete, caso "No mergear") se aceptan: todo se
- * borra igual. Nunca lanza.
+ * Teardown completo del job parado. Guards: 404 ausente; 409 SOLO si está
+ * en curso (lock de Building y estado NO terminal). Los estados terminales
+ * (Cancelled/Complete) SIEMPRE se descartan: antes Cancelled devolvía 409
+ * "job already discarded" y el job quedaba para siempre en el store
+ * (resucitaba en cada restore y no había forma de borrarlo desde la UI).
+ * Un terminal nunca está "en curso" (una cancelación puede dejar el lock
+ * unos ms). El doble-discard no necesita guard: el job se borra, el
+ * segundo intento da 404. Nunca lanza.
  */
 export async function requestJobDiscard(
   id: unknown,
@@ -182,15 +186,15 @@ export async function requestJobDiscard(
     if (!wi) {
       return { ok: false, code: 404, error: `job not found: ${id}` };
     }
-    if (wi.status === "Cancelled") {
-      return { ok: false, code: 409, error: "job already discarded" };
-    }
-    try {
-      if (workItemStore.isBuildingLocked(id)) {
-        return { ok: false, code: 409, error: "job en curso: no se puede descartar mientras corre" };
+    const terminal = wi.status === "Cancelled" || wi.status === "Complete";
+    if (!terminal) {
+      try {
+        if (workItemStore.isBuildingLocked(id)) {
+          return { ok: false, code: 409, error: "job en curso: no se puede descartar mientras corre" };
+        }
+      } catch {
+        // ante duda se sigue (los guards de abajo frenan igual si cambió)
       }
-    } catch {
-      // ante duda se sigue (los guards de abajo frenan igual si cambió)
     }
 
     const cleaned: JobDiscardSummary = {

@@ -13,6 +13,7 @@ returns: verdict
 outcome_field: green
 nodes:
   - id: verdict
+    agent: review
     prompt: |
       Revisá el cambio con foco en "$INPUTS.lens".
 

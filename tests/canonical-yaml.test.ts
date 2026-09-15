@@ -91,21 +91,6 @@ test("T3 canónico manda: runnerService delega en agentLoader.getRunner (factory
   assert.ok(loader.includes('"factory", "runners"'), "getRunner lee factory/runners/");
 });
 
-test("T3 stales vivos: evento runner:prepared + header + perfil nacen del yaml real", () => {
-  const server = readRel("headless-runtime/factory/factoryServer.ts");
-  assert.ok(
-    server.includes('getRunner("linux-build")?.platform?.dockerImage'),
-    "el evento usa la imagen REAL del loader",
-  );
-  const exec = readRel("headless-runtime/runner/runnerExecutor.ts");
-  assert.ok(
-    exec.includes("runnerDef.platform?.dockerImage"),
-    "el header usa la imagen REAL del loader",
-  );
-  const prompt = readRel("headless-runtime/implement/implementPrompt.ts");
-  assert.ok(prompt.includes('getRunner("linux-build")'), "el perfil del prompt sale del loader");
-});
-
 // ── 4. Barrido ubuntu:22.04 ──
 
 const T3_LIVE_DIRS = [

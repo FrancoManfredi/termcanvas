@@ -32,7 +32,7 @@ import {
   IMPLEMENT_PROGRESS_POLL_MS,
 } from "../../shared/types/implement";
 import type { WorkItem } from "../../shared/types/workItem";
-import { opencodeServerManager } from "../opencodeServerManager";
+import { opencodeServerManager, ensureAgentTurnClient } from "../opencodeServerManager";
 import { toolsetFor } from "../runner/toolPolicy";
 import { getDefaultModels, parseModelRef } from "../factory/agentLoader";
 import { sessionAgentArgs } from "../factory/opencodeAgentSync";
@@ -50,7 +50,7 @@ function effectiveBuilderDefaultModel(): { providerID: string; modelID: string }
     const parsed = parseModelRef(getDefaultModels().builder);
     if (parsed) return parsed;
   } catch {}
-  return { providerID: "opencode-go", modelID: "muse-spark-1.2-contributor" };
+  return { providerID: "opencode-go", modelID: "muse-spark-1.3-contributor" };
 }
 
 // Warp tools for Implement (Gao §1.2) — single source: runner/toolPolicy.
@@ -381,9 +381,14 @@ export class ImplementAgent {
     if (!hasSdk) throw new Error("SDK no disponible");
 
     // Usar OpencodeServerManager efímero (20274) — Warp Gao: dueño único
+    // Turno con config fresca: singleton si sigue vigente; server scopeado
+    // recién nacido si la config de agentes cambió (fix PLATANO fuera del engine).
+    let closeTurn: () => void = () => {};
     let client: unknown;
     try {
-      client = await opencodeServerManager.ensureClient();
+      const turn = await ensureAgentTurnClient();
+      client = turn.client;
+      closeTurn = turn.close;
     } catch (e) {
       // Fallback a getClient si ensure falla pero hay cliente existente
       const existing = opencodeServerManager.getClient() as unknown;
@@ -633,6 +638,13 @@ export class ImplementAgent {
       ).res;
     } catch {
       return "";
+    } finally {
+      // Teardown del server efímero del turno (no-op si corrió en el singleton).
+      try {
+        closeTurn();
+      } catch {
+        // best-effort
+      }
     }
   }
 

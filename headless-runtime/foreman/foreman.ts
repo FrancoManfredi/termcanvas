@@ -12,12 +12,12 @@ import type { ModelRef, WorkItem } from "../../shared/types/workItem";
 import { foremanLogStore } from "./foremanLog";
 import { buildForemanPrompt, parseForemanLLMResponse, foremanJsonSchema, type ForemanExtraContext } from "./foremanPrompt";
 import { readStructuredRaw, structuredFormat } from "../llm/structuredOutput";
-import { opencodeServerManager } from "../opencodeServerManager";
+import { opencodeServerManager, ensureAgentTurnClient } from "../opencodeServerManager";
 import { toolsetFor } from "../runner/toolPolicy";
 import { getDefaultModels, parseModelRef } from "../factory/agentLoader";
 import { sessionAgentArgs } from "../factory/opencodeAgentSync";
 import {
-  GLOBAL_AGENT_FUSE_MS,
+  globalAgentFuseMs,
   SESSION_CREATE_FUSE_MS,
   attemptJsonPromptOnce,
   parseSessionId,
@@ -39,7 +39,7 @@ export interface WorkItemInput {
 
 // Modelo default del foreman (el fusible de turnos es el global
 // GLOBAL_AGENT_FUSE_MS de agentTransport: sin timeouts por fase).
-const FOREMAN_DEFAULT_MODEL_REF = "opencode-go/muse-spark-1.2-contributor";
+const FOREMAN_DEFAULT_MODEL_REF = "opencode-go/muse-spark-1.3-contributor";
 
 /** Modelo default del foreman: yaml (defaultModels.foreman) cuando válido, constante cuando no. Nunca lanza. */
 function effectiveForemanDefaultModel(): { providerID: string; modelID: string } {
@@ -51,7 +51,7 @@ function effectiveForemanDefaultModel(): { providerID: string; modelID: string }
   }
   const fallback = parseModelRef(FOREMAN_DEFAULT_MODEL_REF);
   if (fallback) return fallback;
-  return { providerID: "opencode-go", modelID: "muse-spark-1.2-contributor" };
+  return { providerID: "opencode-go", modelID: "muse-spark-1.3-contributor" };
 }
 const OPENCODE_WEB_URL = "http://127.0.0.1:4096";
 const OPENCODE_WEB_FALLBACK_URL = "http://127.0.0.1:40014";
@@ -234,6 +234,9 @@ export class ForemanService {
       };
     }
 
+    // Turno con config fresca: singleton si sigue vigente; server scopeado
+    // recién nacido si la config de agentes cambió (fix PLATANO fuera del engine).
+    let closeTurn: () => void = () => {};
     try {
       const hasSdk = await detectOpencodeSdk();
       if (!hasSdk) {
@@ -277,17 +280,28 @@ export class ForemanService {
         return fallbackForReason("createOpencodeClient no encontrado", 0.5);
       }
 
-      const workingUrl = await getWorkingOpencodeUrlForeman();
-      // Si manager tiene cliente efímero, preferirlo; sino crear cliente efímero con baseUrl
+      // Turno con config fresca (fix PLATANO fuera del engine): el helper
+      // devuelve el singleton si sigue vigente o un server recién nacido si
+      // la config de agentes cambió. Si el helper falla, cae a la discovery
+      // legacy de URL (manager/4096/40014) como siempre.
       let client: ReturnType<CreateClientFn> | null = null;
       try {
-        const mgrClient = opencodeServerManager.getClient() as unknown as ReturnType<CreateClientFn> | null;
-        if (mgrClient && opencodeServerManager.getUrl() === workingUrl) {
-          client = mgrClient as ReturnType<CreateClientFn>;
-        }
+        const turn = await ensureAgentTurnClient();
+        client = turn.client as unknown as ReturnType<CreateClientFn>;
+        closeTurn = turn.close;
       } catch {}
       if (!client) {
-        client = createClient({ baseUrl: workingUrl } as unknown as Record<string, unknown>);
+        const workingUrl = await getWorkingOpencodeUrlForeman();
+        // Si manager tiene cliente efímero, preferirlo; sino crear cliente efímero con baseUrl
+        try {
+          const mgrClient = opencodeServerManager.getClient() as unknown as ReturnType<CreateClientFn> | null;
+          if (mgrClient && opencodeServerManager.getUrl() === workingUrl) {
+            client = mgrClient as ReturnType<CreateClientFn>;
+          }
+        } catch {}
+        if (!client) {
+          client = createClient({ baseUrl: workingUrl } as unknown as Record<string, unknown>);
+        }
       }
       const sessionAny = client.session as unknown as Record<string, unknown>;
       const promptFn = sessionAny.prompt as ((opts: unknown, opts2?: unknown) => Promise<unknown>) | undefined;
@@ -401,7 +415,7 @@ export class ForemanService {
                     sessionID: sid,
                     ...baseBody,
                   }),
-                GLOBAL_AGENT_FUSE_MS,
+                globalAgentFuseMs(),
                 "foreman session.promptAsync",
               );
               const extractedA = extractTextFromPromptResult(resA);
@@ -421,7 +435,7 @@ export class ForemanService {
                 if (!isModelSwitchableError(errStrA)) break;
                 continue;
               }
-              const polled = await pollForAssistantJson(sid as string, GLOBAL_AGENT_FUSE_MS);
+              const polled = await pollForAssistantJson(sid as string, globalAgentFuseMs());
               if (polled) return polled;
               lastErrorOverall = new Error("promptAsync sin respuesta visible");
             } catch (e) {
@@ -510,6 +524,13 @@ export class ForemanService {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       return fallbackForReason(`unexpected: ${msg.slice(0, 120)}`, 0.5);
+    } finally {
+      // Teardown del server efímero del turno (no-op si corrió en el singleton).
+      try {
+        closeTurn();
+      } catch {
+        // best-effort
+      }
     }
   }
 

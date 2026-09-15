@@ -23,7 +23,7 @@ import {
   parseSessionId,
   withTransportRetry,
 } from "../llm/agentTransport";
-import { opencodeServerManager } from "../opencodeServerManager";
+import { opencodeServerManager, ensureAgentTurnClient } from "../opencodeServerManager";
 import { READONLY_TOOLS, toolsetFor } from "../runner/toolPolicy";
 import { promptInSessionWithCost } from "../cost/promptWithCost";
 import { isSessionNotFoundError, promptInAgentSession, readSessionAgent } from "../sessions/agentSessions";
@@ -274,6 +274,9 @@ export class ReviewAgent {
     // Sin resolución de skills: el turno lleva solo datos y las reglas
     // viven en el system prompt del espejo. Nada se inyecta ni se traza.
 
+    // Turno con config fresca: singleton si sigue vigente; server scopeado
+    // recién nacido si la config de agentes cambió (fix PLATANO fuera del engine).
+    let closeTurn: () => void = () => {};
     try {
       // Mock de tests
       if (promptMock) {
@@ -315,7 +318,9 @@ export class ReviewAgent {
         };
       };
       try {
-        client = (await opencodeServerManager.ensureClient()) as unknown as typeof client;
+        const turn = await ensureAgentTurnClient();
+        client = turn.client as unknown as typeof client;
+        closeTurn = turn.close;
       } catch (e) {
         const existing = opencodeServerManager.getClient() as unknown as typeof client | null;
         if (!existing) {
@@ -506,6 +511,13 @@ export class ReviewAgent {
         }),
         raw: null,
       };
+    } finally {
+      // Teardown del server efímero del turno (no-op si corrió en el singleton).
+      try {
+        closeTurn();
+      } catch {
+        // best-effort
+      }
     }
   }
 }

@@ -164,6 +164,81 @@ export const HookRunSchema = z
 export type HookRun = z.infer<typeof HookRunSchema>;
 export const HookRunsSchema = z.array(HookRunSchema).max(HOOK_RUNS_MAX + 20).optional();
 
+// ── EngineGate / EngineRun (workflow engine → panel, aditivo) ──
+// El pipeline oficial es el engine (`factory-default`): el gate humano y el
+// avance del run se persisten en el work item para que el poll 2.5s los
+// proyecte sin leer el run store. Ausentes en jobs legacy (restore
+// tolerante, nunca rompe). `engineGate: null` = sin gate (se limpia al
+// responder); `engineRun: null`/ausente = sin run asociado.
+export const EngineGateSchema = z
+  .object({
+    nodeId: z.string().min(1).max(64),
+    kind: z.enum(["spec-approval", "ask-human"]),
+    message: z.string().max(2000),
+    runId: z.string().min(1).max(128),
+    attempt: z.number().int().min(1).max(10).optional(),
+  })
+  .nullable()
+  .optional();
+
+export type EngineGate = z.infer<typeof EngineGateSchema>;
+
+export const EngineRunSchema = z
+  .object({
+    runId: z.string().min(1).max(128),
+    workflow: z.string().min(1).max(128),
+    status: z.enum(["pending", "running", "completed", "failed", "cancelled"]),
+    currentNodeId: z.string().max(64).nullable().optional(),
+    completedNodes: z.array(z.string().min(1).max(64)).max(50).optional(),
+    /**
+     * Orden real de nodos del workflow (stepper del panel). Opcional:
+     * jobs viejos no lo traen (el panel cae al stepper legacy).
+     */
+    nodes: z.array(z.string().min(1).max(64)).max(50).optional(),
+    /**
+     * Sesión OpenCode por nodo del run (`nodeId → sessionId`), para que
+     * Agent Sessions muestre workflows arbitrarios sin mapeos hardcodeados.
+     */
+    nodeSessions: z.record(z.string(), z.string()).optional(),
+    /**
+     * Sesiones por ronda de nodos con múltiples ejecuciones (`loop` /
+     * `loop_group`): cada ronda de IA abre su propia sesión y
+     * `nodeSessions` solo guarda la última. Historial acotado en orden de
+     * llegada para que Agent Sessions ofrezca una entrada por ronda.
+     */
+    nodeSessionRounds: z
+      .array(
+        z.object({
+          nodeId: z.string().min(1).max(64),
+          iteration: z.number().int().min(1).max(100),
+          sessionId: z.string().min(1).max(128),
+        }),
+      )
+      .max(50)
+      .optional(),
+    /**
+     * Estado por nodo (`nodeId → estado`): fuente única del stepper de Agent
+     * Progress y de las filas de Agent Sessions. Aditivo: jobs viejos no lo
+     * traen y el panel cae a `completedNodes`/`currentNodeId`.
+     */
+    nodeStates: z
+      .record(
+        z.string(),
+        z.enum(["pending", "running", "completed", "failed", "skipped", "cancelled"]),
+      )
+      .optional(),
+    /**
+     * Agente real por nodo (`nodeId → nombre`), espejado cuando la sesión se
+     * attachea. La fila muestra la identidad que efectivamente ejecutó.
+     */
+    nodeAgents: z.record(z.string(), z.string().min(1).max(128)).optional(),
+    startedAt: z.string().max(64).optional(),
+  })
+  .nullable()
+  .optional();
+
+export type EngineRun = z.infer<typeof EngineRunSchema>;
+
 // ── Isolation (Factory jobs isolation, aditivo, restore-tolerante) ──
 // Solo jobs creados con `issueRef` válido (hook post-201 en
 // `headless-runtime/factory/factoryServer.ts`). `worktree` sigue siendo el
@@ -276,6 +351,10 @@ export const WorkItemSchema = z.object({
   // Hooks declarativos (aditivo, opcional): última corrida por hook. Jobs
   // viejos no lo tienen → undefined (restore tolerante, nunca rompe).
   hookRuns: HookRunsSchema,
+  // Engine (aditivo, opcional): gate humano pendiente y avance del run
+  // oficial. Jobs legacy no los tienen → undefined (restore tolerante).
+  engineGate: EngineGateSchema,
+  engineRun: EngineRunSchema,
 });
 
 export type WorkItem = z.infer<typeof WorkItemSchema>;
@@ -283,6 +362,9 @@ export type WorkItem = z.infer<typeof WorkItemSchema>;
 // ── State machine — Ola 4: Building(pass)→Review fire-and-forget; Review decide ──
 // Ola 4: Building → Review (pass) | Building → Triage (fail) | Building → Complete (pact legacy).
 // Review → Complete (accept) | Review → Building (revise con rondas restantes, ver MAX_REVIEW_ROUNDS) | stay Review (ask_human / rondas agotadas).
+// Cancelled → Building: reopen DELIBERADO para el re-sync del engine (un run
+// vivo que quedó con el job terminal, ej. reject + resume posterior). No hay
+// otras salidas de Cancelled/Complete.
 export const ALLOWED_TRANSITIONS: Record<
   WorkItemStatus,
   WorkItemStatus[]
@@ -293,7 +375,7 @@ export const ALLOWED_TRANSITIONS: Record<
   Building: ["Complete", "Triage", "Cancelled", "Review"],
   Review: ["Complete", "Building", "Triage", "Cancelled"],
   Complete: [],
-  Cancelled: [],
+  Cancelled: ["Building"],
 };
 
 /**
@@ -424,6 +506,14 @@ export function createWorkItemInput(params: {  id: string;
 
 /** Clave de meta del evento que marca un turno interrumpido por reinicio del daemon. */
 export const BOOT_INTERRUPTED_META_KEY = "bootInterrupted";
+
+/**
+ * Clave de meta del evento de parqueo con el ISO de la última actividad real
+ * (el `updatedAt` previo al marcador). Permite que el auto-resume distinga
+ * una interrupción fresca de un job zombi de días atrás. Opcional en
+ * marcadores viejos: sin ella el auto-resume cae al evento previo del timeline.
+ */
+export const BOOT_INTERRUPTED_AT_META_KEY = "interruptedAt";
 
 /** Clave de meta del evento que limpia la marca (el turno se retomó). */
 export const RESUMED_META_KEY = "resumed";

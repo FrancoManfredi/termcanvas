@@ -59,6 +59,19 @@ export function markFormatUnsupportedServer(): void {
 }
 
 /**
+ * Test seam: resetea el memo de capacidad. Los tests que ejercitan el
+ * fallback de 400 necesitan un estado limpio por caso (el memo es por
+ * proceso y una corrida previa lo deja marcado). Producción nunca lo llama.
+ */
+export function resetFormatUnsupportedMemoForTests(): void {
+  try {
+    formatUnsupportedMemo = false;
+  } catch {
+    // noop: sin reset, el test cae al camino ya memoizado
+  }
+}
+
+/**
  * ¿Este error es el 400 de servidor-sin-`format` (`Expected
  * OutputFormatJsonSchema, got {...}`)? Solo ese caso justifica reintentar
  * en texto plano. OJO: `StructuredOutputError` (el modelo no llamó a la

@@ -13,7 +13,7 @@ import type { ModelRef } from "../../shared/types/workItem";
 import type { TriageFindings } from "../../shared/types/triage";
 import type { SpecBrief } from "../../shared/types/spec";
 import { buildSpecPrompt, parseSpecLLMResponse, specJsonSchema } from "./specPrompt";
-import { opencodeServerManager } from "../opencodeServerManager";
+import { opencodeServerManager, ensureAgentTurnClient } from "../opencodeServerManager";
 import { READONLY_TOOLS, toolsetFor } from "../runner/toolPolicy";
 import { sessionAgentArgs } from "../factory/opencodeAgentSync";
 import { promptInSessionWithCost } from "../cost/promptWithCost";
@@ -79,6 +79,9 @@ export class SpecAgent {
       skipReason: skipReason.slice(0, 200),
     });
 
+    // Turno con config fresca: singleton si sigue vigente; server scopeado
+    // recién nacido si la config de agentes cambió (fix PLATANO fuera del engine).
+    let closeTurn: () => void = () => {};
     try {
       // Mock de tests
       if (promptMock) {
@@ -116,7 +119,9 @@ export class SpecAgent {
         };
       };
       try {
-        client = (await opencodeServerManager.ensureClient()) as unknown as typeof client;
+        const turn = await ensureAgentTurnClient();
+        client = turn.client as unknown as typeof client;
+        closeTurn = turn.close;
       } catch {
         const existing = opencodeServerManager.getClient() as unknown as typeof client | null;
         if (!existing) return skip("opencode server no disponible — se salta spec y sigue a Foreman");
@@ -285,6 +290,13 @@ export class SpecAgent {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       return { brief: null, raw: null, skipped: true, skipReason: `spec unexpected: ${msg.slice(0, 120)}` };
+    } finally {
+      // Teardown del server efímero del turno (no-op si corrió en el singleton).
+      try {
+        closeTurn();
+      } catch {
+        // best-effort
+      }
     }
   }
 }

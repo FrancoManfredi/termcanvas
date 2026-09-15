@@ -184,6 +184,26 @@ export function rotateWindow<T>(
 let seedCursor = 0;
 
 /**
+ * TTL de re-siembra por issue cuando la lookup ya cacheó `null` ("sin PR"):
+ * el daemon abrió el PR DESPUÉS de esa foto, así que el null está viejo y
+ * hay que pisarlo. La ventana evita el fake-PR storm de un PR cerrado que
+ * el daemon todavía reporta `pr-open` (máx. 1 siembra+lookup por minuto).
+ */
+const SEED_RESEED_TTL_MS = 60_000;
+
+/** Última siembra por issue (module-level, como `seedCursor`). */
+const lastSeedAtByIssue = new Map<number, number>();
+
+/** Test seam: limpia el rate-limit del seed entre casos. Nunca en prod. */
+export function resetSeedStateForTests(): void {
+  try {
+    lastSeedAtByIssue.clear();
+  } catch {
+    // noop
+  }
+}
+
+/**
  * Seeds the GitHub PR association straight from the factory daemon's own
  * record: when a job lands `isolation.prUrl`, the canvas/panel needs the
  * linked-PR state immediately (the ready-to-merge status derivation
@@ -197,7 +217,7 @@ let seedCursor = 0;
  * disparar N `gh` de golpe. La rama con-PR-nuevo sigue inmediata (evento
  * raro y sensible al tiempo).
  */
-function seedOpenPrsFromFactoryJobs(list: unknown[]): void {
+export function seedOpenPrsFromFactoryJobs(list: unknown[]): void {
   try {
     const store = useIssueReviewStore.getState();
     const ttlRefresh: number[] = [];
@@ -256,11 +276,18 @@ function seedOpenPrsFromFactoryJobs(list: unknown[]): void {
       if (!Number.isInteger(issueNumber) || issueNumber <= 0) continue;
       const existing = store.openPrsByIssue[issueNumber] ?? [];
       if (existing.some((p) => p.number === prNumber)) continue;
-      // Bridge ONLY the GitHub indexing lag of a first look: once any
-      // lookup settled this issue (`prsByIssue` defined, included null from
-      // "no PR"), respect it. Without this gate a closed PR would be
-      // re-seeded as OPEN + forced-lookup every 2.5s tick (fake-PR storm).
-      if (store.prsByIssue[issueNumber] !== undefined) continue;
+      const cached = store.prsByIssue[issueNumber];
+      // Un PR REAL cacheado o una lookup en vuelo mandan: GitHub es la
+      // fuente autoritativa y el seed jamás la pisa.
+      if (cached !== undefined && cached !== null) continue;
+      // `null` = "sin PR" cacheado ANTES de que el daemon abriera el PR
+      // (típico: la fila se miró durante el run). El daemon ya lo vio, así
+      // que el null está viejo: se re-siembra y se fuerza el lookup. La
+      // ventana por issue evita el fake-PR storm (1 siembra/min máx).
+      const now = Date.now();
+      const seededAt = lastSeedAtByIssue.get(issueNumber) ?? 0;
+      if (now - seededAt < SEED_RESEED_TTL_MS) continue;
+      lastSeedAtByIssue.set(issueNumber, now);
       const linked: LinkedPr = {
         number: prNumber,
         title: `Pull request #${prNumber}`,
@@ -270,10 +297,7 @@ function seedOpenPrsFromFactoryJobs(list: unknown[]): void {
         headRefOid: "",
       };
       store.setOpenPrs(issueNumber, [...existing, linked]);
-      const cached = store.prsByIssue[issueNumber];
-      if (cached === undefined || cached === null) {
-        store.setPrStatus(issueNumber, linked);
-      }
+      store.setPrStatus(issueNumber, linked);
       // PR recién conocido por el daemon pero GitHub aún puede no indexar
       // el `Closes #N`: marca optimista (Ready con Merge deshabilitado) +
       // un lookup forzado para reconciliar (eventual consistency).

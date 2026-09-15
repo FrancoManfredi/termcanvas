@@ -9,6 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  listAgents,
   parseAgentFilePath,
   readAgentBody,
   setMirrorTestHomeForTests,
@@ -16,6 +17,7 @@ import {
   writeAgentBody,
 } from "../headless-runtime/factory/agents/agentFileRoutes.ts";
 import { parseAgentFile } from "../headless-runtime/factory/agentLoader.ts";
+import { parseAgentSkills } from "../headless-runtime/factory/opencodeAgentSync.ts";
 import {
   createFactoryAgent,
   getFactoryAgentBody,
@@ -96,30 +98,26 @@ test("writeAgentBody: guarda solo el body y preserva el frontmatter byte por byt
   fs.rmSync(sandbox, { recursive: true, force: true });
 });
 
-test("writeAgentBody: espejo local+global verificados y mirrorSynced honesto", () => {
+test("writeAgentBody: definición factory actualizada, sin mirrors en disco", () => {
   const sandbox = makeSandbox();
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "agents-home-"));
   try {
-    setMirrorTestHomeForTests(home);
     const edited = "Solo respondé HOLA. No importa el resto.";
     const saved = writeAgentBody("triage", edited, sandbox);
     assert.equal(saved.ok, true);
     if (!saved.ok) return;
-    assert.equal(saved.value.mirrorSynced, true, "ambos espejos verificados");
-    const local = fs.readFileSync(
-      path.join(sandbox, ".opencode", "agents", "triage.md"),
+    assert.equal(saved.value.mirrorSynced, true, "synced = definición válida (sin mirrors)");
+    const def = fs.readFileSync(
+      path.join(sandbox, "agents", "triage", "agent.md"),
       "utf-8",
     );
-    const global = fs.readFileSync(
-      path.join(home, ".config", "opencode", "agents", "triage.md"),
-      "utf-8",
+    assert.ok(def.includes(edited), "agent.md con el body nuevo");
+    assert.equal(
+      fs.existsSync(path.join(sandbox, ".opencode", "agents", "triage.md")),
+      false,
+      "sin espejo local (los agentes viajan inline en el server)",
     );
-    assert.ok(local.includes(edited), "espejo local con el body nuevo");
-    assert.ok(global.includes(edited), "espejo global con el body nuevo");
   } finally {
-    setMirrorTestHomeForTests(null);
     fs.rmSync(sandbox, { recursive: true, force: true });
-    fs.rmSync(home, { recursive: true, force: true });
   }
 });
 
@@ -134,33 +132,58 @@ test("writeAgentBody: body vacío o nombre inválido → 400 sin tocar disco", (
   fs.rmSync(sandbox, { recursive: true, force: true });
 });
 
-// ── 4. Nombres cortos en el mock (lectura de fuente, sin react) ──
+// ── 4. Lista enriquecida para el índice (sandbox, sin daemon) ──
 
-test("4 principales sin skills: sin frontmatter skills ni mapa en espejo", () => {
-  for (const name of ["foreman", "triage", "spec", "implement"]) {
-    const md = fs.readFileSync(path.join(REPO_ROOT, "factory", "agents", name, "agent.md"), "utf-8");
-    assert.doesNotMatch(md, /^skills:/m, `${name}: sin skills en frontmatter`);
-    const mirror = path.join(REPO_ROOT, ".opencode", "agents", `${name}.md`);
-    if (fs.existsSync(mirror)) {
-      const out = fs.readFileSync(mirror, "utf-8");
-      assert.ok(!/^\s+skill:/m.test(out), `${name}: espejo sin mapa skill`);
-    }
+test("skills vacías (ausentes o `{}`) resuelven a cero skills", () => {
+  for (const text of [
+    "---\ndescription: a\nagentType: VERIFY\n---\nBody.\n",
+    "---\ndescription: a\nagentType: VERIFY\nskills: {}\n---\nBody.\n",
+  ]) {
+    assert.deepEqual(parseAgentSkills(parseAgentFile(text).frontmatter.skills), []);
   }
 });
 
-test("mockAgents: nombres cortos sin prefijo TermCanvas", () => {
-  const src = fs.readFileSync(
-    path.join(REPO_ROOT, "src", "features", "warpPanel", "adapters", "mockAgents.ts"),
-    "utf-8",
-  );
-  for (const short of ['name: "Foreman"', 'name: "Triage"', 'name: "Spec"', 'name: "Implement"', 'name: "Review"']) {
-    assert.ok(src.includes(short), `falta ${short}`);
+test("listAgents: metadata real del frontmatter para el índice", () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "agents-list-"));
+  try {
+    fs.mkdirSync(path.join(sandbox, "agents", "verifier"), { recursive: true });
+    fs.writeFileSync(
+      path.join(sandbox, "agents", "verifier", "agent.md"),
+      [
+        "---",
+        "description: Verifica.",
+        "agentType: VERIFY",
+        "mode: primary",
+        "model: opencode/big-pickle",
+        "tools: {read,glob}",
+        "skills: {code-review}",
+        "mcps: {github}",
+        "icon: shield",
+        "stage: post-review",
+        "blocking: true",
+        "---",
+        "",
+        "Cuerpo.",
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+    const listed = listAgents(sandbox);
+    assert.equal(listed.length, 1);
+    const row = listed[0];
+    assert.equal(row.name, "verifier");
+    assert.equal(row.agentType, "VERIFY");
+    assert.equal(row.mode, "primary");
+    assert.equal(row.model, "opencode/big-pickle");
+    assert.deepEqual(row.tools.sort(), ["glob", "read"]);
+    assert.deepEqual(row.skills, ["code-review"]);
+    assert.deepEqual(row.mcps, ["github"]);
+    assert.equal(row.icon, "shield", "el ícono viaja en la lista");
+    assert.equal(row.stage, "post-review");
+    assert.equal(row.blocking, true);
+  } finally {
+    fs.rmSync(sandbox, { recursive: true, force: true });
   }
-  assert.ok(!src.includes("TermCanvas Foreman Agent"), "sin prefijo largo en foreman");
-  assert.ok(!src.includes("TermCanvas Triage Agent"), "sin prefijo largo en triage");
-  assert.ok(!src.includes("TermCanvas Spec Agent"), "sin prefijo largo en spec");
-  assert.ok(!src.includes("TermCanvas Implement Agent"), "sin prefijo largo en implement");
-  assert.ok(!src.includes("TermCanvas Review Agent"), "sin prefijo largo en review");
 });
 
 // ── 5. Cliente: GET/PUT con fetch inyectado (offline) ──
@@ -182,18 +205,52 @@ test("getFactoryAgentBody: devuelve el body del daemon con fetch inyectado", asy
   if (res.ok) assert.equal(res.data.body, "live body");
 });
 
-test("listFactoryAgents: GET exacto devuelve la lista con fetch inyectado", async () => {
+test("listFactoryAgents: GET exacto devuelve la lista enriquecida con fetch inyectado", async () => {
   let seenUrl = "";
   const fetchFn = async (url: string) => {
     seenUrl = url;
-    return jsonResponse(200, { agents: [{ name: "playwright-tester", description: "d", agentType: "VERIFY" }] });
+    return jsonResponse(200, {
+      agents: [
+        {
+          name: "playwright-tester",
+          description: "d",
+          agentType: "VERIFY",
+          mode: "primary",
+          model: "opencode/big-pickle",
+          tools: ["read", "glob"],
+          skills: ["ui-verification"],
+          mcps: ["github"],
+          icon: "shield",
+          stage: "post-review",
+          blocking: true,
+        },
+      ],
+    });
   };
   const res = await listFactoryAgents({ fetchFn: fetchFn as never, port: 17680 });
   assert.ok(seenUrl.endsWith("/factory/agents"), seenUrl);
   assert.equal(res.ok, true);
   if (res.ok) {
     assert.equal(res.data.length, 1);
-    assert.equal(res.data[0]?.agentType, "VERIFY");
+    const row = res.data[0];
+    assert.equal(row?.agentType, "VERIFY");
+    assert.equal(row?.model, "opencode/big-pickle");
+    assert.deepEqual(row?.skills, ["ui-verification"]);
+    assert.deepEqual(row?.mcps, ["github"]);
+    assert.equal(row?.icon, "shield");
+    assert.equal(row?.blocking, true);
+  }
+  // Daemon viejo (sin metadata): defaults honestos, nunca rompe el índice.
+  const legacy = await listFactoryAgents({
+    fetchFn: (async () => jsonResponse(200, { agents: [{ name: "old", description: "", agentType: "CUSTOM" }] })) as never,
+    port: 17680,
+  });
+  assert.equal(legacy.ok, true);
+  if (legacy.ok) {
+    assert.deepEqual(legacy.data[0]?.tools, []);
+    assert.equal(legacy.data[0]?.mode, "primary");
+    assert.equal(legacy.data[0]?.icon, "");
+    assert.equal(legacy.data[0]?.stage, "none");
   }
   const bad = await listFactoryAgents({
     fetchFn: (async () => jsonResponse(200, { agents: [{ nope: 1 }] })) as never,

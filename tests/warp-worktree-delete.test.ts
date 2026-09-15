@@ -62,7 +62,7 @@ function byKind(
 
 test("describe: delete-worktree is the last action, disabled without worktree info", () => {
   const defs = describeActivityActions(baseArgs());
-  assert.equal(defs.length, 19);
+  assert.equal(defs.length, 20);
   assert.equal(defs[defs.length - 1].kind, "delete-worktree");
   const def = byKind(defs).get("delete-worktree");
   assert.equal(def?.label, "Delete Worktree");

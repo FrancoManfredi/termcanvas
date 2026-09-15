@@ -39,6 +39,25 @@ export async function executeBash(
   return { output: result.stdout.trimEnd() };
 }
 
+/**
+ * Env para ejecutar un script node. Bajo Electron (`process.versions.electron`)
+ * `process.execPath` es electron.exe: `ELECTRON_RUN_AS_NODE=1` lo hace correr
+ * como Node puro. Sin esto, un `script:` node (verify-runner) lanzaría una
+ * segunda instancia de Electron con ventanas/consola — y no ejecutaría el
+ * script con semántica Node. Puro, nunca lanza.
+ */
+export function scriptExecEnv(
+  env: NodeJS.ProcessEnv | undefined,
+  isElectron: boolean,
+): NodeJS.ProcessEnv | undefined {
+  try {
+    if (!isElectron) return env;
+    return { ...(env ?? {}), ELECTRON_RUN_AS_NODE: "1" };
+  } catch {
+    return env;
+  }
+}
+
 export async function executeScript(
   script: { code: string; runtime: "node" | "tsx" },
   ctx: NodeRunContext,
@@ -51,9 +70,12 @@ export async function executeScript(
     script.runtime === "tsx"
       ? ["--import", "tsx", scriptPath]
       : [scriptPath];
+  const isElectron = Boolean(
+    (process.versions as unknown as { electron?: string }).electron,
+  );
   const result = await runProcess(process.execPath, args, {
     cwd: ctx.cwd,
-    env: ctx.env,
+    env: scriptExecEnv(ctx.env, isElectron),
     timeoutMs: ctx.timeoutMs,
     signal: ctx.signal,
   });

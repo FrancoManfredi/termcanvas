@@ -230,3 +230,48 @@ nodes:
     /until_field requiere/,
   );
 });
+
+test("loop: node_session_attached lleva la iteración de cada ronda", async () => {
+  const { tmp, runsDir } = sandbox();
+  const yaml = `name: loop-rounds
+description: rondas
+nodes:
+  - id: work
+    loop:
+      prompt: "trabajá"
+      max_iterations: 2
+      until: NUNCA
+`;
+  let index = 0;
+  const runner: AiNodeRunner = async (req) => {
+    index += 1;
+    const sid = `s-loop-${index}`;
+    req.onSessionCreated?.(sid);
+    return { output: `w${index}`, sessionId: sid };
+  };
+  const run = await runWorkflow(loaded(yaml, tmp), {
+    cwd: tmp,
+    runsDir,
+    aiRunner: runner,
+  });
+  assert.equal(run.status, "completed");
+  const events = fs
+    .readFileSync(path.join(runsDir, run.id, "events.jsonl"), "utf-8")
+    .split("\n")
+    .filter((line) => line.trim() !== "")
+    .map(
+      (line) =>
+        JSON.parse(line) as {
+          type?: unknown;
+          nodeId?: unknown;
+          data?: { sessionId?: unknown; iteration?: unknown };
+        },
+    );
+  const attached = events.filter(
+    (event) =>
+      event.type === "node_session_attached" && event.nodeId === "work",
+  );
+  assert.equal(attached.length, 2, "una sesión por ronda del loop");
+  assert.equal(attached[0]?.data?.iteration, 1);
+  assert.equal(attached[1]?.data?.iteration, 2);
+});

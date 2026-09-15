@@ -8,6 +8,7 @@ import fs from "fs";
 import path from "path";
 import { build as esbuild, context as esbuildCtx, type Plugin as EsbuildPlugin } from "esbuild";
 import { ensureCliLauncher } from "./electron/cli-launchers";
+import { FACTORY_WATCH_EXCLUDES } from "./scripts/factory-watch-excludes.mjs";
 
 function buildPreload(): Plugin {
   const opts = {
@@ -155,13 +156,38 @@ function devFactoryDaemon(): Plugin {
       const root = path.resolve(__dirname);
       const entry = path.join(root, "headless-runtime", "factory", "factoryServer.ts");
       const watch = process.env.TERMCANVAS_FACTORY_NO_WATCH !== "1";
-      const args = ["--import", "tsx"];
-      if (watch) args.push("--watch");
-      args.push(entry);
+      // Watch explícito de tsx (subcomando `watch`): el alias `--watch` lo
+      // maneja NODE (su watcher no soporta excludes) y `--exclude` revienta
+      // con "node: bad option". El subcomando sí acepta los excludes que
+      // evitan que los writes de runtime reinicien al daemon (ver incidente).
+      const tsxCli = path.join(root, "node_modules", "tsx", "dist", "cli.mjs");
+      const args = watch
+        ? [tsxCli, "watch", ...FACTORY_WATCH_EXCLUDES.flatMap((glob) => ["--exclude", glob]), entry]
+        : ["--import", "tsx", entry];
+      // F1b: stdout/stderr del daemon a archivo. Sin esto un exit del child
+      // (crash) no deja rastro: el watch lo relanza y solo se ve el parkeo.
+      // Vive bajo .agents/ (runtime excluido del watch, no ensucia el repo).
+      let stdio: "inherit" | ["ignore", number, number] = "inherit";
+      try {
+        const logDir = path.join(root, ".agents", "factory");
+        fs.mkdirSync(logDir, { recursive: true });
+        const logPath = path.join(logDir, "daemon-dev.log");
+        const fd = fs.openSync(logPath, "a");
+        fs.appendFileSync(
+          logPath,
+          `\n=== daemon start ${new Date().toISOString()} (watch=${watch ? "on" : "off"}) ===\n`,
+          "utf-8",
+        );
+        stdio = ["ignore", fd, fd];
+        console.log(`[dev-factory-daemon] log: ${logPath}`);
+      } catch {
+        stdio = "inherit";
+      }
       try {
         child = spawn(process.execPath, args, {
           cwd: root,
-          stdio: "inherit",
+          stdio,
+          windowsHide: true,
           env: { ...process.env },
         });
         console.log(

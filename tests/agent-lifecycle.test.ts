@@ -18,7 +18,6 @@ import {
   setMirrorTestHomeForTests,
   writeAgentFull,
 } from "../headless-runtime/factory/agents/agentFileRoutes.ts";
-import { checkFactoryGlobalMirrorsInSync } from "../headless-runtime/factory/opencodeAgentSync.ts";
 
 function mkFactory(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "agent-lifecycle-"));
@@ -169,37 +168,39 @@ test("listAgents: ordenados, con description+agentType; rotos se omiten", () => 
   }
 });
 
-test("CRUD sincroniza el espejo global (el que ven los jobs) sin tocar el home real", () => {
+test("CRUD sin mirrors: factory/agents es la fuente; mirrorSynced honesto", () => {
   const root = mkFactory();
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "agent-lifecycle-home-"));
-  setMirrorTestHomeForTests(home);
   try {
     seedForemanViaCreate(root);
-    // Alta → espejos proyecto + global.
     const created = createAgentFile("tester", VERIFY_FM, VERIFY_BODY, root);
     assert.equal(created.ok, true);
-    const globalMirror = path.join(home, ".config", "opencode", "agents", "tester.md");
-    assert.ok(fs.existsSync(globalMirror), "espejo global creado");
-    assert.ok(!fs.readFileSync(globalMirror, "utf-8").includes("agentType: FOREMAN"));
-    assert.deepEqual(checkFactoryGlobalMirrorsInSync(root, home), { ok: true, diffs: [] });
-    // Edición → global al día.
+    assert.ok(
+      fs.existsSync(path.join(root, "agents", "tester", "agent.md")),
+      "definición factory creada",
+    );
+    assert.equal(
+      fs.existsSync(path.join(root, ".opencode", "agents", "tester.md")),
+      false,
+      "sin espejo local (los agentes viajan inline en el server)",
+    );
     const patched = writeAgentFull("tester", { description: "Nuevo texto" }, undefined, root);
     assert.equal(patched.ok, true);
-    assert.ok(fs.readFileSync(globalMirror, "utf-8").includes("Nuevo texto"));
-    assert.deepEqual(checkFactoryGlobalMirrorsInSync(root, home), { ok: true, diffs: [] });
-    // Baja → espejos fuera en ambos lados.
+    if (patched.ok) {
+      assert.equal(patched.value.mirrorSynced, true, "synced = definición válida");
+    }
     const deleted = deleteAgentFile("tester", root);
     assert.equal(deleted.ok, true);
-    assert.equal(fs.existsSync(globalMirror), false, "espejo global eliminado");
-    assert.equal(fs.existsSync(path.join(root, ".opencode", "agents", "tester.md")), false, "espejo proyecto eliminado");
+    assert.equal(
+      fs.existsSync(path.join(root, "agents", "tester", "agent.md")),
+      false,
+      "definición eliminada",
+    );
     // Core protegido también en sandbox.
     const core = deleteAgentFile("foreman", root);
     assert.equal(core.ok, false);
     assert.ok(fs.existsSync(path.join(root, "agents", "foreman", "agent.md")), "core intacto");
   } finally {
-    setMirrorTestHomeForTests(null);
     rmRf(root);
-    rmRf(home);
   }
 });
 

@@ -239,6 +239,84 @@ nodes:
   assert.deepEqual(run.nodes.verdict.outputJson, { green: true });
 });
 
+test("output_format: review con código citado + findings anidados elige el objeto externo (run review)", async () => {
+  const { tmp, runsDir } = sandbox();
+  const yaml = `name: ai-review-nested
+description: review anidado como plan-approve-implement
+nodes:
+  - id: build
+    loop_group:
+      max_iterations: 3
+      until: "$review.output.green == true"
+      nodes:
+        - id: review
+          prompt: "revisá"
+          output_format:
+            type: object
+            properties:
+              green: { type: boolean }
+              findings:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    message: { type: string }
+                    reverify:
+                      type: object
+                      properties:
+                        commands:
+                          type: array
+                          items: { type: string }
+                        reason: { type: string }
+                      required: [commands, reason]
+                  required: [id, message]
+            required: [green, findings]
+`;
+  // Texto vivo: prosa + fence de JavaScript citado + fence JSON final con un
+  // finding que trae `reverify` anidado. El extractor viejo devolvía el
+  // `reverify` interno y la validación moría con "falta green".
+  const reviewText = [
+    "Let me carefully review the implementation.",
+    "",
+    "```javascript",
+    "listElement.addEventListener('click', function (event) {",
+    "  var ok = global.confirm('Delete?');",
+    "  if (!ok) return;",
+    "});",
+    "```",
+    "",
+    "```json",
+    JSON.stringify({
+      green: true,
+      findings: [
+        {
+          id: "f1",
+          message: "sin cobertura automatizada del cancel",
+          reverify: {
+            commands: ["git diff --stat"],
+            reason: "confirmar que solo cambió app.js",
+          },
+        },
+      ],
+    }),
+    "```",
+  ].join("\n");
+  const run = await runWorkflow(loaded(yaml, tmp), {
+    cwd: tmp,
+    runsDir,
+    aiRunner: async () => ({ output: reviewText }),
+  });
+  assert.equal(run.status, "completed", run.error ?? "");
+  const parsed = run.nodes["build.review"].outputJson as {
+    green?: unknown;
+    findings?: unknown;
+  };
+  assert.equal(parsed.green, true, "extrae el objeto externo, no el reverify");
+  assert.ok(Array.isArray(parsed.findings));
+  assert.equal((parsed.findings as Array<{ id: string }>)[0].id, "f1");
+});
+
 test("totales: agrega costos y tokens de los nodos", async () => {
   const { tmp, runsDir } = sandbox();
   const yaml = `name: totals

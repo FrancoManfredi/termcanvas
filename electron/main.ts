@@ -6005,6 +6005,10 @@ app.on("will-quit", (event) => {
     apiServer.stop();
     closeInterviewService();
     try {
+      const { closeCatalogServer } = await import("./model-catalog.js");
+      closeCatalogServer();
+    } catch {}
+    try {
       closeFactoryServer();
     } catch {}
     cleanupPortFile();

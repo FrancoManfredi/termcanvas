@@ -103,7 +103,8 @@ export function buildSpecPrompt(
   // Turno único de datos: el agente (system prompt del espejo con las
   // reglas de factory/agents/spec/agent.md) ya sabe escribir briefs; el
   // turno lleva id, issue, worktree (lo explora para targetFiles), triage
-  // previo y feedback humano de rechazo.
+  // previo, feedback humano de rechazo y el shape del bloque (las keys
+  // exactas viven acá, no en el body: una sola fuente).
   const slim = [
     `WorkItem: ${workItem.id}.`,
     `Prompt original: """${promptBlock}"""`,
@@ -112,6 +113,7 @@ export function buildSpecPrompt(
     feedbackBlock,
     "",
     "Escribí el brief ahora (prosa clara + bloque ```json al final):",
+    'Cerrá con UN bloque ```json con las keys exactas: {"summary": "...", "acceptanceCriteria": ["..."], "targetFiles": ["..."], "trivial": false, "openQuestions": ["..."]}',
   ]
     .filter(Boolean)
     .join("\n");

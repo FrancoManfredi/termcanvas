@@ -78,6 +78,19 @@ export interface LoopGroupSpec {
   fresh_context: boolean;
   interactive: boolean;
   gate_message?: string;
+  /**
+   * Historial acumulado de rondas (`$LOOP_HISTORY` + bloque auto-inyectado en
+   * cada nodo IA del cuerpo). Default true: ningún workflow nuevo nace sin la
+   * protección anti-regresión; `false` la apaga.
+   */
+  history: boolean;
+  /**
+   * Reverify system-owned (WS3b): los `reverify.commands` de findings
+   * estructurados se validan contra la allowlist read-only y los ejecuta el
+   * ENGINE en el worktree; la evidencia entra al historial de la próxima
+   * ronda. Default true; `false` los ignora por completo.
+   */
+  reverify: boolean;
 }
 
 export interface FanOutSpec {
@@ -190,6 +203,8 @@ const NodeBodySchema = NodeBaseSchema.extend({
       fresh_context: z.boolean().default(false),
       interactive: z.boolean().default(false),
       gate_message: z.string().optional(),
+      history: z.boolean().default(true),
+      reverify: z.boolean().default(true),
     })
     .optional(),
   include: z.string().min(1).optional(),

@@ -4,7 +4,8 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -19,16 +20,43 @@ import {
 import { buildForemanPrompt } from "../headless-runtime/foreman/foremanPrompt.ts";
 import { buildImplementPrompt } from "../headless-runtime/implement/implementPrompt.ts";
 import { buildReviewPrompt } from "../headless-runtime/review/reviewPrompt.ts";
+import { buildTriagePrompt } from "../headless-runtime/triage/triagePrompt.ts";
+import { buildSpecPrompt } from "../headless-runtime/spec/specPrompt.ts";
 import {
   REVIEWER_PAIRS,
   fallbackFor,
   getActiveReviewerPairs,
   selectReviewerModel,
 } from "../headless-runtime/review/reviewModelSelector.ts";
+import { buildFactoryAgentsConfig } from "../headless-runtime/factory/opencodeAgentSync.ts";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const FACTORY_DIR = path.join(REPO_ROOT, "factory");
 const AGENT_NAMES = ["foreman", "implement", "review", "triage", "spec"] as const;
+
+/**
+ * Fixture de agentes en un root temporal: los agent.md del repo son
+ * configurables por el usuario (la UI los edita en vivo), así que los tests
+ * de contratos usan contenido propio, nunca el archivo real.
+ */
+function encodeFmValue(value: unknown): string {
+  if (Array.isArray(value)) return `{${value.join(", ")}}`;
+  if (typeof value === "string" && value.length > 0 && !/[\s:{}\[\],]/.test(value)) return value;
+  return JSON.stringify(value);
+}
+
+function makeFixtureRoot(
+  agents: Record<string, Record<string, unknown>>,
+): string {
+  const root = mkdtempSync(path.join(os.tmpdir(), "agents-defs-"));
+  for (const [name, fm] of Object.entries(agents)) {
+    const dir = path.join(root, "factory", "agents", name);
+    mkdirSync(dir, { recursive: true });
+    const lines = ["---", ...Object.entries(fm).map(([k, v]) => `${k}: ${encodeFmValue(v)}`), "---", "", `Cuerpo de ${name}.`, ""];
+    writeFileSync(path.join(dir, "agent.md"), lines.join("\n"), "utf-8");
+  }
+  return root;
+}
 
 // ── Frontmatter válido de los 5 md ──
 
@@ -50,22 +78,59 @@ test("los 5 agent.md existen con frontmatter válido (sin maxRetries: doctrina s
   }
 });
 
-test("tools espejan los contratos actuales por agente", () => {
-  const foreman = loadAgentDef("foreman");
-  const implement = loadAgentDef("implement");
-  const review = loadAgentDef("review");
-  assert.ok(foreman && implement && review);
-  const asList = (tools: unknown): string[] =>
-    Array.isArray(tools) ? (tools as string[]) : Object.keys((tools ?? {}) as Record<string, unknown>);
-  assert.deepEqual(asList(foreman.frontmatter.tools), []);
-  assert.deepEqual(asList(implement.frontmatter.tools).sort(), ["bash", "edit", "glob", "grep", "read", "webfetch", "write"]);
-  assert.deepEqual(asList(review.frontmatter.tools).sort(), ["glob", "grep", "read", "webfetch"]);
+test("tools espejan los contratos actuales por agente (fixtures, no el contenido editable del repo)", () => {
+  const root = makeFixtureRoot({
+    foreman: { description: "F.", agentType: "FOREMAN", tools: [] },
+    implement: {
+      description: "I.",
+      agentType: "IMPLEMENT",
+      tools: ["read", "edit", "bash", "glob", "grep", "webfetch"],
+    },
+    review: {
+      description: "R.",
+      agentType: "REVIEW",
+      tools: ["read", "glob", "grep", "webfetch"],
+    },
+  });
+  try {
+    const agents = buildFactoryAgentsConfig(root);
+    const permOf = (name: string): Record<string, unknown> =>
+      (agents[name]?.permission ?? {}) as Record<string, unknown>;
+    assert.deepEqual(Object.keys(permOf("foreman")).sort(), ["*", "task"]);
+    const implementPerm = permOf("implement");
+    for (const key of ["read", "edit", "bash", "glob", "grep", "webfetch"]) {
+      assert.ok(key in implementPerm, `implement permite ${key}`);
+    }
+    assert.ok(!("write" in implementPerm), "sin key legacy duplicada");
+    const reviewPerm = permOf("review");
+    assert.deepEqual(Object.keys(reviewPerm).sort(), ["*", "glob", "grep", "read", "task", "webfetch"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
-test("model default efectivo: foreman e implement con el fallback actual, review auto-disjoint", () => {
-  assert.equal(loadAgentDef("foreman")?.frontmatter.model, "opencode-go/muse-spark-1.2-contributor");
-  assert.equal(loadAgentDef("implement")?.frontmatter.model, "opencode-go/muse-spark-1.2-contributor");
-  assert.equal(loadAgentDef("review")?.frontmatter.model, "auto-disjoint");
+test("model default efectivo: foreman/implement con el fallback actual, review fijo", () => {
+  const root = makeFixtureRoot({
+    foreman: {
+      description: "F.",
+      agentType: "FOREMAN",
+      model: "opencode-go/muse-spark-1.3-contributor",
+    },
+    implement: {
+      description: "I.",
+      agentType: "IMPLEMENT",
+      model: "opencode-go/muse-spark-1.3-contributor",
+    },
+    review: { description: "R.", agentType: "REVIEW", model: "opencode/big-pickle" },
+  });
+  try {
+    const agents = buildFactoryAgentsConfig(root);
+    assert.equal(agents.foreman?.model, "opencode-go/muse-spark-1.3-contributor");
+    assert.equal(agents.implement?.model, "opencode-go/muse-spark-1.3-contributor");
+    assert.equal(agents.review?.model, "opencode/big-pickle");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("triage/spec reales Ola 8: sin stub, con Input/Output/Procedure y tools de lectura", () => {
@@ -154,6 +219,21 @@ test("prompts llevan solo datos: el md vive en el espejo, nunca en el turno", ()
   assert.ok(!reviewOut.includes("Ejes obligatorios"), "sin reglas");
 });
 
+test("turnos legacy declaran su shape: el body es identidad, no contrato", () => {
+  const reviewOut = buildReviewPrompt(
+    { id: "job-shape-1", prompt: "x", worktree: "/tmp/wt" },
+    {},
+  );
+  assert.ok(reviewOut.includes('"verdict"'), "legacy review declara su contrato en el turno");
+  const triageOut = buildTriagePrompt({ id: "job-shape-1", prompt: "x", worktree: "/tmp/wt" });
+  assert.ok(triageOut.includes('"decision"'), "legacy triage declara su contrato en el turno");
+  const specOut = buildSpecPrompt({ id: "job-shape-1", prompt: "x", worktree: "/tmp/wt" });
+  assert.ok(
+    specOut.includes('"acceptanceCriteria"'),
+    "legacy spec declara su contrato en el turno",
+  );
+});
+
 test("loader ante nombre inexistente devuelve null (gate intacto)", () => {
   // El loader ante nombre inexistente devuelve null: ese es el gate del fallback.
   assert.equal(loadAgentDef("ola7-no-existe"), null);
@@ -169,8 +249,8 @@ test("factory.yaml parsea válido con puertos, timeouts, modelos, pares y scorer
   assert.deepEqual(cfg.timeouts, {
     verifyMs: 120000,
   });
-  assert.equal(cfg.defaultModels.foreman, "opencode-go/muse-spark-1.2-contributor");
-  assert.equal(cfg.defaultModels.implement, "opencode-go/muse-spark-1.2-contributor");
+  assert.equal(cfg.defaultModels.foreman, "opencode-go/muse-spark-1.3-contributor");
+  assert.equal(cfg.defaultModels.implement, "opencode-go/muse-spark-1.3-contributor");
   assert.equal(cfg.defaultModels.review, "auto-disjoint");
   assert.deepEqual(cfg.reviewerPairs, REVIEWER_PAIRS);
   assert.equal(cfg.scorers.samplingRate, 25);
@@ -208,7 +288,7 @@ function collectFactoryFiles(dir: string): string[] {
     const full = path.join(dir, name);
     const stat = statSync(full);
     if (stat.isDirectory()) out.push(...collectFactoryFiles(full));
-    else if (stat.isFile()) out.push(full);
+    else if (stat.isFile() && !path.basename(full).startsWith(".job-index.json")) out.push(full);
   }
   return out;
 }

@@ -303,6 +303,35 @@ function readDirSorted(absDir: string): string[] | null {
 
 // ── a) agents ──
 
+/**
+ * Normaliza listas nominales del frontmatter (`skills`, `mcps`): array,
+ * record-keys o string plano `{a, b}`. Pura, nunca lanza.
+ */
+function agentNameList(raw: unknown): string[] {
+  try {
+    if (Array.isArray(raw)) {
+      return (raw as unknown[]).map((v) => String(v ?? "").trim()).filter(Boolean);
+    }
+    if (raw && typeof raw === "object") {
+      return Object.keys(raw as Record<string, unknown>).map((k) => k.trim()).filter(Boolean);
+    }
+    if (typeof raw === "string") {
+      return raw
+        .trim()
+        .replace(/^\{/, "")
+        .replace(/\}$/, "")
+        .split(",")
+        .map((s) => s.trim().replace(/^["']+|["']+$/g, ""))
+        .filter(Boolean);
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+const MCP_BUNDLE_NAME_REGEX = /^[a-z0-9][a-z0-9_-]*$/i;
+
 function checkAgents(factoryDir: string, push: (i: DefinitionIssue) => void): void {
   const agentsDir = path.join(factoryDir, "agents");
   let foremanNames: string[] = [];
@@ -459,6 +488,67 @@ function checkAgents(factoryDir: string, push: (i: DefinitionIssue) => void): vo
               file: rel,
               rule: "agents-blocking",
               message: `${rel}: no se pudo verificar blocking (${errMsg(e).slice(0, 120)})`,
+              severity: "error",
+            });
+          }
+          // skills: cada nombre debe existir en factory/skills/<name>/SKILL.md.
+          // Un nombre inexistente deja la allowlist del agente apuntando al
+          // vacío (la skill no se puede cargar): error con file:line.
+          try {
+            const names = agentNameList(parsed.frontmatter.skills);
+            const missing = names.filter(
+              (skillName) =>
+                !/^[a-z0-9-]+$/i.test(skillName) ||
+                !fs.existsSync(path.join(factoryDir, "skills", skillName, "SKILL.md")),
+            );
+            if (missing.length > 0) {
+              const issue: DefinitionIssue = {
+                file: rel,
+                rule: "agents-skills",
+                message: `${rel}: skills inexistentes [${missing.map((s) => `"${s.slice(0, 40)}"`).join(", ")}] (el agente no las podrá cargar): creá factory/skills/<name>/SKILL.md o quitálas del frontmatter`,
+                severity: "error",
+              };
+              const line = findLine(text, "skills");
+              if (line !== undefined) issue.line = line;
+              push(issue);
+            }
+          } catch (e) {
+            push({
+              file: rel,
+              rule: "agents-skills",
+              message: `${rel}: no se pudo verificar skills (${errMsg(e).slice(0, 120)})`,
+              severity: "error",
+            });
+          }
+          // mcps: cada nombre debe existir en factory/mcps/<name>.json (el
+          // engine resuelve los bundles al correr el nodo; un nombre roto
+          // falla el nodo en runtime): error con file:line.
+          try {
+            const names = agentNameList(parsed.frontmatter.mcps);
+            const invalid = names.filter((n) => !MCP_BUNDLE_NAME_REGEX.test(n));
+            const missing = names.filter(
+              (n) => MCP_BUNDLE_NAME_REGEX.test(n) && !fs.existsSync(path.join(factoryDir, "mcps", `${n}.json`)),
+            );
+            if (invalid.length > 0 || missing.length > 0) {
+              const detail = [
+                ...invalid.map((s) => `"${s.slice(0, 40)}" (nombre inválido)`),
+                ...missing.map((s) => `"${s.slice(0, 40)}" (falta factory/mcps/${s}.json)`),
+              ].join(", ");
+              const issue: DefinitionIssue = {
+                file: rel,
+                rule: "agents-mcps",
+                message: `${rel}: mcps inválidos [${detail}]: un bundle faltante falla el nodo en runtime, corregí el frontmatter o creá el archivo`,
+                severity: "error",
+              };
+              const line = findLine(text, "mcps");
+              if (line !== undefined) issue.line = line;
+              push(issue);
+            }
+          } catch (e) {
+            push({
+              file: rel,
+              rule: "agents-mcps",
+              message: `${rel}: no se pudo verificar mcps (${errMsg(e).slice(0, 120)})`,
               severity: "error",
             });
           }

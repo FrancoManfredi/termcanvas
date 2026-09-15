@@ -48,8 +48,8 @@ test("getTimeouts con yaml válido devuelve los valores del yaml (solo verifyMs:
 test("getDefaultModels con yaml válido devuelve builder/foreman del yaml", () => {
   resetFactoryConfigCache();
   assert.deepEqual(getDefaultModels(), {
-    builder: "opencode-go/muse-spark-1.2-contributor",
-    foreman: "opencode-go/muse-spark-1.2-contributor",
+    builder: "opencode-go/muse-spark-1.3-contributor",
+    foreman: "opencode-go/muse-spark-1.3-contributor",
   });
 });
 
@@ -165,12 +165,12 @@ test("parseFactoryYaml con pares reordenados + lookup puro → mismos refs", () 
   const text =
     "ports:\n  factoryDefault: 17680\n  factoryMax: 17690\n" +
     "timeouts:\n  verifyMs: 120000\n" +
-    'defaultModels:\n  foreman: "opencode-go/muse-spark-1.2-contributor"\n' +
-    '  implement: "opencode-go/muse-spark-1.2-contributor"\n  review: "auto-disjoint"\n' +
+    'defaultModels:\n  foreman: "opencode-go/muse-spark-1.3-contributor"\n' +
+    '  implement: "opencode-go/muse-spark-1.3-contributor"\n  review: "auto-disjoint"\n' +
     "reviewerPairs:\n" +
     '  - match: "openai/* → anthropic"\n    reviewer: "anthropic/claude-sonnet-4-20250514"\n' +
     '  - match: "anthropic/* → gpt-4o"\n    reviewer: "openai/gpt-4o"\n' +
-    '  - match: "big-pickle → muse-spark"\n    reviewer: "opencode-go/muse-spark-1.2-contributor"\n' +
+    '  - match: "big-pickle → muse-spark"\n    reviewer: "opencode-go/muse-spark-1.3-contributor"\n' +
     '  - match: "muse-spark → big-pickle"\n    reviewer: "opencode/big-pickle"\n' +
     "scorers:\n  samplingRate: 25\n";
   const cfg = parseFactoryYaml(text);

@@ -165,28 +165,21 @@ export class ClaudeCodeDriver {
       ...this.options.env,
     };
 
-    if (isDev) console.log("[ClaudeCodeDriver] start:", { args, cwd: this.options.cwd, sessionId: this.options.sessionId });
-
     this.proc = spawn("claude", args, { windowsHide: true,
       cwd: this.options.cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],
     });
 
-    if (isDev) console.log("[ClaudeCodeDriver] process spawned, pid:", this.proc.pid);
-
     this.proc.stdout?.setEncoding("utf-8");
     this.proc.stdout?.on("data", (chunk: string) => {
-      if (isDev) console.log("[ClaudeCodeDriver] stdout chunk:", chunk.slice(0, 200));
       this.onStdoutData(chunk);
     });
     this.proc.stderr?.setEncoding("utf-8");
     this.proc.stderr?.on("data", (chunk: string) => {
-      if (isDev) console.log("[ClaudeCodeDriver] stderr:", chunk.trimEnd());
     });
 
     this.proc.on("exit", (code, signal) => {
-      if (isDev) console.log("[ClaudeCodeDriver] process exited, code:", code, "signal:", signal);
       this.proc = null;
       if (!this.destroyed) {
         this.emit({ type: "stream_end" });
@@ -194,13 +187,11 @@ export class ClaudeCodeDriver {
     });
 
     this.proc.on("error", (err) => {
-      if (isDev) console.log("[ClaudeCodeDriver] process error:", err.message);
       this.emit({ type: "error", error: { message: err.message } });
     });
   }
 
   send(text: string): void {
-    if (isDev) console.log("[ClaudeCodeDriver] send:", text.slice(0, 100), "| proc alive:", !!this.proc, "| stdin writable:", !!this.proc?.stdin?.writable);
     this.writeStdin({
       type: "user",
       message: { role: "user", content: text },
@@ -316,7 +307,6 @@ export class ClaudeCodeDriver {
   }
 
   private processMessage(msg: CCStdoutMessage): void {
-    if (isDev) console.log("[ClaudeCodeDriver] event:", msg.type, "subtype" in msg ? (msg as { subtype?: string }).subtype : "");
     switch (msg.type) {
       case "system":
         this.handleSystem(msg as CCSystemInit);

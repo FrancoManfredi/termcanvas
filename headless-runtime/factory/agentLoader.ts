@@ -161,6 +161,11 @@ export function resolveAgentFilePath(name: string): string {
   return path.join(getRepoRoot(), "factory", "agents", name, "agent.md");
 }
 
+/** Raíz del repo factory (mismo fallback que el loader). Nunca lanza. */
+export function resolveFactoryRepoRoot(): string {
+  return getRepoRoot();
+}
+
 export function resolveFactoryYamlPath(): string {
   return path.join(getRepoRoot(), "factory", "factory.yaml");
 }
@@ -462,13 +467,13 @@ export const FACTORY_DEFAULTS: FactoryConfig = {
   ports: { factoryDefault: 17680, factoryMax: 17690 },
   timeouts: { verifyMs: 120000 },
   defaultModels: {
-    foreman: "opencode-go/muse-spark-1.2-contributor",
-    implement: "opencode-go/muse-spark-1.2-contributor",
+    foreman: "opencode-go/muse-spark-1.3-contributor",
+    implement: "opencode-go/muse-spark-1.3-contributor",
     review: "auto-disjoint",
   },
   reviewerPairs: [
     { match: "muse-spark → big-pickle", reviewer: "opencode/big-pickle" },
-    { match: "big-pickle → muse-spark", reviewer: "opencode-go/muse-spark-1.2-contributor" },
+    { match: "big-pickle → muse-spark", reviewer: "opencode-go/muse-spark-1.3-contributor" },
     { match: "anthropic/* → gpt-4o", reviewer: "openai/gpt-4o" },
     { match: "openai/* → anthropic", reviewer: "anthropic/claude-sonnet-4-20250514" },
   ],
@@ -978,6 +983,11 @@ export function resetFactoryConfigCache(): void {
  * roster de hooks en agentHooks) la comparan para invalidarse al instante
  * sin depender del mtime del directorio — editar el `stage` de un agent.md
  * existente no cambia el mtime del padre y dejaba el roster viejo.
+ *
+ * Además del bump por API, la revisión incorpora una HUELLA del disco
+ * (`getAgentDefsFingerprint`): editar `factory/agents/<name>/agent.md` a mano
+ * (fuera de la API) cambia la revisión igual — sin esto, un daemon vivo
+ * seguía sirviendo el prompt viejo hasta el reinicio (fix PLATANO).
  * En memoria, nunca lanza.
  */
 let agentDefsRevision = 0;
@@ -991,10 +1001,52 @@ export function bumpAgentDefsRevision(): void {
   }
 }
 
-/** Lectura de la revisión vigente (0 = proceso recién arrancado). */
+/**
+ * Huella barata del disco de `factory/agents/<name>/agent.md` (nombre + tamaño +
+ * mtime), combinada en un entero de 32 bits. Detecta ediciones por fuera de
+ * la API (archivo tocado a mano) que no bumpean la revisión en memoria.
+ * Cualquier fallo (sin dir, sin permisos) devuelve 0 — nunca lanza.
+ */
+export function getAgentDefsFingerprint(): number {
+  try {
+    const agentsDir = path.join(resolveFactoryRepoRoot(), "factory", "agents");
+    let names: string[];
+    try {
+      names = fs.readdirSync(agentsDir).slice().sort();
+    } catch {
+      return 0;
+    }
+    // djb2: determinista, barato, sin deps.
+    let hash = 5381;
+    const mix = (text: string): void => {
+      for (let i = 0; i < text.length; i++) {
+        hash = ((hash * 33) ^ text.charCodeAt(i)) | 0;
+      }
+    };
+    for (const name of names) {
+      try {
+        if (!/^[a-z0-9-]+$/i.test(name)) continue;
+        const st = fs.statSync(path.join(agentsDir, name, "agent.md"));
+        if (!st.isFile()) continue;
+        mix(`${name}:${Math.trunc(st.mtimeMs)}:${st.size};`);
+      } catch {
+        // agente roto/ausente: no aporta a la huella
+      }
+    }
+    return hash >>> 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Lectura de la revisión vigente: bump de API * 2^32 + huella de disco.
+ * Dos revisiones coinciden solo si el contador Y el disco coinciden
+ * (0 = proceso recién arrancado sin agentes legibles). Nunca lanza.
+ */
 export function getAgentDefsRevision(): number {
   try {
-    return agentDefsRevision;
+    return agentDefsRevision * 4294967296 + getAgentDefsFingerprint();
   } catch {
     return 0;
   }

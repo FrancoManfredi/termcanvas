@@ -35,6 +35,8 @@ import assert from "node:assert/strict";
 import type { IssueNodeData } from "../src/stores/issueStore.ts";
 import {
   describeFactoryJobForPanel,
+  findAllFactoryJobsForIssue,
+  isFactoryJobActive,
   matchPendingAskHumanNotification,
   readFactoryJobCostSummary,
   readFactoryJobHumanNeed,
@@ -325,6 +327,138 @@ test("need H1: spec meta outside Triage, or terminal jobs, report nothing", () =
     null,
     "terminal frees the row even with a stale meta",
   );
+});
+
+// ─── H0b: engine gate (workflow engine oficial) ────────────────────────────
+
+test("need H0b: engineGate spec-approval on Review is spec-approval", () => {
+  const need = readFactoryJobHumanNeed(
+    triageJob({
+      status: "Review",
+      engineGate: {
+        nodeId: "approve",
+        kind: "spec-approval",
+        message: "Aprobar la spec del engine",
+        runId: "run-1",
+        attempt: 1,
+      },
+    }),
+  );
+  assert.ok(need !== null);
+  assert.equal(need.kind, "spec-approval");
+  assert.equal(need.specSummary, "Aprobar la spec del engine");
+});
+
+test("need H0b: engineGate ask-human maps to ask-human; junk never claims", () => {
+  const need = readFactoryJobHumanNeed(
+    triageJob({
+      status: "Review",
+      engineGate: {
+        nodeId: "review",
+        kind: "ask-human",
+        message: "Output listo para revisar",
+        runId: "run-1",
+      },
+    }),
+  );
+  assert.equal(need?.kind, "ask-human");
+  assert.equal(need?.reviewSummary, "Output listo para revisar");
+  assert.equal(
+    readFactoryJobHumanNeed(triageJob({ engineGate: { kind: "otro" } })),
+    null,
+  );
+  assert.equal(
+    readFactoryJobHumanNeed(
+      triageJob({
+        engineGate: { nodeId: "approve", kind: "spec-approval", runId: "r" },
+      }),
+    )?.kind,
+    "spec-approval",
+    "mensaje ausente cae a (no summary), el gate sigue siendo válido",
+  );
+});
+
+test("G3: run vivo o gate pendiente mantienen la fila activa aunque el status sea terminal", () => {
+  assert.equal(
+    isFactoryJobActive({
+      status: "Cancelled",
+      engineRun: { runId: "r", status: "running" },
+    }),
+    true,
+    "run corriendo manda sobre Cancelled",
+  );
+  assert.equal(
+    isFactoryJobActive({
+      status: "Cancelled",
+      engineGate: { nodeId: "gate" },
+    }),
+    true,
+    "gate pendiente manda sobre Cancelled",
+  );
+  assert.equal(
+    isFactoryJobActive({
+      status: "Cancelled",
+      engineRun: { runId: "r", status: "completed" },
+    }),
+    false,
+    "run terminal no revive la fila",
+  );
+  assert.equal(isFactoryJobActive({ status: "Cancelled" }), false);
+  assert.equal(isFactoryJobActive({ status: "Building" }), true);
+});
+
+test("G3: el gate de un job Cancelled con run vivo sigue ofreciéndose", () => {
+  const need = readFactoryJobHumanNeed(
+    triageJob({
+      status: "Cancelled",
+      state: "error",
+      engineGate: {
+        nodeId: "gate",
+        kind: "ask-human",
+        message: "Aprobar el plan?",
+        runId: "run-1",
+      },
+      engineRun: {
+        runId: "run-1",
+        workflow: "plan-approve-implement",
+        status: "running",
+      },
+    }),
+  );
+  assert.equal(need?.kind, "spec-approval", "vuelve a Awaiting You con el gate");
+  assert.equal(need?.specSummary, "Aprobar el plan?");
+});
+
+test("need H0b: gate de aprobación guardado como ask-human se re-deriva a spec-approval", () => {
+  const need = readFactoryJobHumanNeed(
+    triageJob({
+      status: "Review",
+      engineGate: {
+        nodeId: "gate",
+        kind: "ask-human",
+        message: "Aprobar el plan?",
+        runId: "run-1",
+      },
+    }),
+  );
+  assert.equal(need?.kind, "spec-approval");
+  assert.equal(need?.specSummary, "Aprobar el plan?");
+});
+
+test("need H0b: parked (H0) domina sobre el gate del engine", () => {
+  const need = readFactoryJobHumanNeed(
+    triageJob({
+      status: "Review",
+      parked: true,
+      engineGate: {
+        nodeId: "approve",
+        kind: "spec-approval",
+        message: "m",
+        runId: "r",
+      },
+    }),
+  );
+  assert.equal(need?.kind, "resume");
 });
 
 // ─── H2: triage questions ──────────────────────────────────────────────────
@@ -917,6 +1051,91 @@ test("invoke: resume notifies success; daemon errors surface honestly", async ()
   assert.match(failNotices[0], /Could not resume/);
 });
 
+test("H0c: run muerto o job cancelado con run vivo ofrece Re-run", () => {
+  const dead = readFactoryJobHumanNeed(
+    triageJob({
+      status: "Building",
+      engineRun: { runId: "r", workflow: "fix-issue", status: "failed" },
+    }),
+  );
+  assert.equal(dead?.kind, "rerun", "run failed → Re-run");
+
+  const cancelledWithRun = readFactoryJobHumanNeed(
+    triageJob({
+      status: "Cancelled",
+      state: "error",
+      engineRun: {
+        runId: "r",
+        workflow: "plan-approve-implement",
+        status: "running",
+        currentNodeId: "gate",
+      },
+    }),
+  );
+  assert.equal(cancelledWithRun?.kind, "rerun", "job Cancelled + run vivo → Re-run");
+
+  assert.equal(
+    readFactoryJobHumanNeed(
+      triageJob({
+        status: "Complete",
+        state: "done",
+        engineRun: { runId: "r", status: "failed" },
+      }),
+    ),
+    null,
+    "Complete nunca re-corre",
+  );
+
+  const gate = readFactoryJobHumanNeed(
+    triageJob({
+      status: "Cancelled",
+      state: "error",
+      engineGate: {
+        nodeId: "gate",
+        kind: "spec-approval",
+        message: "Aprobar el plan?",
+        runId: "r",
+      },
+      engineRun: { runId: "r", status: "running" },
+    }),
+  );
+  assert.equal(gate?.kind, "spec-approval", "un gate vivo gana sobre Re-run");
+});
+
+test("describe/invoke: Re-run habilita con kind rerun y usa la ruta de resume", async () => {
+  const defs = byKind(
+    describeActivityActions(
+      baseArgs({ factoryAwaiting: { kind: "rerun", jobId: JOB_ID } }),
+    ),
+  );
+  assert.equal(defs.get("rerun")?.enabled, true);
+  assert.ok((defs.get("rerun")?.title ?? "").length > 0);
+  assert.equal(defs.get("resume")?.enabled, false, "no es un parqueo");
+
+  const calls = { count: 0 };
+  const notices: string[] = [];
+  await invokeActivityAction("rerun", 7, undefined, {
+    factoryJobId: JOB_ID,
+    factoryAwaitingKind: "rerun",
+    resumeJob: okSeam(calls),
+    notify: (message: string) => {
+      notices.push(message);
+    },
+  });
+  assert.equal(calls.count, 1);
+  assert.equal(notices.length, 1);
+  assert.match(notices[0], /Re-running/);
+
+  const stale = { count: 0 };
+  await invokeActivityAction("rerun", 7, undefined, {
+    factoryJobId: JOB_ID,
+    factoryAwaitingKind: "resume",
+    resumeJob: okSeam(stale),
+    notify: () => {},
+  });
+  assert.equal(stale.count, 0, "kind mismatch refuses silently");
+});
+
 test("describe: discard mirrors the parked gate (no retomar trabajo)", () => {
   const parked = byKind(
     describeActivityActions(
@@ -949,6 +1168,20 @@ test("describe: discard mirrors the parked gate (no retomar trabajo)", () => {
 
   const absent = byKind(describeActivityActions(baseArgs()));
   assert.equal(absent.get("discard")?.enabled, false);
+
+  // H0c: un job con el run muerto se puede Re-lanzar O descartar (sin esto
+  // la fila quedaba sin forma de borrar el job desde la UI).
+  const rerun = byKind(
+    describeActivityActions(
+      baseArgs({ factoryAwaiting: { kind: "rerun", jobId: JOB_ID } }),
+    ),
+  );
+  assert.equal(rerun.get("rerun")?.enabled, true);
+  assert.equal(rerun.get("discard")?.enabled, true, "rerun también ofrece Discard");
+  assert.match(
+    String(rerun.get("discard")?.title ?? ""),
+    /Discard the stopped job/,
+  );
 });
 
 test("invoke: discard notifies success; daemon errors surface honestly", async () => {
@@ -993,6 +1226,25 @@ test("invoke: discard notifies success; daemon errors surface honestly", async (
   });
   assert.equal(staleCalls.count, 0, "stale kind mismatch refuses silently");
   assert.equal(staleNotices.length, 0);
+
+  // H0c: la fila rerun descarta el job del gate (target de respaldo cuando
+  // el finder de activos no lo ve, porque un run muerto no está "activo").
+  const rerunCalls: string[] = [];
+  const rerunNotices: string[] = [];
+  await invokeActivityAction("discard", 7, undefined, {
+    factoryJobId: JOB_ID,
+    factoryAwaitingKind: "rerun",
+    discardJob: async (jobId: string) => {
+      rerunCalls.push(jobId);
+      return { ok: true, error: "" };
+    },
+    notify: (message: string) => {
+      rerunNotices.push(message);
+    },
+  });
+  assert.deepEqual(rerunCalls, [JOB_ID]);
+  assert.equal(rerunNotices.length, 1);
+  assert.match(rerunNotices[0], /Discarded job/);
 });
 
 test("invoke: discard appends the daemon teardown summary to the notify", async () => {
@@ -1333,4 +1585,122 @@ test("invoke: throwing seams never throw; concurrent clicks debounce per job", a
   await Promise.all([first, second]);
   assert.equal(calls.count, 1, "single invoke per click per job");
   assert.equal(quiet.length, 1, "debounced click stays silent");
+});
+
+// -- "Descartar issue" (men� contextual): borra TODO lo linkeado -----------
+// A diferencia del discard de fila (solo jobs activos), este es la v�lvula
+// de escape destructiva: incluye jobs con run muerto y Complete, para que el
+// issue quede limpio y la derivaci�n lo devuelva a Pending.
+
+test("findAllFactoryJobsForIssue: incluye activo + run muerto + Complete del mismo repo", () => {
+  const jobs = [
+    triageJob({ id: "job-active-1" }),
+    triageJob({
+      id: "job-dead-1",
+      status: "Cancelled",
+      state: "error",
+      engineRun: { runId: "r1", workflow: "w", status: "failed" },
+    }),
+    triageJob({ id: "job-done-1", status: "Complete", state: "done" }),
+    triageJob({ id: "job-other-repo", timeline: [issueRefMeta(7, "otro/repo")] }),
+    triageJob({ id: "job-other-issue", timeline: [issueRefMeta(8)] }),
+    triageJob({ id: "job-no-ref", timeline: [] }),
+  ];
+  assert.deepEqual(
+    findAllFactoryJobsForIssue(jobs, 7, "org/termcanvas"),
+    ["job-active-1", "job-dead-1", "job-done-1"],
+  );
+  assert.deepEqual(findAllFactoryJobsForIssue(jobs, 9, "org/termcanvas"), []);
+  assert.deepEqual(findAllFactoryJobsForIssue(null, 7, "org/termcanvas"), []);
+});
+
+test("findAllFactoryJobsForIssue: tope 10 deduplicado", () => {
+  const jobs = Array.from({ length: 12 }, (_, i) =>
+    triageJob({ id: `job-${i}` }),
+  );
+  const ids = findAllFactoryJobsForIssue(jobs, 7, "org/termcanvas");
+  assert.equal(ids.length, 10);
+  assert.deepEqual(ids, Array.from({ length: 10 }, (_, i) => `job-${i}`));
+});
+
+test("invoke: discard-issue descarta TODOS los jobs linkeados (activo + muerto + Complete)", async () => {
+  const jobs = [
+    triageJob({ id: "job-a" }),
+    triageJob({
+      id: "job-b",
+      status: "Cancelled",
+      state: "error",
+      engineRun: { runId: "r", workflow: "w", status: "failed" },
+    }),
+    triageJob({ id: "job-c", status: "Complete", state: "done" }),
+  ];
+  const calls: string[] = [];
+  const notices: string[] = [];
+  await invokeActivityAction("discard-issue", 7, undefined, {
+    factoryJobs: jobs,
+    issueUrl: ISSUE_URL,
+    discardJob: async (jobId: string) => {
+      calls.push(jobId);
+      return { ok: true, error: "" };
+    },
+    notify: (message: string) => {
+      notices.push(message);
+    },
+  });
+  assert.deepEqual(calls, ["job-a", "job-b", "job-c"]);
+  assert.equal(notices.length, 1);
+  assert.match(notices[0], /Discarded 3 jobs/);
+});
+
+test("invoke: discard-issue sin jobs notifica honesto; con gate usa el job del gate", async () => {
+  const notices: string[] = [];
+  const calls: string[] = [];
+  await invokeActivityAction("discard-issue", 7, undefined, {
+    factoryJobs: [],
+    issueUrl: ISSUE_URL,
+    discardJob: async (jobId: string) => {
+      calls.push(jobId);
+      return { ok: true, error: "" };
+    },
+    notify: (message: string) => {
+      notices.push(message);
+    },
+  });
+  assert.deepEqual(calls, []);
+  assert.equal(notices.length, 1);
+  assert.match(notices[0], /Nothing to discard/);
+
+  // Fila vieja sin poll list: el job del gate es el target de respaldo.
+  await invokeActivityAction("discard-issue", 7, undefined, {
+    factoryJobs: [],
+    factoryJobId: JOB_ID,
+    issueUrl: ISSUE_URL,
+    discardJob: async (jobId: string) => {
+      calls.push(jobId);
+      return { ok: true, error: "" };
+    },
+    notify: () => {},
+  });
+  assert.deepEqual(calls, [JOB_ID]);
+});
+
+test("invoke: discard-issue surface el error del daemon sin cortar la secuencia", async () => {
+  const jobs = [triageJob({ id: "job-a" }), triageJob({ id: "job-b" })];
+  const calls: string[] = [];
+  const notices: string[] = [];
+  await invokeActivityAction("discard-issue", 7, undefined, {
+    factoryJobs: jobs,
+    issueUrl: ISSUE_URL,
+    discardJob: async (jobId: string) => {
+      calls.push(jobId);
+      if (jobId === "job-a") return { ok: false, error: "boom" };
+      return { ok: true, error: "" };
+    },
+    notify: (message: string) => {
+      notices.push(message);
+    },
+  });
+  assert.deepEqual(calls, ["job-a", "job-b"]);
+  assert.equal(notices.length, 1);
+  assert.match(notices[0], /Discarded job job-b/);
 });

@@ -13,11 +13,43 @@ setTimeout(() => {
 }, HARD_TIMEOUT_MS).unref();
 
 async function main(): Promise<void> {
+  const portFile = process.env.WF_SMOKE_PORT_FILE;
+  // F2: antes de ensure, detectar si YA hay un factory healthy (app/standalone
+  // de dev). Si existe, este smoke es observador: NO bindea, NO lo mata el
+  // supervisor (reporta "existing:<port>").
+  let existing: number | null = null;
+  for (let port = 17680; port <= 17690; port += 1) {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 700);
+      const res = await fetch(`http://127.0.0.1:${port}/factory/health`, {
+        signal: ctrl.signal,
+      });
+      clearTimeout(timer);
+      if (res.ok) {
+        existing = port;
+        break;
+      }
+    } catch {
+      // sigue probando
+    }
+  }
+  if (existing !== null) {
+    if (portFile) {
+      try {
+        fs.writeFileSync(portFile, `existing:${existing}`, "utf-8");
+      } catch {
+        // el supervisor también puede descubrir el puerto por health
+      }
+    }
+    console.log(`[wf-daemon-smoke-child] factory preexistente port=${existing}`);
+    setInterval(() => {}, 1 << 30);
+    return;
+  }
   const { ensureFactoryServer } = await import(
     "../headless-runtime/factory/factoryServer"
   );
   const port = await ensureFactoryServer();
-  const portFile = process.env.WF_SMOKE_PORT_FILE;
   if (portFile) {
     try {
       fs.writeFileSync(portFile, String(port), "utf-8");
