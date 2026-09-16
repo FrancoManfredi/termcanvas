@@ -57,6 +57,9 @@ outside the accepted scope lands silently: adjacent findings become
   Links with `Closes #`).
 - Open the PR early (draft ok). Bot review (Pullfrog/CodeRabbit) is the
   fast first pass, not the verdict.
+- Titles and branch names are engine-owned (branch `issue-N-slug`, PR
+  title mirrors the issue title): write conventional issue titles so
+  PRs inherit them.
 
 ## Phase 2 -- Review round (post as PR comment)
 
@@ -131,6 +134,9 @@ Blocking gate -- verify each item with the command shown, on the head SHA.
 Any miss aborts the merge:
 
 - Verdict `Ready` in the latest posted round: read the PR comments.
+- Bot findings reconciled: every bot review finding addressed
+  (Taken/Dropped) in a posted round. Bot reviews land post-PR-open, so
+  this check runs at merge time, not inside the loop.
 - Zero open Important findings: the latest round's prior-findings table
   shows every Important as Fixed with evidence.
 - CI green on the head SHA: `gh pr view <N> --json statusCheckRollup`.

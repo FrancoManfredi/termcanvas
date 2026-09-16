@@ -1368,12 +1368,25 @@ test("commit: isCommittablePath excluye ruido y acepta código", async () => {
     ".worktrees/issue-1-x/a.ts",
     "package-lock.json",
     "pnpm-lock.yaml",
+    // Ayudas de review del ciclo: jamás shipean aunque vivan en el worktree.
+    "artifacts/scope.md",
+    "scope.md",
+    "plan.md",
+    "triage.md",
+    "discoveries.json",
+    "discoveries.md",
+    "review/report-round-1.md",
     "",
     "../escape.ts",
   ]) {
     assert.equal(isCommittablePath(junk), false, junk || "(vacío)");
   }
   for (const ok of ["src/a.ts", "tests/a.test.ts", "package.json", "README.md"]) {
+    assert.equal(isCommittablePath(ok), true, ok);
+  }
+  // Estrechez: el filtro es raíz-exacta/prefijo review/ — homónimos en
+  // subdirectorios de código siguen siendo commiteables.
+  for (const ok of ["src/scope.md", "docs/review-guide.md", "src/artifacts/x.ts"]) {
     assert.equal(isCommittablePath(ok), true, ok);
   }
   assert.deepEqual(

@@ -26,12 +26,19 @@ const EXCLUDE_PREFIXES = [
   "logs/",
   ".hydra/",
   ".worktrees/",
+  // Ayudas de review del propio ciclo (espejo de gitHubPr: nunca cambio).
+  "review/",
 ];
 
 const EXCLUDE_EXACT = new Set([
   "package-lock.json",
   "pnpm-lock.yaml",
   "yarn.lock",
+  "scope.md",
+  "plan.md",
+  "triage.md",
+  "discoveries.json",
+  "discoveries.md",
 ]);
 
 function isExcluded(file: string): boolean {

@@ -116,7 +116,9 @@ nodes:
           prompt: |
             Revisá el cambio contra el issue original Y contra el contrato congelado.
 
-            Puerta de scope (primera verificación, bloqueante): el contrato vive en `$ARTIFACTS_DIR/scope.md`. Leelo antes de mirar el diff. Si no existe o está vacío, devolvé `green: false` con un único finding `major` en eje `tests` ("sin contrato congelado no hay verde") y no juzgues el código. Juzgá el diff contra ese contrato, nunca contra un cambio ideal imaginado.
+            Puerta de scope (primera verificación, bloqueante): el contrato vive en `$ARTIFACTS_DIR/scope.md`. Leelo antes de mirar el diff. Si no existe o está vacío, buscá la copia fallback `artifacts/scope.md` en el worktree y usala; si tampoco existe, devolvé `green: false` con un único finding `major` en eje `tests` ("sin contrato congelado no hay verde") y no juzgues el código. Juzgá el diff contra ese contrato, nunca contra un cambio ideal imaginado.
+            Higiene del diff: archivos de ayuda de review (`artifacts/scope.md`, `review/`, `scope.md`, `plan.md`, `triage.md`, `discoveries.json/md` en la raíz) no deben shipear — el commit del engine los excluye, pero si aparecen en el diff es finding `minor` en eje `requirements` (el contrato vive fuera del repo).
+            Fuerza de asserts: un test que pasa con cardinalidades múltiples donde el comportamiento exige exacta (ej. foco disparado ≥1 vez en vez de exactamente 1) es finding `minor` en eje `tests`. Reachability: si una rama `catch`/fallback es inalcanzable dados los guards aguas arriba, el mensaje que muestra es finding `major` (etiqueta un fallo imposible y traga el real).
 
             Issue: $INPUTS.issue_ref
 

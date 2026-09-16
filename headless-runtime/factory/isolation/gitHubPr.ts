@@ -288,6 +288,9 @@ const COMMIT_EXCLUDE_PREFIXES: readonly string[] = [
   "logs/",
   ".hydra/",
   ".worktrees/",
+  // Ayudas de review del propio ciclo (scope/planes/reportes): viven en el
+  // worktree o en $ARTIFACTS_DIR, jamás en el PR.
+  "review/",
 ];
 
 /** Archivos exactos que el commit jamás incluye (locks del toolchain). */
@@ -295,6 +298,13 @@ const COMMIT_EXCLUDE_EXACT: ReadonlySet<string> = new Set([
   "package-lock.json",
   "pnpm-lock.yaml",
   "yarn.lock",
+  // Ayudas de review en la raíz (ver prefijos arriba para `review/`).
+  "artifacts/scope.md",
+  "scope.md",
+  "plan.md",
+  "triage.md",
+  "discoveries.json",
+  "discoveries.md",
 ]);
 
 /** Tope de paths por `git add --` (misma cota que el reporte de cambios). */
@@ -462,6 +472,13 @@ export async function commitWorktreeChanges(input: {
             ":!logs",
             ":!.hydra",
             ":!.worktrees",
+            ":!review",
+            ":!artifacts/scope.md",
+            ":!scope.md",
+            ":!plan.md",
+            ":!triage.md",
+            ":!discoveries.json",
+            ":!discoveries.md",
             ":!*.log",
           ],
           {
