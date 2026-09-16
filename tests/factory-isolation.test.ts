@@ -1438,6 +1438,39 @@ test("exec: commit selectivo deja fuera node_modules/logs (sin -A ciego)", async
   assert.ok(!addArgs.some((a) => String(a).includes(".agents")));
 });
 
+test("exec: commit lleva body del job record; headline intacto sin body", async () => {
+  const { calls, run } = fakeGit({
+    "git status": { stdout: " M src/a.ts\n" },
+    "git add": { stdout: "" },
+    "git -c": { stdout: "[issue-9-x abc1234] factory: implement\n" },
+  });
+  const { commitWorktreeChanges } = await import(
+    "../headless-runtime/factory/isolation/gitHubPr.ts"
+  );
+  const { summarizeDetailsForCommit: summarize } = await import(
+    "../headless-runtime/factory/isolation/isolationStore.ts"
+  );
+  assert.equal(
+    summarize({ summary: "Fixes the crash", files: ["src/a.ts"] }),
+    "Fixes the crash\nFiles: src/a.ts",
+  );
+  assert.equal(summarize(null), "");
+  const withBody = await commitWorktreeChanges({
+    repoPath: "/r/wt",
+    issueNumber: 9,
+    run,
+    knownStatus: " M src/a.ts\n",
+    messageBody: "Fixes the crash\nFiles: src/a.ts",
+  });
+  assert.equal(withBody.ok, true);
+  const commits = calls.filter((c) => c.cmd === "git" && c.args[0] === "-c");
+  assert.equal(commits.length, 1);
+  const mFlags = commits[0]?.args.filter((a) => a === "-m") ?? [];
+  assert.equal(mFlags.length, 2);
+  assert.ok(commits[0]?.args.includes("factory: implement issue #9 (handoff)"));
+  assert.ok(commits[0]?.args.includes("Fixes the crash\nFiles: src/a.ts"));
+});
+
 test("exec: commit todo-excluido es honesto (ok:false, sin commit)", async () => {
   const { calls, run } = fakeGit({ git: { stdout: "" } });
   const { commitWorktreeChanges } = await import(
@@ -1622,6 +1655,44 @@ test("p1: Nothing material solo con steps reales", () => {
     verification: { overall: "pass", steps: [{ name: "test", command: "pnpm test", status: "pass" }] },
   });
   assert.ok(body.includes("- **Not verified:** Nothing material."));
+});
+
+test("pr-body: Contract/Seams/Red-green/Follow-ups del reporte van al body; ausentes se omiten", () => {
+  const report = [
+    "Intro del cambio.",
+    "",
+    "## Contract",
+    "- Invariant: la clave original jamás se pisa",
+    "- Scope boundary: solo read path",
+    "- Root cause: parse sin validar",
+    "",
+    "## Changed seams",
+    "| `store → app` | guards | `js/store.js:8` |",
+    "",
+    "## Validation",
+    "- `node tests/x.test.js` — 3 pass",
+    "- Red/green: falla sin fix con Error x / pasa con fix",
+    "",
+    "## Discoveries",
+    "- D1 — aviso de escritura — accepted: issue #99",
+  ].join("\n");
+  const body = buildPrBody(9, "T", {
+    implementReport: report,
+    verification: { overall: "pass", steps: [{ name: "test", command: "node tests/x.test.js", status: "pass" }] },
+  });
+  assert.ok(body.includes("- **Invariant:** la clave original jamás se pisa"));
+  assert.ok(body.includes("- **Scope boundary:** solo read path"));
+  assert.ok(body.includes("- **Root cause:** parse sin validar"));
+  assert.ok(body.includes("### Changed seams"));
+  assert.ok(body.includes("`store → app`"));
+  assert.ok(body.includes("Red/green: falla sin fix"));
+  assert.ok(body.includes("### Follow-ups"));
+  assert.ok(body.includes("issue #99"));
+  const bare = buildPrBody(9, "T", { implementReport: "Intro sin secciones." });
+  assert.ok(!bare.includes("Invariant:"));
+  assert.ok(!bare.includes("Changed seams"));
+  assert.ok(!bare.includes("Red/green:"));
+  assert.ok(!bare.includes("Follow-ups"));
 });
 
 test("p1: buildPrDetailsFromJob recoge planPublication http e ignora paths", () => {

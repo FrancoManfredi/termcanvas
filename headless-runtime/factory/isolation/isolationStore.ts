@@ -244,6 +244,106 @@ export function extractNotVerified(guidance: string): string {
   }
 }
 
+/**
+ * Primera línea `- <etiqueta>: <valor>` del reporte (case-insensitive,
+ * aliases EN/ES). Para Invariant / Scope boundary / Root cause del bloque
+ * `## Contract` del implement. Puro, nunca lanza.
+ */
+export function extractLabeledLine(text: unknown, labels: readonly string[]): string {
+  try {
+    if (typeof text !== "string" || text.trim() === "") return "";
+    const wanted = labels
+      .map((n) => (typeof n === "string" ? n.trim().toLowerCase() : ""))
+      .filter((n) => n !== "");
+    if (wanted.length === 0) return "";
+    for (const raw of text.replace(/\r/g, "").split("\n")) {
+      const line = raw.replace(/^[-*]\s+/, "").trim();
+      const hit = wanted.find((w) => line.toLowerCase().startsWith(`${w}:`));
+      if (hit !== undefined) {
+        return line.slice(hit.length + 1).trim().slice(0, 300);
+      }
+    }
+    return "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Líneas red/green de la sección `## Validation` del reporte
+ * (`- Red/green: <fallo sin fix> / <pase con fix>`). Puro, nunca lanza.
+ */
+export function extractRedGreenLines(text: unknown): string[] {
+  try {
+    if (typeof text !== "string" || text.trim() === "") return [];
+    const section = extractReportSection(text, ["validation", "validación"]);
+    if (section === "") return [];
+    return section
+      .split("\n")
+      .map((l) => l.replace(/^[-*]\s+/, "").trim())
+      .filter((l) => /red[\s/-]*green/i.test(l))
+      .map((l) => l.slice(0, 300))
+      .slice(0, 5);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Resumen para el cuerpo del commit del orquestador (headline intacto en
+ * el llamador): summary + archivos + validación, acotado. Puro, nunca
+ * lanza. Vacío cuando no hay nada que decir.
+ */
+export function summarizeDetailsForCommit(details: unknown): string {
+  try {
+    if (!details || typeof details !== "object" || Array.isArray(details)) return "";
+    const d = details as {
+      summary?: unknown;
+      files?: unknown;
+      verification?: unknown;
+    };
+    const parts: string[] = [];
+    if (typeof d.summary === "string" && d.summary.trim() !== "") {
+      const first = (d.summary.split("\n")[0] ?? "").trim().slice(0, 200);
+      if (first !== "") parts.push(first);
+    }
+    if (Array.isArray(d.files)) {
+      const files = d.files
+        .map((x) => (typeof x === "string" ? x.trim().slice(0, 120) : ""))
+        .filter((s) => s.length > 0)
+        .slice(0, 10);
+      if (files.length > 0) parts.push(`Files: ${files.join(", ")}`);
+    }
+    const v = d.verification;
+    if (v && typeof v === "object" && !Array.isArray(v)) {
+      const rec = v as { steps?: unknown; overall?: unknown };
+      if (Array.isArray(rec.steps)) {
+        const rows = (rec.steps as Array<Record<string, unknown>>)
+          .map((s) => {
+            if (!s || typeof s !== "object") return "";
+            const cmd =
+              typeof s.command === "string" && s.command.trim() !== ""
+                ? s.command.trim()
+                : typeof s.name === "string"
+                  ? s.name.trim()
+                  : "step";
+            const status =
+              typeof s.status === "string" ? s.status.trim().toUpperCase() : "?";
+            return `${cmd} ${status}`;
+          })
+          .filter((s) => s.length > 0)
+          .slice(0, 8);
+        if (rows.length > 0) parts.push(`Validation: ${rows.join("; ")}`);
+      } else if (typeof rec.overall === "string" && rec.overall.trim() !== "") {
+        parts.push(`Validation: ${rec.overall.trim().slice(0, 120)}`);
+      }
+    }
+    return parts.join("\n").slice(0, 1000);
+  } catch {
+    return "";
+  }
+}
+
 /** Trimmed single-line-safe text detail; empty when junk. Never throws. */
 function cleanDetailText(v: unknown, max: number): string {
   try {
@@ -392,6 +492,18 @@ export function buildPrBody(
     if (outcomeLine.trim().length > 0) {
       po.push(`- **Outcome:** ${outcomeLine.trim().slice(0, 400)}`);
     }
+    // Contrato del implement (bloque ## Contract): invariante, límite de
+    // scope y causa raíz van bajo Problem and outcome, como el template.
+    const invariant = extractLabeledLine(reportText, ["invariant", "invariante"]);
+    if (invariant !== "") po.push(`- **Invariant:** ${invariant}`);
+    const boundary = extractLabeledLine(reportText, [
+      "scope boundary",
+      "scope-boundary",
+      "alcance",
+    ]);
+    if (boundary !== "") po.push(`- **Scope boundary:** ${boundary}`);
+    const cause = extractLabeledLine(reportText, ["root cause", "root-cause", "causa"]);
+    if (cause !== "") po.push(`- **Root cause:** ${cause}`);
     lines.push("", "## Problem and outcome", ...po);
     if (solution.length > 0 && solution !== outcomeLine) {
       lines.push("", "## Solution", solution);
@@ -423,22 +535,48 @@ export function buildPrBody(
     if (files.length > 0) {
       lines.push("", "## Changed files", ...files.map((f) => `- \`${f}\``));
     }
+    // Seams tocados (tabla del implement): se renderiza tal cual viene.
+    const seams =
+      reportText.trim() !== ""
+        ? extractReportSection(reportText, ["changed seams", "seams", "tabla de seams"])
+        : "";
+    if (seams !== "") {
+      lines.push("", "### Changed seams", "", ...seams.split("\n").slice(0, 30));
+    }
     const ver = verificationLines(details?.verification);
     const notVerified = extractNotVerified(guidance);
+    // Red/green citado por el implement: la prueba de que el test
+    // discrimina (falla sin fix, pasa con fix).
+    const redgreen =
+      reportText.trim() !== "" ? extractRedGreenLines(reportText) : [];
     // Honest validation (prp-pr rule): only verification that actually ran
     // counts. "Nothing material" is claimed only when real steps ran; a
     // pending claim without steps stays visible as unrunned coverage.
-    if (ver.length > 0 || notVerified.length > 0) {
+    if (ver.length > 0 || notVerified.length > 0 || redgreen.length > 0) {
       lines.push("", "## Validation", ...ver);
+      for (const rg of redgreen) lines.push(`- Red/green: ${rg}`);
       if (notVerified.length > 0 && notVerified !== "Nothing material.") {
         lines.push(`- **Not verified:** ${notVerified}`);
-      } else if (ver.length > 0) {
+      } else if (ver.length > 0 || redgreen.length > 0) {
         lines.push("- **Not verified:** Nothing material.");
       } else {
         lines.push(
           "- **Not verified:** Claimed nothing pending — no verification steps ran.",
         );
       }
+    }
+    // Follow-ups aceptados por el implement (con número de issue cuando lo creó).
+    const followups =
+      reportText.trim() !== ""
+        ? extractReportSection(reportText, [
+            "discoveries",
+            "follow-ups",
+            "follow-up",
+            "descubrimientos",
+          ])
+        : "";
+    if (followups !== "") {
+      lines.push("", "### Follow-ups", "", ...followups.split("\n").slice(0, 20));
     }
     const branch = cleanDetailText(details?.branch, 120);
     const base = cleanDetailText(details?.baseBranch, 120);

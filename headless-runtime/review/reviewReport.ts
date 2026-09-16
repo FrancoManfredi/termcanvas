@@ -71,6 +71,37 @@ const TERMINAL_STATES: readonly string[] = [
 
 const VERDICTS: readonly string[] = ["READY TO MERGE", "NEEDS FIXES", "REVIEW INCOMPLETE"];
 
+/**
+ * True si queda algún finding abierto bloqueante: estado no terminal y
+ * severidad de engine major/blocker (o ya canónica Critical). Los
+ * info/minor (canónicos Suggestion/Important) pueden convivir con verde
+ * por regla del ciclo; un major/blocker abierto con veredicto READY es
+ * contradictorio y el llamador debe forzar NEEDS FIXES. Puro, nunca lanza.
+ */
+export function hasOpenBlockingFindings(list: unknown): boolean {
+  try {
+    if (!Array.isArray(list)) return false;
+    return list.some((entry) => {
+      try {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+          return false;
+        }
+        const f = entry as Record<string, unknown>;
+        const state =
+          typeof f.state === "string" ? f.state.trim().toUpperCase() : "";
+        if (TERMINAL_STATES.includes(state)) return false;
+        const sev =
+          typeof f.severity === "string" ? f.severity.trim().toLowerCase() : "";
+        return sev === "major" || sev === "blocker" || sev === "critical";
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    return false;
+  }
+}
+
 /** Engine severities (blocker/major/minor/info) mapped to report severities. */
 export function canonicalSeverity(sev: unknown): CanonicalSeverity {
   try {

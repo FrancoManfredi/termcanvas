@@ -60,8 +60,9 @@ nodes:
 
             Al terminar, cerrá tu reporte con estas secciones (markdown, sin JSON):
             - Qué cambió y por qué (2-4 frases), archivos tocados (rutas relativas) y comandos ejecutados con su resultado.
-            - Prueba red/green: para cada bugfix, citá el comando y el fallo exacto con el fix neutralizado, y el pase con el fix aplicado. Sin esta cita no hay verde.
-            - Tabla de seams tocados (`productor → consumidor` | cambio | evidencia `path:línea`).
+            - ## Contract: tres líneas `- Invariant: ...`, `- Scope boundary: ...`, `- Root cause: ...` (bugs; omitir la tercera si no es bug). Van al body del PR.
+            - ## Changed seams: tabla `productor → consumidor` | cambio | evidencia `path:línea` (vacía = "ninguno").
+            - ## Validation: comandos con resultado + línea `- Red/green: <fallo exacto sin fix> / <pase con fix>` por cada bugfix. Sin esta cita no hay verde.
             - ## Discoveries (hallazgos válidos fuera del scope del triaje: NO los implementes): uno por línea `- Dn — <título> — <accepted|dropped>: <razón>`. Por cada accepted, creá el issue con `gh issue create` en el repo del worktree y registrá su número (`gh` usa el token del entorno; si falla la creación, marcá `dropped: sin token` con la razón).
             - ## Review guidance
               - Empezar por: `<path>:<línea>` — el cambio que más importa mirar primero.
@@ -112,6 +113,18 @@ nodes:
                         reason: { type: string }
                       required: [commands, reason]
                   required: [id, severity, message]
+            discoveries:
+              type: array
+              items:
+                type: object
+                properties:
+                  id: { type: string }
+                  title: { type: string }
+                  status:
+                    type: string
+                    enum: [accepted, dropped]
+                  issue: { type: number }
+                required: [id, title, status]
             required: [green, findings]
           prompt: |
             Revisá el cambio contra el issue original Y contra el contrato congelado.
@@ -147,7 +160,9 @@ nodes:
             Si la implementación reporta `ESCALATE` (triaje bloqueado o sin acción), no inventes findings de código: devolvé `green: false` con un único finding `info` que cite el bloqueo. El job queda en Review para decisión humana, nunca en Complete.
 
             Respondé en prosa breve (veredicto y por qué, 2-4 frases) y cerrá con UN bloque ```json con el shape exacto:
-            {"green": boolean, "summary": "veredicto en 2-4 frases decisivas, sin proceso", "findings": [{"id": "f1", "axis": "requirements|tests|security", "severity": "info|minor|major|blocker", "file": "ruta", "message": "qué está mal", "suggestion": "cómo arreglarlo", "reverify": {"commands": ["git status --porcelain"], "reason": "por qué"}}]}
+            {"green": boolean, "summary": "veredicto en 2-4 frases decisivas, sin proceso", "findings": [{"id": "f1", "axis": "requirements|tests|security", "severity": "info|minor|major|blocker", "file": "ruta", "message": "qué está mal", "suggestion": "cómo arreglarlo", "reverify": {"commands": ["git status --porcelain"], "reason": "por qué"}}], "discoveries": [{"id": "D1", "title": "hallazgo fuera de scope", "status": "accepted|dropped", "issue": 123}]}
+
+            - `discoveries` espeja la sección Discoveries del implement (IDs estables, nunca renumerar): solo `accepted` con número de issue creado cuenta como cerrado; lo demás queda `dropped` con razón. No inventes números: solo los que cite el implement.
 
             El veredicto vive en el campo `summary`: es lo que lee el humano en el PR. La prosa fuera del JSON es opcional y breve.
 

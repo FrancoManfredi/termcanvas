@@ -9,6 +9,7 @@ import {
   buildReviewReport,
   canonicalSeverity,
   curateSummary,
+  hasOpenBlockingFindings,
   parseReviewReportMeta,
   refreshReviewReportMeta,
 } from "../headless-runtime/review/reviewReport.ts";
@@ -20,6 +21,31 @@ test("severity: engine severities map to Critical/Important/Suggestion", () => {
   assert.equal(canonicalSeverity("info"), "Suggestion");
   assert.equal(canonicalSeverity("junk"), "Suggestion");
   assert.equal(canonicalSeverity(null), "Suggestion");
+});
+
+test("gate: open major/blocker forces NEEDS FIXES; terminal and minor do not", () => {
+  const major = (state?: string) => ({
+    id: "f1",
+    severity: "major",
+    message: "m",
+    ...(state === undefined ? {} : { state }),
+  });
+  assert.equal(hasOpenBlockingFindings([major()]), true);
+  assert.equal(hasOpenBlockingFindings([major("OPEN")]), true);
+  assert.equal(hasOpenBlockingFindings([{ ...major(), severity: "blocker" }]), true);
+  assert.equal(hasOpenBlockingFindings([{ ...major(), severity: "Critical" }]), true);
+  assert.equal(hasOpenBlockingFindings([{ ...major("FIXED"), severity: "major" }]), false);
+  assert.equal(
+    hasOpenBlockingFindings([{ ...major("TRACKED_FOLLOW_UP"), severity: "major" }]),
+    false,
+  );
+  assert.equal(hasOpenBlockingFindings([{ ...major("DECLINED") }]), false);
+  assert.equal(hasOpenBlockingFindings([{ ...major(), severity: "minor" }]), false);
+  assert.equal(hasOpenBlockingFindings([{ ...major(), severity: "info" }]), false);
+  assert.equal(hasOpenBlockingFindings([{ ...major(), severity: "Important" }]), false);
+  assert.equal(hasOpenBlockingFindings([{ ...major(), severity: "Suggestion" }]), false);
+  assert.equal(hasOpenBlockingFindings([]), false);
+  assert.equal(hasOpenBlockingFindings(null), false);
 });
 
 test("ready report: exact metadata lines + sections + parse round-trip", () => {

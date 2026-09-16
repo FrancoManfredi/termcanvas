@@ -19,7 +19,7 @@ import os from "node:os";
 import path from "node:path";
 import { workItemStore } from "../../workItem/workItemStore";
 import type { WorkItem } from "../../../shared/types/workItem";
-import { buildPrBody, buildPrTitle, prGuard, parseIssueTitleFromPrompt, type PrBodyDetails } from "./isolationStore";
+import { buildPrBody, buildPrTitle, prGuard, parseIssueTitleFromPrompt, summarizeDetailsForCommit, type PrBodyDetails } from "./isolationStore";
 import { refreshReviewReportMeta, parseReviewReportMeta } from "../../review/reviewReport";
 
 /** Bound G02: `git push -u origin <branch>`, single attempt. */
@@ -402,6 +402,11 @@ export async function commitWorktreeChanges(input: {
   run: GhExecRun;
   knownStatus?: string | null;
   allowedPaths?: readonly unknown[];
+  /**
+   * Cuerpo del commit (summary + files + validation, ya acotado por el
+   * caller). Headline intacto. Vacío = commit solo con headline.
+   */
+  messageBody?: unknown;
 }): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
     const repoPath = typeof input?.repoPath === "string" ? input.repoPath : "";
@@ -491,19 +496,24 @@ export async function commitWorktreeChanges(input: {
       }
     }
     try {
-      await run(
-        "git",
-        [
-          "-c",
-          `user.name=${FACTORY_GIT_USER_NAME}`,
-          "-c",
-          `user.email=${FACTORY_GIT_USER_EMAIL}`,
-          "commit",
-          "-m",
-          `factory: implement issue #${n} (handoff)`,
-        ],
-        { cwd: repoPath, timeoutMs: GIT_COMMIT_TIMEOUT_MS },
-      );
+      const bodyText =
+        typeof input?.messageBody === "string" && input.messageBody.trim() !== ""
+          ? input.messageBody.trim().slice(0, 1500)
+          : "";
+      const commitArgs = [
+        "-c",
+        `user.name=${FACTORY_GIT_USER_NAME}`,
+        "-c",
+        `user.email=${FACTORY_GIT_USER_EMAIL}`,
+        "commit",
+        "-m",
+        `factory: implement issue #${n} (handoff)`,
+        ...(bodyText !== "" ? ["-m", bodyText] : []),
+      ];
+      await run("git", commitArgs, {
+        cwd: repoPath,
+        timeoutMs: GIT_COMMIT_TIMEOUT_MS,
+      });
     } catch (e) {
       return { ok: false, error: sliceError(`git commit failed: ${e instanceof Error ? e.message : String(e)}`) };
     }
@@ -770,6 +780,7 @@ export async function openPrForJob(
         run,
         knownStatus: status,
         allowedPaths: input?.allowedPaths,
+        messageBody: summarizeDetailsForCommit(input?.details),
       }).catch(() => ({ ok: false as const, error: "commit spawn failed" }));
       if (!committed.ok) {
         return {

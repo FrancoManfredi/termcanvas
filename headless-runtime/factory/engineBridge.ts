@@ -32,6 +32,7 @@ import { extractDispositions } from "./isolation/isolationStore";
 import {
   buildReviewReport,
   curateSummary,
+  hasOpenBlockingFindings,
   parseReviewReportMeta,
 } from "../review/reviewReport";
 import type { WorkflowRuntime } from "../workflows/runtime";
@@ -555,7 +556,13 @@ export function mirrorRunEvidence(itemId: string, run: WorkflowRun | null): void
           pr: 0,
           base: typeof iso?.baseBranch === "string" && iso.baseBranch !== "" ? iso.baseBranch : "(unknown)",
           head: typeof iso?.branch === "string" && iso.branch !== "" ? iso.branch : "(unknown)",
-          verdict: green ? "READY TO MERGE" : "NEEDS FIXES",
+          // Gate: un major/blocker abierto contradice el verde del agente
+          // (caso PR #156: READY con open_findings:1). El loop sigue al
+          // green del agente; el veredicto canónico no miente.
+          verdict:
+            green && !hasOpenBlockingFindings(engineFindings)
+              ? "READY TO MERGE"
+              : "NEEDS FIXES",
           summary:
             structuredSummary !== ""
               ? curateSummary(structuredSummary, 500) ||
@@ -1279,7 +1286,7 @@ export function handleGate(request: ApprovalRequest): void {
       workItemStore.setEngineGate(itemId, {
         nodeId: request.nodeId,
         kind: gateKind,
-        message: request.message.slice(0, 2000),
+        message: request.message,
         runId: request.runId,
         ...(typeof request.attempt === "number" ? { attempt: request.attempt } : {}),
       });
@@ -1312,7 +1319,7 @@ export function handleGate(request: ApprovalRequest): void {
       workItemStore.appendEvent(
         itemId,
         "system",
-        `engine: gate ${request.nodeId} — ${request.message}`.slice(0, 500),
+        `engine: gate ${request.nodeId} — ${request.message}`.slice(0, 20000),
         { workflowRunId: request.runId, gate: request.nodeId },
       );
     } catch {
@@ -1339,7 +1346,7 @@ export function handleGate(request: ApprovalRequest): void {
           reviewerModel: { providerID: "termcanvas", modelID: "workflow-gate" },
           verdict: "ask_human",
           confidence: 1,
-          summary: `Gate ${request.nodeId}: ${request.message}`.slice(0, 2000),
+          summary: `Gate ${request.nodeId}: ${request.message}`,
           findings: [],
           reviewAttempt: request.attempt,
           reviewedAt: new Date().toISOString(),
