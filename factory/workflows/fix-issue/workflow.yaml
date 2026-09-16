@@ -46,7 +46,7 @@ nodes:
 
             Si el triaje cierra con `Contract: BLOCKED` o `Contract: NO_ACTION`, no toques código: reportá `ESCALATE: <razón del triaje>` y cerrá sin cambios.
 
-            Contrato congelado (obligatorio, primero): antes de tocar código escribí `$ARTIFACTS_DIR/scope.md` con Required outcome (R1..Rn observables y testeables), Invariants y Explicit non-goals derivados del triaje. Si el archivo ya existe de una ronda previa, no lo reescribas: el scope queda congelado en la primera ronda.
+            Contrato congelado (obligatorio, primero): antes de tocar código escribí `artifacts/scope.md` en el worktree con Required outcome (R1..Rn observables y testeables), Invariants y Explicit non-goals derivados del triaje. Si el archivo ya existe de una ronda previa, no lo reescribas: el scope queda congelado en la primera ronda. (Vive en el worktree a propósito: los agentes no tienen permiso fuera de él; el commit del engine excluye las ayudas de review así que jamás shipea.)
 
             Issue: $INPUTS.issue_ref
 
@@ -129,8 +129,8 @@ nodes:
           prompt: |
             Revisá el cambio contra el issue original Y contra el contrato congelado.
 
-            Puerta de scope (primera verificación, bloqueante): el contrato vive en `$ARTIFACTS_DIR/scope.md`. Leelo antes de mirar el diff. Si no existe o está vacío, buscá la copia fallback `artifacts/scope.md` en el worktree y usala; si tampoco existe, devolvé `green: false` con un único finding `major` en eje `tests` ("sin contrato congelado no hay verde") y no juzgues el código. Juzgá el diff contra ese contrato, nunca contra un cambio ideal imaginado.
-            Higiene del diff: archivos de ayuda de review (`artifacts/scope.md`, `review/`, `scope.md`, `plan.md`, `triage.md`, `discoveries.json/md` en la raíz) no deben shipear — el commit del engine los excluye, pero si aparecen en el diff es finding `minor` en eje `requirements` (el contrato vive fuera del repo).
+            Puerta de scope (primera verificación, bloqueante): el contrato vive en `artifacts/scope.md` del worktree. Leelo antes de mirar el diff. Si no existe o está vacío, buscá la sección `## Contract` en el reporte del implement y usala; si tampoco existe, devolvé `green: false` con un único finding `major` en eje `tests` ("sin contrato congelado no hay verde") y no juzgues el código. Juzgá el diff contra ese contrato, nunca contra un cambio ideal imaginado.
+            Higiene del diff: archivos de ayuda de review (`review/`, `scope.md`, `plan.md`, `triage.md`, `discoveries.json/md` en la raíz) no deben shipear — el commit del engine los excluye (`artifacts/scope.md` es la única copia tolerada en el worktree, y tampoco shipea); cualquier otro en el diff es finding `minor` en eje `requirements`.
             Fuerza de asserts: un test que pasa con cardinalidades múltiples donde el comportamiento exige exacta (ej. foco disparado ≥1 vez en vez de exactamente 1) es finding `minor` en eje `tests`. Reachability: si una rama `catch`/fallback es inalcanzable dados los guards aguas arriba, el mensaje que muestra es finding `major` (etiqueta un fallo imposible y traga el real).
 
             Issue: $INPUTS.issue_ref

@@ -13,11 +13,13 @@ outside the accepted scope lands silently: adjacent findings become
 ## Phase 0 -- Branch and frozen scope
 
 - Branch from `main`: `fix/issue-<N>-<kebab>` or `feat/issue-<N>-<kebab>`.
-- Write `scope.md` BEFORE implementing and freeze it. **Gate: no source
-  change lands before `scope.md` exists.** The reviewer's first check in
-  every round is "scope present and frozen"; a round without it is invalid.
-  The reviewer verifies against this contract, never against an imagined
-  ideal change:
+- Write `artifacts/scope.md` in the worktree BEFORE implementing and freeze
+  it. **Gate: no source change lands before `scope.md` exists.** It lives
+  in the worktree on purpose (agents have no permission outside it); the
+  engine excludes review-aids at commit so it never ships. The reviewer's
+  first check in every round is "scope present and frozen"; a round
+  without it is invalid. The reviewer verifies against this contract,
+  never against an imagined ideal change:
 
 ```markdown
 # Scope -- issue #<N>: <title>

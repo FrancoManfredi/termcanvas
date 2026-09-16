@@ -7,8 +7,9 @@ description: Run the full PR review cycle the way high-quality agent PRs do it -
 
 > Factory adaptation (mirror of `.opencode/skills/pr-review-cycle`; keep
 > both in sync): inside factory workflows this ritual runs WITHOUT
-> posting. Mapping: `scope.md` lives at `$ARTIFACTS_DIR/scope.md`
-> (implement writes it before code; review reads it first); rounds are
+> posting. Mapping: `scope.md` lives at `artifacts/scope.md` in the
+> worktree (the only place agents can read/write; the engine excludes
+> review-aids at commit so it never ships); rounds are
 > loop iterations with engine-injected history (stable IDs enforced by
 > the engine); red/green proof is judged from system-owned verify
 > evidence; discoveries become GitHub issues via implement's bash+gh
@@ -25,11 +26,13 @@ outside the accepted scope lands silently: adjacent findings become
 ## Phase 0 -- Branch and frozen scope
 
 - Branch from `main`: `fix/issue-<N>-<kebab>` or `feat/issue-<N>-<kebab>`.
-- Write `scope.md` BEFORE implementing and freeze it. **Gate: no source
-  change lands before `scope.md` exists.** The reviewer's first check in
-  every round is "scope present and frozen"; a round without it is invalid.
-  The reviewer verifies against this contract, never against an imagined
-  ideal change:
+- Write `artifacts/scope.md` in the worktree BEFORE implementing and freeze
+  it. **Gate: no source change lands before `scope.md` exists.** It lives
+  in the worktree on purpose (agents have no permission outside it); the
+  engine excludes review-aids at commit so it never ships. The reviewer's
+  first check in every round is "scope present and frozen"; a round
+  without it is invalid. The reviewer verifies against this contract,
+  never against an imagined ideal change:
 
 ```markdown
 # Scope -- issue #<N>: <title>
