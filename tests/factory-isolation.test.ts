@@ -1061,6 +1061,57 @@ test("exec: openPr pushes once then creates with Closes body (no merge primitive
   assert.ok(bodyIdx >= 0 && ghArgs[bodyIdx + 1] === written[0]?.file);
 });
 
+test("exec: commit body y Changed files salen del record + diff real (no del relato)", async () => {
+  const { calls, run } = fakeGit({
+    "git rev-list": { stdout: "" },
+    "git status": { stdout: " M src/a.ts\n" },
+    "git add": { stdout: "" },
+    "git -c": { stdout: "[issue-9-x abc1234] factory: implement\n" },
+    "git push": { stdout: "" },
+    "git diff": { stdout: "src/a.ts\ntests/a.test.js\n" },
+    "gh pr view": { stdout: "" },
+    "gh pr create": { stdout: "https://github.com/o/r/pull/99\n" },
+    "gh pr edit": { stdout: "" },
+  });
+  const written: Array<{ file: string; body: string }> = [];
+  const { openPrForJob } = await import(
+    "../headless-runtime/factory/isolation/gitHubPr.ts"
+  );
+  const got = await openPrForJob({
+    repoPath: "/r/wt",
+    branch: "issue-9-x",
+    baseBranch: "main",
+    issueNumber: 9,
+    run,
+    writeBodyFile: (file, body) => {
+      written.push({ file, body });
+    },
+    unlinkBodyFile: () => {},
+    details: {
+      summary: "Fixes the crash",
+      verification: {
+        overall: "pass",
+        steps: [{ command: "node x.test.js", status: "pass" }],
+      },
+    },
+  });
+  assert.equal(got.ok, true);
+  const commits = calls.filter((c) => c.cmd === "git" && c.args[0] === "-c");
+  assert.equal(commits.length, 1);
+  const cargs = [...(commits[0]?.args ?? [])];
+  assert.ok(cargs.includes("factory: implement issue #9 (handoff)"));
+  const mIdx = cargs.lastIndexOf("-m");
+  assert.ok(mIdx >= 0);
+  const msgBody = String(cargs[mIdx + 1] ?? "");
+  assert.ok(msgBody.includes("Fixes the crash"));
+  assert.ok(msgBody.includes("Files: src/a.ts"));
+  assert.ok(msgBody.includes("node x.test.js PASS"));
+  assert.equal(written.length, 1);
+  assert.ok(written[0]?.body.includes("## Changed files"));
+  assert.ok(written[0]?.body.includes("tests/a.test.js"));
+  assert.ok(written[0]?.body.includes("## Validation"));
+});
+
 test("exec: push failure is honest with a manual hint", async () => {
   const run = async (cmd: string) => {
     if (cmd === "git") throw new Error("rejected: no permission");
@@ -1310,6 +1361,7 @@ test("exec: dirty worktree → add+commit del sistema antes de push+pr", async (
     "git add",
     "git commit",
     "git push",
+    "git diff",
     "gh pr",
     "gh pr",
     "gh pr",

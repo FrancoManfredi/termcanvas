@@ -451,9 +451,10 @@ export function mirrorRunEvidence(itemId: string, run: WorkflowRun | null): void
     });
 
     // Reporte del implement para el PR (Solution + Review guidance): la
-    // salida de la última ronda, recortada. El PR la lee por secciones.
+    // salida de la última ronda, recortada con margen (los extractores
+    // acotan por sección; un corte bajo decapita Contract/Seams/Validation).
     const implNode = pick(/implement/i);
-    const implReport = (implNode?.output ?? "").trim().slice(0, 3000);
+    const implReport = (implNode?.output ?? "").trim().slice(0, 12000);
     if (implReport !== "") {
       try {
         workItemStore.appendEvent(itemId, "runner", "engine implement report", {
@@ -591,6 +592,35 @@ export function mirrorRunEvidence(itemId: string, run: WorkflowRun | null): void
           });
         } catch {
           // evento best-effort: el archivo ya quedó
+        }
+        // Verificación + lastReview para el PR: buildPrDetailsFromJob solo
+        // lee timeline meta + item.lastReview. Sin esto, Validation y commit
+        // body salen vacíos aunque la evidencia exista (caso PR #157).
+        try {
+          workItemStore.appendEvent(itemId, "runner", "engine verification report", {
+            verification: {
+              overall,
+              steps: report.steps.map((s) => ({
+                name: s.name,
+                command: s.command,
+                status: s.status,
+              })),
+            },
+          });
+        } catch {
+          // best-effort: verify.json sigue siendo la fuente real
+        }
+        try {
+          const prev = workItemStore.get(itemId) as unknown as
+            | { reviewCount?: unknown }
+            | undefined;
+          const prevCount =
+            prev && typeof prev.reviewCount === "number" && Number.isInteger(prev.reviewCount) && prev.reviewCount >= 0
+              ? prev.reviewCount
+              : 0;
+          workItemStore.setReview(itemId, result, prevCount + 1);
+        } catch {
+          // best-effort: review.json + timeline ya quedaron
         }
       } catch {
         // reporte canónico best-effort: review.json sigue siendo la fuente

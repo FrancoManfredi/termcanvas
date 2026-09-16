@@ -132,6 +132,7 @@ nodes:
             Puerta de scope (primera verificación, bloqueante): el contrato vive en `artifacts/scope.md` del worktree. Leelo antes de mirar el diff. Si no existe o está vacío, buscá la sección `## Contract` en el reporte del implement y usala; si tampoco existe, devolvé `green: false` con un único finding `major` en eje `tests` ("sin contrato congelado no hay verde") y no juzgues el código. Juzgá el diff contra ese contrato, nunca contra un cambio ideal imaginado.
             Higiene del diff: archivos de ayuda de review (`review/`, `scope.md`, `plan.md`, `triage.md`, `discoveries.json/md` en la raíz) no deben shipear — el commit del engine los excluye (`artifacts/scope.md` es la única copia tolerada en el worktree, y tampoco shipea); cualquier otro en el diff es finding `minor` en eje `requirements`.
             Fuerza de asserts: un test que pasa con cardinalidades múltiples donde el comportamiento exige exacta (ej. foco disparado ≥1 vez en vez de exactamente 1) es finding `minor` en eje `tests`. Reachability: si una rama `catch`/fallback es inalcanzable dados los guards aguas arriba, el mensaje que muestra es finding `major` (etiqueta un fallo imposible y traga el real).
+            Completitud del reporte: el reporte del implement debe traer las secciones `## Contract`, `## Changed seams`, `## Validation` (con línea `Red/green:`), `## Discoveries` y `## Review guidance`; cada sección ausente es finding `minor` en eje `tests` (el body del PR se arma desde esas secciones y lo ausente no se publica).
 
             Issue: $INPUTS.issue_ref
 

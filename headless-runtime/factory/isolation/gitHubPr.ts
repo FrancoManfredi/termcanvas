@@ -52,6 +52,9 @@ export const GH_PR_COMMENT_TIMEOUT_MS = 30000;
 /** Bound for the publish head probe (`git rev-parse <branch>`). */
 export const GIT_REV_PARSE_TIMEOUT_MS = 10000;
 
+/** Bound for ground-truth PR files (`git diff --name-only base...branch`). */
+export const GIT_DIFF_TIMEOUT_MS = 15000;
+
 /** Cycle label for a brand-new reviewable PR (canvas parity). */
 const REVIEW_LABEL_PENDING = "review:pendiente";
 
@@ -774,13 +777,22 @@ export async function openPrForJob(
       // best-effort; fall through to the push/PR attempt
     }
     if (status !== "" && status !== null) {
+      // Archivos del commit desde el porcelain ya leído (ground truth de
+      // lo que se commitea; el body del PR usa el diff post-commit abajo).
+      const pendingFiles = parsePorcelainPaths(status).filter((f) =>
+        isCommittablePath(f),
+      );
+      const commitDetails =
+        input?.details && typeof input.details === "object" && !Array.isArray(input.details)
+          ? { ...(input.details as Record<string, unknown>), files: pendingFiles }
+          : { files: pendingFiles };
       const committed = await commitWorktreeChanges({
         repoPath,
         issueNumber: n,
         run,
         knownStatus: status,
         allowedPaths: input?.allowedPaths,
-        messageBody: summarizeDetailsForCommit(input?.details),
+        messageBody: summarizeDetailsForCommit(commitDetails),
       }).catch(() => ({ ok: false as const, error: "commit spawn failed" }));
       if (!committed.ok) {
         return {
@@ -812,7 +824,33 @@ export async function openPrForJob(
         manualHint: hint,
       };
     }
-    const body = buildPrBody(n, input?.title, input?.details);
+    // Changed files ground-truth (el diff real del PR): no depende del
+    // reporte del agente. Best-effort: si falla, el body usa lo declarado.
+    let diffFiles: string[] = [];
+    try {
+      const d = await run(
+        "git",
+        ["diff", "--name-only", `${baseBranch}...${branch}`],
+        { cwd: repoPath, timeoutMs: GIT_DIFF_TIMEOUT_MS },
+      );
+      diffFiles = d.stdout
+        .split("\n")
+        .map((s) => s.trim().replace(/\\/g, "/").replace(/^\.\//, ""))
+        .filter((s) => s.length > 0 && isCommittablePath(s))
+        .slice(0, 50);
+    } catch {
+      diffFiles = [];
+    }
+    const bodyDetails =
+      input?.details && typeof input.details === "object" && !Array.isArray(input.details)
+        ? {
+            ...(input.details as Record<string, unknown>),
+            ...(diffFiles.length > 0 ? { files: diffFiles } : {}),
+          }
+        : diffFiles.length > 0
+          ? { files: diffFiles }
+          : input?.details;
+    const body = buildPrBody(n, input?.title, bodyDetails);
     const bodyFile = path.join(
       os.tmpdir(),
       `termcanvas-pr-${n}-${Date.now().toString(36)}.md`,
@@ -1788,7 +1826,9 @@ export function buildPrDetailsFromJob(job: unknown): {
         typeof m.implementReport === "string" &&
         m.implementReport.trim() !== ""
       ) {
-        implementReport = m.implementReport.slice(0, 3000);
+        // Cap alto: los extractores acotan por sección; un corte bajo
+        // decapita Contract/Seams/Validation/Discoveries (caso PR #157).
+        implementReport = m.implementReport.trim().slice(0, 12000);
       }
       // Verified published-plan URL only (local paths never qualify; the
       // body renderer re-validates the http(s) shape before printing).
