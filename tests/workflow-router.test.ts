@@ -67,13 +67,16 @@ test("router: elección LLM válida (JSON directo y con fences)", async () => {
 
 test("router: nombre desconocido / JSON roto / throw → fallback", async () => {
   const unknown = await selectWorkflowForItem(
-    baseInput({ runner: runnerReturning('{"workflow":"no-existe","reason":"x"}') }),
+    baseInput({
+      runner: runnerReturning('{"workflow":"no-existe","reason":"x"}'),
+      retryDelayMs: 0,
+    }),
   );
   assert.equal(unknown.workflow, FALLBACK_WORKFLOW);
   assert.equal(unknown.routedBy, "fallback");
 
   const junk = await selectWorkflowForItem(
-    baseInput({ runner: runnerReturning("no soy json") }),
+    baseInput({ runner: runnerReturning("no soy json"), retryDelayMs: 0 }),
   );
   assert.equal(junk.workflow, FALLBACK_WORKFLOW);
   assert.equal(junk.routedBy, "fallback");
@@ -83,6 +86,7 @@ test("router: nombre desconocido / JSON roto / throw → fallback", async () => 
       runner: (async () => {
         throw new Error("boom");
       }) as AiNodeRunner,
+      retryDelayMs: 0,
     }),
   );
   assert.equal(throwing.workflow, FALLBACK_WORKFLOW);
@@ -93,10 +97,81 @@ test("router: timeout → fallback sin colgarse", async () => {
   const hanging = (() => new Promise(() => {})) as unknown as AiNodeRunner;
   const t0 = Date.now();
   const out = await selectWorkflowForItem(
-    baseInput({ runner: hanging, timeoutMs: 100 }),
+    baseInput({ runner: hanging, timeoutMs: 100, retryDelayMs: 0 }),
   );
   assert.equal(out.workflow, FALLBACK_WORKFLOW);
   assert.ok(Date.now() - t0 < 5_000, "corta por timeout, no cuelga");
+});
+
+test("router: reintenta un fallo transitorio y conserva el ruteo LLM", async () => {
+  let calls = 0;
+  const flaky = (async () => {
+    calls += 1;
+    if (calls < 3) {
+      throw new Error(
+        "APIError 403 FreeTierError: free tier can only be used from within OpenCode",
+      );
+    }
+    return {
+      output: '{"workflow":"fix-issue","reason":"bug acotado"}',
+      sessionId: "ses-router-retry",
+    };
+  }) as unknown as AiNodeRunner;
+  const out = await selectWorkflowForItem(
+    baseInput({ runner: flaky, retryDelayMs: 0 }),
+  );
+  assert.equal(calls, 3, "1 intento + 2 reintentos default");
+  assert.equal(out.workflow, "fix-issue");
+  assert.equal(out.routedBy, "llm");
+  assert.equal(out.sessionId, "ses-router-retry");
+});
+
+test("router: al agotar reintentos el fallback informa el último fallo", async () => {
+  let calls = 0;
+  const junk = (async () => {
+    calls += 1;
+    return { output: "no soy json" };
+  }) as unknown as AiNodeRunner;
+  const out = await selectWorkflowForItem(
+    baseInput({ runner: junk, retryDelayMs: 0 }),
+  );
+  assert.equal(calls, 3, "1 intento + 2 reintentos default");
+  assert.equal(out.workflow, FALLBACK_WORKFLOW);
+  assert.equal(out.routedBy, "fallback");
+  assert.match(out.reason, /respuesta del router inválida/);
+  assert.match(out.reason, /tras 3 intentos/);
+});
+
+test("router: retries=0 vuelve al intento único", async () => {
+  let calls = 0;
+  const junk = (async () => {
+    calls += 1;
+    return { output: "no soy json" };
+  }) as unknown as AiNodeRunner;
+  const out = await selectWorkflowForItem(
+    baseInput({ runner: junk, retries: 0 }),
+  );
+  assert.equal(calls, 1);
+  assert.equal(out.routedBy, "fallback");
+  assert.doesNotMatch(out.reason, /tras/);
+});
+
+test("router: TERMCANVAS_WORKFLOW_ROUTER_RETRIES configura el tope", async () => {
+  process.env.TERMCANVAS_WORKFLOW_ROUTER_RETRIES = "1";
+  try {
+    let calls = 0;
+    const junk = (async () => {
+      calls += 1;
+      return { output: "no soy json" };
+    }) as unknown as AiNodeRunner;
+    const out = await selectWorkflowForItem(
+      baseInput({ runner: junk, retryDelayMs: 0 }),
+    );
+    assert.equal(calls, 2, "env=1 → 1 intento + 1 reintento");
+    assert.match(out.reason, /tras 2 intentos/);
+  } finally {
+    delete process.env.TERMCANVAS_WORKFLOW_ROUTER_RETRIES;
+  }
 });
 
 test("router: apagado por env → fallback", async () => {
