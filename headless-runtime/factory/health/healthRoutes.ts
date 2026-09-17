@@ -53,6 +53,8 @@ export interface HealthSnapshotInput {
   readonly opencodePort: unknown;
   readonly opencodeUptime: unknown;
   readonly opencodeError?: unknown;
+  /** P1: gate efectivo de la ronda post-bot (`resolveBotReconcileGate`). */
+  readonly botReconcile?: unknown;
   readonly ts?: unknown;
 }
 
@@ -74,6 +76,8 @@ export interface HealthPayload {
   opencodeUrl: string;
   opencodeStatus: string;
   ports: { factory: number; opencode: unknown };
+  /** P1: `{enabled, source: "env"|"setting"|"default"|"unknown"}`. */
+  botReconcile: { enabled: boolean; source: string };
 }
 
 function toCount(value: unknown): number {
@@ -93,6 +97,23 @@ function toUptime(value: unknown): number {
     return n < 0 ? 0 : n;
   } catch {
     return 0;
+  }
+}
+
+/** P1: sanitiza el gate recibido (forma `{enabled, source}`); default honesto. */
+function toBotReconcileGate(value: unknown): { enabled: boolean; source: string } {
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return { enabled: false, source: "unknown" };
+    }
+    const rec = value as Record<string, unknown>;
+    const source =
+      typeof rec.source === "string" && rec.source.trim().length > 0
+        ? rec.source.trim().slice(0, 20)
+        : "unknown";
+    return { enabled: rec.enabled === true, source };
+  } catch {
+    return { enabled: false, source: "unknown" };
   }
 }
 
@@ -157,6 +178,7 @@ export function buildHealthPayload(input: HealthSnapshotInput): HealthPayload {
       opencodeUrl,
       opencodeStatus,
       ports: { factory: factoryPort, opencode: input?.opencodePort ?? null },
+      botReconcile: toBotReconcileGate(input?.botReconcile),
     };
     return payload;
   } catch {
@@ -173,6 +195,7 @@ export function buildHealthPayload(input: HealthSnapshotInput): HealthPayload {
         opencodeUrl: "",
         opencodeStatus: "not_started",
         ports: { factory: 0, opencode: null },
+        botReconcile: { enabled: false, source: "unknown" },
       };
     } catch {
       return {
@@ -187,6 +210,7 @@ export function buildHealthPayload(input: HealthSnapshotInput): HealthPayload {
         opencodeUrl: "",
         opencodeStatus: "not_started",
         ports: { factory: 0, opencode: null },
+        botReconcile: { enabled: false, source: "unknown" },
       };
     }
   }

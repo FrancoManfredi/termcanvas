@@ -20,14 +20,23 @@ const {
   handleRunEvent,
   isWorkflowEngineEnabled,
   mirrorRunEvidence,
+  reconcileFromAnyCaller,
   runIdForItem,
   runInputsForWorkflowDef,
   runWorkflowJob,
   setWorkflowRouterForTests,
   setWorkflowRuntimeProvider,
+  startBotReconcileRun,
   tryHandleWorkflowAction,
 } = await import("../headless-runtime/factory/engineBridge.ts");
-const { BOOT_INTERRUPTED_AT_META_KEY, BOOT_INTERRUPTED_META_KEY, RESUMED_META_KEY, needsResume } = await import("../shared/types/workItem.ts");
+const {
+  ALLOWED_TRANSITIONS,
+  BOOT_INTERRUPTED_AT_META_KEY,
+  BOOT_INTERRUPTED_META_KEY,
+  RESUMED_META_KEY,
+  canTransition,
+  needsResume,
+} = await import("../shared/types/workItem.ts");
 const { VerifyJsonSchema } = await import("../headless-runtime/implement/verifyEvidence.ts");
 const { ReviewResultSchema } = await import("../shared/types/review.ts");
 const { loadWorkflow } = await import("../headless-runtime/workflows/loader.ts");
@@ -45,6 +54,37 @@ function setSafeRouter(): void {
   }));
 }
 setSafeRouter();
+
+// El juez LLM del scorer corre en run_completed (autoScoreCompletedJob) y
+// crearía el server opencode real, dejando el proceso de test vivo. Mismo
+// criterio que el router: el LLM nunca corre acá. Respuesta null = unscored.
+const { setScorerPromptMock } = await import(
+  "../headless-runtime/measure/scorerEngine.ts"
+);
+const { setAnalysisPromptMock } = await import(
+  "../headless-runtime/measure/improvementEngine.ts"
+);
+const { opencodeServerManager, setTestClient } = await import(
+  "../headless-runtime/opencodeServerManager.ts"
+);
+setScorerPromptMock(async () => null);
+setAnalysisPromptMock(async () => null);
+// Cliente falso: si algún camino diferido llega a ensureClient, devuelve este
+// stub en vez de crear el server opencode real (que deja el proceso vivo).
+setTestClient({
+  session: {
+    create: async () => ({ id: "ses-engine-bridge-test" }),
+    prompt: async () => ({}),
+  },
+} as unknown as Parameters<typeof setTestClient>[0]);
+test.after(() => {
+  // Los mocks NO se limpian: el scorer corre fire-and-forget (void import)
+  // y puede ejecutarse después de este hook — limpiarlos acá resucita el
+  // juez real y deja el server opencode vivo. El close() es la red final.
+  try {
+    opencodeServerManager.close();
+  } catch {}
+});
 
 interface FakeRuntime {
   runtime: WorkflowRuntime;
@@ -234,6 +274,32 @@ test("eventos: node_started→Building, gate→Review, run_completed→Complete"
     null,
     "run terminal limpia el gate",
   );
+});
+
+test("handleGate: mensaje largo de spec llega completo, sin slice (issue #124)", async () => {
+  const id = "job-bridge-long-gate";
+  makeItem(id);
+  const fake = fakeRuntime("run-bridge-long-gate");
+  await runWorkflowJob(id, fake.runtime);
+  const longMessage = `Aprobar la spec para pasar a implementación?\n\nSpec — Issue #124\n\n**Objetivo:**\n${"Envolver la lectura en manejo defensivo. ".repeat(120)}\n\n**Outcome:**\n${"La página carga lista vacía. ".repeat(80)}\n\nflowchart LR\n  subgraph Before\n    B1[corrupto] --> B2[lanza]\n  end\n`;
+  assert.ok(longMessage.length > 5000, "el fixture supera el viejo cap de 2000");
+  handleGate({
+    runId: "run-bridge-long-gate",
+    nodeId: "approve",
+    message: longMessage,
+    decisions: ["approve", "reject"],
+    attempt: 1,
+  });
+  const gate = workItemStore.get(id)?.engineGate;
+  assert.equal(gate?.message, longMessage, "engineGate conserva el mensaje íntegro");
+  const dir = workItemStore.get(id)?.dir;
+  if (dir) {
+    const review = ReviewResultSchema.parse(
+      JSON.parse(fs.readFileSync(path.join(dir, "review.json"), "utf-8")),
+    );
+    assert.match(review.summary, /Issue #124/, "review.json conserva la spec completa");
+    assert.ok(review.summary.length > 5000, "review.json sin truncar");
+  }
 });
 
 test("sessions: node_completed espeja el sessionId del run en el work item", () => {
@@ -1224,6 +1290,204 @@ test("review-report: sin summary estructurado cae al curador (sin tics ni corte)
   assert.ok(!report.includes("Let me analyze"), "curador saca el tic inicial");
 });
 
+test("review-report WS3: green con finding abierto sin disposición no es READY", async () => {
+  makeItem("job-bridge-undispositioned");
+  const fake = fakeRuntime("run-bridge-undispositioned");
+  await runWorkflowJob("job-bridge-undispositioned", fake.runtime);
+  fake.setRun({
+    id: "run-bridge-undispositioned",
+    workflow: "fix-issue",
+    status: "completed",
+    startedAt: "2026-09-12T00:00:00Z",
+    finishedAt: "2026-09-12T00:01:00Z",
+    nodes: {
+      "build.review": {
+        id: "build.review",
+        status: "completed",
+        attempts: 1,
+        output: "",
+        outputJson: {
+          green: true,
+          dispositionsComplete: false,
+          summary: "El fix cierra el issue salvo un detalle de cobertura.",
+          contractCoverage: [
+            {
+              requirement: "Rq1: el fix cierra el issue",
+              coveredBy: "R1",
+              status: "covered",
+            },
+          ],
+          findings: [
+            {
+              id: "f1",
+              axis: "tests",
+              severity: "info",
+              file: "tests/store.test.ts",
+              message: "falta el caso de borde del contador",
+            },
+          ],
+        },
+      },
+    },
+  });
+  handleRunEvent(
+    {
+      ts: "",
+      type: "run_completed",
+      runId: "run-bridge-undispositioned",
+      workflow: "fix-issue",
+    } as unknown as import("../headless-runtime/workflows/types.ts").WorkflowEvent,
+    fake.runtime,
+  );
+  const item = workItemStore.get("job-bridge-undispositioned");
+  const report = fs.readFileSync(path.join(item?.dir!, "review-report.md"), "utf-8");
+  assert.match(
+    report,
+    /verdict: NEEDS FIXES/,
+    "un info abierto con green contradice el READY (WS3)",
+  );
+  assert.match(report, /readiness: blocked/, "el reporte no puede quedar ready");
+  assert.match(
+    report,
+    /finding `f1` open without disposition \(TRACKED_FOLLOW_UP\/DECLINED\)/,
+    "el motivo del bloqueo viaja como blocker de readiness",
+  );
+});
+
+test("review-report WS3: green con todos los findings terminados es READY", async () => {
+  makeItem("job-bridge-dispositioned");
+  const fake = fakeRuntime("run-bridge-dispositioned");
+  await runWorkflowJob("job-bridge-dispositioned", fake.runtime);
+  fake.setRun({
+    id: "run-bridge-dispositioned",
+    workflow: "fix-issue",
+    status: "completed",
+    startedAt: "2026-09-12T00:00:00Z",
+    finishedAt: "2026-09-12T00:01:00Z",
+    nodes: {
+      "build.implement": {
+        id: "build.implement",
+        status: "completed",
+        attempts: 1,
+        output: [
+          "Implementación lista.",
+          "",
+          "## Dispositions",
+          "- f1: FIXED — se agregó el caso de borde",
+          "- f2: TRACKED_FOLLOW_UP — issue #123",
+        ].join("\n"),
+      },
+      "build.review": {
+        id: "build.review",
+        status: "completed",
+        attempts: 1,
+        output: "",
+        outputJson: {
+          green: true,
+          dispositionsComplete: true,
+          summary: "El fix cierra el issue y no quedan findings abiertos.",
+          contractCoverage: [
+            {
+              requirement: "Rq1: el fix cierra el issue",
+              coveredBy: "R1",
+              status: "covered",
+            },
+          ],
+          findings: [
+            { id: "f1", severity: "info", message: "detalle cubierto" },
+            { id: "f2", severity: "minor", message: "detalle derivado" },
+          ],
+        },
+      },
+    },
+  });
+  handleRunEvent(
+    {
+      ts: "",
+      type: "run_completed",
+      runId: "run-bridge-dispositioned",
+      workflow: "fix-issue",
+    } as unknown as import("../headless-runtime/workflows/types.ts").WorkflowEvent,
+    fake.runtime,
+  );
+  const item = workItemStore.get("job-bridge-dispositioned");
+  const report = fs.readFileSync(path.join(item?.dir!, "review-report.md"), "utf-8");
+  assert.match(report, /verdict: READY TO MERGE/, "sin abiertos, el verde es READY");
+  assert.match(report, /open_findings: 0/, "FIXED/TRACKED_FOLLOW_UP no cuentan como abiertos");
+  assert.ok(
+    !report.includes("open without disposition"),
+    "sin findings sin disposición no hay blocker WS3",
+  );
+});
+
+test("review-report WS4: contrato que debilita un requisito del issue no es READY", async () => {
+  makeItem("job-bridge-contract-weak");
+  const fake = fakeRuntime("run-bridge-contract-weak");
+  await runWorkflowJob("job-bridge-contract-weak", fake.runtime);
+  fake.setRun({
+    id: "run-bridge-contract-weak",
+    workflow: "fix-issue",
+    status: "completed",
+    startedAt: "2026-09-12T00:00:00Z",
+    finishedAt: "2026-09-12T00:01:00Z",
+    nodes: {
+      "build.review": {
+        id: "build.review",
+        status: "completed",
+        attempts: 1,
+        output: "",
+        outputJson: {
+          green: true,
+          dispositionsComplete: true,
+          summary: "El fix pasa la suite y no quedan findings abiertos.",
+          findings: [],
+          contractCoverage: [
+            {
+              requirement: "Rq1: mantiene el estado en memoria",
+              coveredBy: "R1",
+              status: "weakened",
+              note: "el scope lo rewordea a devolver",
+            },
+          ],
+        },
+      },
+    },
+  });
+  handleRunEvent(
+    {
+      ts: "",
+      type: "run_completed",
+      runId: "run-bridge-contract-weak",
+      workflow: "fix-issue",
+    } as unknown as import("../headless-runtime/workflows/types.ts").WorkflowEvent,
+    fake.runtime,
+  );
+  const item = workItemStore.get("job-bridge-contract-weak");
+  const report = fs.readFileSync(path.join(item?.dir!, "review-report.md"), "utf-8");
+  assert.match(
+    report,
+    /verdict: NEEDS FIXES/,
+    "un requisito debilitado contradice el READY (WS4)",
+  );
+  assert.match(report, /readiness: blocked/, "el reporte no puede quedar ready");
+  assert.ok(
+    report.includes("not covered (weakened)"),
+    "el blocker WS4 viaja al reporte",
+  );
+  assert.ok(
+    report.includes("requirement `Rq1: mantiene el estado en memoria`"),
+    "el blocker cita el requisito del issue",
+  );
+  assert.ok(
+    report.includes("| Rq1: mantiene el estado en memoria |"),
+    "la tabla de coverage muestra el requisito",
+  );
+  assert.ok(
+    report.includes("| `R1` | weakened | el scope lo rewordea a devolver |"),
+    "la tabla de coverage muestra coveredBy/status/nota",
+  );
+});
+
 test("router: el workflow elegido llega a runtime.start con sus inputs", async () => {
   makeItem("job-bridge-routed");
   const fake = fakeRuntime("run-routed-1");
@@ -1241,6 +1505,7 @@ test("router: el workflow elegido llega a runtime.start con sus inputs", async (
       request: "arreglar login",
       issue_ref: "(sin issue vinculado)",
       issue_body: "(sin cuerpo disponible)",
+      bot_findings: "",
     });
     const item = workItemStore.get("job-bridge-routed");
     assert.equal(item?.engineRun?.workflow, "fix-issue");
@@ -1527,4 +1792,463 @@ test("isWorkflowEngineEnabled: el engine es el pipeline único (legacy retirado)
     "el switch legacy ya no existe — siempre engine",
   );
   delete process.env.TERMCANVAS_FACTORY_ENGINE;
+});
+
+// ── WS-D: puerta de discoveries (sin disposición no hay verde) ──
+
+test("review-report WS-D: discovery sin disposición no es READY", async () => {
+  makeItem("job-bridge-discovery-untracked");
+  const fake = fakeRuntime("run-bridge-discovery-untracked");
+  await runWorkflowJob("job-bridge-discovery-untracked", fake.runtime);
+  fake.setRun({
+    id: "run-bridge-discovery-untracked",
+    workflow: "fix-issue",
+    status: "completed",
+    startedAt: "2026-09-12T00:00:00Z",
+    finishedAt: "2026-09-12T00:01:00Z",
+    nodes: {
+      "build.review": {
+        id: "build.review",
+        status: "completed",
+        attempts: 1,
+        output: "",
+        outputJson: {
+          green: true,
+          dispositionsComplete: true,
+          summary: "El fix cierra el issue.",
+          contractCoverage: [
+            {
+              requirement: "Rq1: el fix cierra el issue",
+              coveredBy: "R1",
+              status: "covered",
+            },
+          ],
+          findings: [],
+          discoveries: [
+            {
+              id: "D1",
+              title: "el banner de lectura se reusa para el write",
+              status: "recorded",
+            },
+          ],
+        },
+      },
+    },
+  });
+  handleRunEvent(
+    {
+      ts: "",
+      type: "run_completed",
+      runId: "run-bridge-discovery-untracked",
+      workflow: "fix-issue",
+    } as unknown as import("../headless-runtime/workflows/types.ts").WorkflowEvent,
+    fake.runtime,
+  );
+  const item = workItemStore.get("job-bridge-discovery-untracked");
+  const report = fs.readFileSync(path.join(item?.dir!, "review-report.md"), "utf-8");
+  assert.match(report, /verdict: NEEDS FIXES/, "una discovery sin disponer bloquea el verde");
+  assert.match(report, /readiness: blocked/);
+  assert.match(
+    report,
+    /discovery `D1` untracked \(recorded: needs accepted\+issue or dropped\+reason\)/,
+    "el motivo viaja como blocker de readiness",
+  );
+});
+
+test("review-report WS-D: discovery dropped con razón no bloquea", async () => {
+  makeItem("job-bridge-discovery-dropped");
+  const fake = fakeRuntime("run-bridge-discovery-dropped");
+  await runWorkflowJob("job-bridge-discovery-dropped", fake.runtime);
+  fake.setRun({
+    id: "run-bridge-discovery-dropped",
+    workflow: "fix-issue",
+    status: "completed",
+    startedAt: "2026-09-12T00:00:00Z",
+    finishedAt: "2026-09-12T00:01:00Z",
+    nodes: {
+      "build.review": {
+        id: "build.review",
+        status: "completed",
+        attempts: 1,
+        output: "",
+        outputJson: {
+          green: true,
+          dispositionsComplete: true,
+          summary: "El fix cierra el issue y la discovery se descartó con razón.",
+          contractCoverage: [
+            {
+              requirement: "Rq1: el fix cierra el issue",
+              coveredBy: "R1",
+              status: "covered",
+            },
+          ],
+          findings: [],
+          discoveries: [
+            {
+              id: "D1",
+              title: "copy de otro estado",
+              status: "dropped",
+              note: "preferencia, no bug; sin acción",
+            },
+          ],
+        },
+      },
+    },
+  });
+  handleRunEvent(
+    {
+      ts: "",
+      type: "run_completed",
+      runId: "run-bridge-discovery-dropped",
+      workflow: "fix-issue",
+    } as unknown as import("../headless-runtime/workflows/types.ts").WorkflowEvent,
+    fake.runtime,
+  );
+  const item = workItemStore.get("job-bridge-discovery-dropped");
+  const report = fs.readFileSync(path.join(item?.dir!, "review-report.md"), "utf-8");
+  assert.match(report, /verdict: READY TO MERGE/);
+  // Pre-PR el bot todavía no llegó: la readiness honesta es pending hasta el publish.
+  assert.match(report, /readiness: pending/);
+  assert.ok(!report.includes("untracked"), "dropped con razón no bloquea");
+});
+
+test("review-report WS-D: accepted con issue en la razón queda tracked", async () => {
+  makeItem("job-bridge-discovery-accepted");
+  const fake = fakeRuntime("run-bridge-discovery-accepted");
+  await runWorkflowJob("job-bridge-discovery-accepted", fake.runtime);
+  fake.setRun({
+    id: "run-bridge-discovery-accepted",
+    workflow: "fix-issue",
+    status: "completed",
+    startedAt: "2026-09-12T00:00:00Z",
+    finishedAt: "2026-09-12T00:01:00Z",
+    nodes: {
+      "build.implement": {
+        id: "build.implement",
+        status: "completed",
+        attempts: 1,
+        output: [
+          "Implementación lista.",
+          "",
+          "## Discoveries",
+          "- D1 — reloj sin sincronizar — accepted: issue #163 creado",
+        ].join("\n"),
+      },
+      "build.review": {
+        id: "build.review",
+        status: "completed",
+        attempts: 1,
+        output: "",
+        outputJson: {
+          green: true,
+          dispositionsComplete: true,
+          summary: "El fix cierra el issue; la discovery quedó trackeada.",
+          contractCoverage: [
+            {
+              requirement: "Rq1: el fix cierra el issue",
+              coveredBy: "R1",
+              status: "covered",
+            },
+          ],
+          findings: [],
+        },
+      },
+    },
+  });
+  handleRunEvent(
+    {
+      ts: "",
+      type: "run_completed",
+      runId: "run-bridge-discovery-accepted",
+      workflow: "fix-issue",
+    } as unknown as import("../headless-runtime/workflows/types.ts").WorkflowEvent,
+    fake.runtime,
+  );
+  const item = workItemStore.get("job-bridge-discovery-accepted");
+  const report = fs.readFileSync(path.join(item?.dir!, "review-report.md"), "utf-8");
+  assert.match(report, /verdict: READY TO MERGE/);
+  assert.ok(!report.includes("untracked"), "accepted con issue en la razón no bloquea");
+});
+
+test("review-report WS-D: dropped sin razón no dispone la discovery", async () => {
+  makeItem("job-bridge-discovery-empty-drop");
+  const fake = fakeRuntime("run-bridge-discovery-empty-drop");
+  await runWorkflowJob("job-bridge-discovery-empty-drop", fake.runtime);
+  fake.setRun({
+    id: "run-bridge-discovery-empty-drop",
+    workflow: "fix-issue",
+    status: "completed",
+    startedAt: "2026-09-12T00:00:00Z",
+    finishedAt: "2026-09-12T00:01:00Z",
+    nodes: {
+      "build.review": {
+        id: "build.review",
+        status: "completed",
+        attempts: 1,
+        output: "",
+        outputJson: {
+          green: true,
+          dispositionsComplete: true,
+          summary: "El fix cierra el issue.",
+          contractCoverage: [
+            {
+              requirement: "Rq1: el fix cierra el issue",
+              coveredBy: "R1",
+              status: "covered",
+            },
+          ],
+          findings: [],
+          discoveries: [{ id: "D1", title: "algo", status: "dropped" }],
+        },
+      },
+    },
+  });
+  handleRunEvent(
+    {
+      ts: "",
+      type: "run_completed",
+      runId: "run-bridge-discovery-empty-drop",
+      workflow: "fix-issue",
+    } as unknown as import("../headless-runtime/workflows/types.ts").WorkflowEvent,
+    fake.runtime,
+  );
+  const item = workItemStore.get("job-bridge-discovery-empty-drop");
+  const report = fs.readFileSync(path.join(item?.dir!, "review-report.md"), "utf-8");
+  assert.match(report, /verdict: NEEDS FIXES/, "dropped sin razón no es terminal");
+  assert.match(report, /discovery `D1` untracked \(dropped: needs accepted\+issue or dropped\+reason\)/);
+});
+
+test("review-report WS-D: un 'Ningún hallazgo' explícito no es discovery", async () => {
+  makeItem("job-bridge-discovery-none");
+  const fake = fakeRuntime("run-bridge-discovery-none");
+  await runWorkflowJob("job-bridge-discovery-none", fake.runtime);
+  fake.setRun({
+    id: "run-bridge-discovery-none",
+    workflow: "fix-issue",
+    status: "completed",
+    startedAt: "2026-09-12T00:00:00Z",
+    finishedAt: "2026-09-12T00:01:00Z",
+    nodes: {
+      "build.implement": {
+        id: "build.implement",
+        status: "completed",
+        attempts: 1,
+        output: [
+          "Implementación lista.",
+          "",
+          "## Discoveries",
+          "- Ningún hallazgo relevante fuera del scope.",
+        ].join("\n"),
+      },
+      "build.review": {
+        id: "build.review",
+        status: "completed",
+        attempts: 1,
+        output: "",
+        outputJson: {
+          green: true,
+          dispositionsComplete: true,
+          summary: "El fix cierra el issue sin discoveries.",
+          contractCoverage: [
+            {
+              requirement: "Rq1: el fix cierra el issue",
+              coveredBy: "R1",
+              status: "covered",
+            },
+          ],
+          findings: [],
+        },
+      },
+    },
+  });
+  handleRunEvent(
+    {
+      ts: "",
+      type: "run_completed",
+      runId: "run-bridge-discovery-none",
+      workflow: "fix-issue",
+    } as unknown as import("../headless-runtime/workflows/types.ts").WorkflowEvent,
+    fake.runtime,
+  );
+  const item = workItemStore.get("job-bridge-discovery-none");
+  const report = fs.readFileSync(path.join(item?.dir!, "review-report.md"), "utf-8");
+  assert.match(report, /verdict: READY TO MERGE/);
+  assert.ok(!report.includes("untracked"), "el negativo explícito no bloquea");
+});
+
+// ── WS-1/WS-4: ronda de reconciliación post-bot ──
+
+function makeCompleteIsolatedJob(id: string, withBotRound = true): void {
+  workItemStore.create({ id, prompt: "arreglar login", worktree: path.join(SANDBOX, "wt") });
+  const item = workItemStore.get(id);
+  if (!item) throw new Error("job no creado");
+  (item as unknown as { isolation?: unknown }).isolation = {
+    branch: "issue-7-login",
+    baseBranch: "main",
+    worktreePath: path.join(SANDBOX, "wt"),
+    repoRoot: SANDBOX,
+    state: "pr-open",
+    prNumber: 7,
+    prUrl: "https://github.com/o/r/pull/7",
+  };
+  if (withBotRound) {
+    workItemStore.appendEvent(id, "system", "bot reconcile: 1 open finding(s) prepared", {
+      botReconcile: {
+        feedback: {
+          verdict: "revise",
+          summary: "Bot review sin reconciliar (1 finding).",
+          findings: [{ message: "stale comment", file: "js/app.js" }],
+        },
+        openCount: 1,
+      },
+    });
+  }
+  workItemStore.transition(id, "Foreman", "system", "test setup");
+  workItemStore.transition(id, "Building", "system", "test setup");
+  workItemStore.transition(id, "Complete", "system", "test setup");
+}
+
+test("transiciones: Complete → Building habilitado para la reconciliación", () => {
+  assert.deepEqual([...ALLOWED_TRANSITIONS.Complete], ["Building"]);
+  assert.equal(canTransition("Complete", "Building"), true);
+  assert.equal(canTransition("Complete", "Cancelled"), false);
+});
+
+test("reconciliación: arranca un run fix-issue con bot_findings (flag on)", async () => {
+  const prev = process.env.TERMCANVAS_BOT_RECONCILE;
+  process.env.TERMCANVAS_BOT_RECONCILE = "1";
+  try {
+    makeCompleteIsolatedJob("job-reconcile-ok");
+    const fake = fakeRuntime("run-reconcile-1");
+    const res = await startBotReconcileRun("job-reconcile-ok", fake.runtime);
+    assert.deepEqual(res, { started: true, runId: "run-reconcile-1" });
+    assert.equal(fake.started.length, 1);
+    assert.equal(fake.started[0]?.name, "fix-issue");
+    const inputs = (fake.started[0]?.params.inputs ?? {}) as Record<string, unknown>;
+    assert.ok(
+      String(inputs.bot_findings).includes("- f1 (js/app.js) — stale comment"),
+      "los findings viajan como f1..fn",
+    );
+    const item = workItemStore.get("job-reconcile-ok");
+    assert.equal(item?.status, "Building", "reabre Building");
+    assert.equal(item?.engineRun?.reconcile, true, "el run queda marcado reconcile");
+    assert.equal(item?.engineRun?.runId, "run-reconcile-1");
+    assert.ok(
+      (item?.timeline ?? []).some((e) => e.message.includes("engine: run de reconciliación")),
+    );
+  } finally {
+    if (prev === undefined) delete process.env.TERMCANVAS_BOT_RECONCILE;
+    else process.env.TERMCANVAS_BOT_RECONCILE = prev;
+  }
+});
+
+test("reconciliación: guards (sin evento, flag off) no arrancan ni reabren", async () => {
+  const prev = process.env.TERMCANVAS_BOT_RECONCILE;
+  process.env.TERMCANVAS_BOT_RECONCILE = "1";
+  try {
+    makeCompleteIsolatedJob("job-reconcile-noevent", false);
+    const fake = fakeRuntime("run-guard-1");
+    assert.deepEqual(await startBotReconcileRun("job-reconcile-noevent", fake.runtime), {
+      started: false,
+      reason: "no-bot-round",
+    });
+    assert.equal(fake.started.length, 0);
+    assert.equal(workItemStore.get("job-reconcile-noevent")?.status, "Complete");
+  } finally {
+    if (prev === undefined) delete process.env.TERMCANVAS_BOT_RECONCILE;
+    else process.env.TERMCANVAS_BOT_RECONCILE = prev;
+  }
+  delete process.env.TERMCANVAS_BOT_RECONCILE;
+  makeCompleteIsolatedJob("job-reconcile-flagoff");
+  const fake2 = fakeRuntime("run-guard-2");
+  assert.deepEqual(await startBotReconcileRun("job-reconcile-flagoff", fake2.runtime), {
+    started: false,
+    reason: "flag-off",
+  });
+});
+
+test("reconciliación: si el run no arranca, revierte a Complete con evento honesto", async () => {
+  const prev = process.env.TERMCANVAS_BOT_RECONCILE;
+  process.env.TERMCANVAS_BOT_RECONCILE = "1";
+  try {
+    makeCompleteIsolatedJob("job-reconcile-fail");
+    const fake = fakeRuntime("run-reconcile-fail");
+    (fake.runtime as unknown as { start: () => Promise<never> }).start = async () => {
+      throw new Error("boom");
+    };
+    const res = await startBotReconcileRun("job-reconcile-fail", fake.runtime);
+    assert.deepEqual(res, { started: false, reason: "start-failed" });
+    const item = workItemStore.get("job-reconcile-fail");
+    assert.equal(item?.status, "Complete", "vuelve a Complete");
+    assert.ok(
+      (item?.timeline ?? []).some((e) =>
+        e.message.includes("reconciliación post-bot no pudo arrancar"),
+      ),
+    );
+    // Sin marcador `botReconcileRun`, un segundo intento con runtime sano arranca.
+    const retry = fakeRuntime("run-reconcile-retry");
+    const res2 = await startBotReconcileRun("job-reconcile-fail", retry.runtime);
+    assert.deepEqual(res2, { started: true, runId: "run-reconcile-retry" });
+  } finally {
+    if (prev === undefined) delete process.env.TERMCANVAS_BOT_RECONCILE;
+    else process.env.TERMCANVAS_BOT_RECONCILE = prev;
+  }
+});
+
+test("reconciliación: cap 1 — un segundo arranque no dispara", async () => {
+  const prev = process.env.TERMCANVAS_BOT_RECONCILE;
+  process.env.TERMCANVAS_BOT_RECONCILE = "1";
+  try {
+    makeCompleteIsolatedJob("job-reconcile-cap");
+    const fake = fakeRuntime("run-cap-1");
+    const first = await startBotReconcileRun("job-reconcile-cap", fake.runtime);
+    assert.deepEqual(first, { started: true, runId: "run-cap-1" });
+    // El run de reconciliación termina y el job vuelve a Complete.
+    workItemStore.transition("job-reconcile-cap", "Complete", "system", "test: run completo");
+    const second = fakeRuntime("run-cap-2");
+    assert.deepEqual(await startBotReconcileRun("job-reconcile-cap", second.runtime), {
+      started: false,
+      reason: "already-started",
+    });
+    assert.equal(second.started.length, 0, "sin segundo run");
+  } finally {
+    if (prev === undefined) delete process.env.TERMCANVAS_BOT_RECONCILE;
+    else process.env.TERMCANVAS_BOT_RECONCILE = prev;
+  }
+});
+
+test("reconcileFromAnyCaller: resuelve el runtime del provider (callers humanos)", async () => {
+  const prev = process.env.TERMCANVAS_BOT_RECONCILE;
+  process.env.TERMCANVAS_BOT_RECONCILE = "1";
+  try {
+    makeCompleteIsolatedJob("job-reconcile-provider");
+    const fake = fakeRuntime("run-provider-1");
+    setWorkflowRuntimeProvider(() => fake.runtime);
+    reconcileFromAnyCaller("job-reconcile-provider");
+    // El arranque es async: esperar a que la transición a Building aterrice.
+    let item = workItemStore.get("job-reconcile-provider");
+    for (
+      let i = 0;
+      i < 40 && (fake.started.length === 0 || item?.status !== "Building");
+      i += 1
+    ) {
+      await new Promise((r) => setTimeout(r, 10));
+      item = workItemStore.get("job-reconcile-provider");
+    }
+    assert.equal(fake.started.length, 1, "arrancó vía provider");
+    assert.equal(fake.started[0]?.name, "fix-issue");
+    assert.equal(item?.status, "Building");
+    assert.equal(item?.engineRun?.reconcile, true);
+
+    // Flag off: no-op silencioso aunque el provider exista.
+    delete process.env.TERMCANVAS_BOT_RECONCILE;
+    makeCompleteIsolatedJob("job-reconcile-provider-off");
+    reconcileFromAnyCaller("job-reconcile-provider-off");
+    await new Promise((r) => setTimeout(r, 20));
+    assert.equal(fake.started.length, 1, "flag off no arranca");
+    assert.equal(workItemStore.get("job-reconcile-provider-off")?.status, "Complete");
+  } finally {
+    if (prev === undefined) delete process.env.TERMCANVAS_BOT_RECONCILE;
+    else process.env.TERMCANVAS_BOT_RECONCILE = prev;
+  }
 });

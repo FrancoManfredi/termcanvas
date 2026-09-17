@@ -134,9 +134,9 @@ const BOUNDED: readonly Bounded[] = [
   // single automation ticker, one setInterval plus clearInterval, fixed
   // period from config (tickMs 0 means fully off).
   { file: "headless-runtime/factory/automations/automationService.ts", kind: "interval", needle: "tickerHandle = setInterval", capText: "clearInterval", doc: "AUTOMATION_TICK" },
-  // Timeouts factoryServer (S14/L01+L02/S16/S03).
+  // Timeouts factoryServer (L01+L02/S16/S03). S14 (worker-kick) quedó
+  // ELIMINADO: el worker legacy ya no existe en el engine.
   { file: "headless-runtime/factory/factoryServer.ts", kind: "timeout", needle: "ctrl.abort(), 800", capText: "800", doc: "800ms" },
-  { file: "headless-runtime/factory/factoryServer.ts", kind: "timeout", needle: "worker picked job", capText: "workItemStore.get(id)", doc: "worker-kick" },
   { file: "headless-runtime/factory/factoryServer.ts", kind: "retry", needle: "intake session.create", capText: "withTransportRetry", doc: "transporte único (agentTransport)" },
   { file: "headless-runtime/factory/factoryServer.ts", kind: "timeout", needle: "let timer: ReturnType<typeof setTimeout> | undefined;", capText: "Promise.race", doc: "retry ≤ 1" },
   { file: "headless-runtime/factory/factoryServer.ts", kind: "timeout", needle: "ctrl.abort(), 1000", capText: "1000", doc: "1000ms (abort control)" },
@@ -153,7 +153,7 @@ const BOUNDED: readonly Bounded[] = [
   // withTimeout local de implementAgent se eliminó (fugaba su timer 1h y
   // colgaba el proceso; ahora usa el compartido que limpia al asentar).
   { file: "headless-runtime/implement/verification.ts", kind: "timeout", needle: "const timer = setTimeout(() => {", capText: "SIGTERM", doc: "SIGTERM" },
-  { file: "headless-runtime/implement/implementService.ts", kind: "timeout", needle: "pact F04", capText: "8000", doc: "8000ms (ventana de cancel F04)" },
+  { file: "headless-runtime/implement/implementService.ts", kind: "timeout", needle: "setTimeout(r, 8000)", capText: "8000", doc: "8000ms (ventana de cancel F04)" },
   { file: "headless-runtime/interview/harness/codebuddy.ts", kind: "timeout", needle: "killTimer = setTimeout", capText: "SIGKILL", doc: "kill de seguridad" },
   { file: "headless-runtime/interview/harness/opencode.ts", kind: "timeout", needle: "setTimeout(r, 400 * (attempt + 1))", capText: "SERVER_START_RETRIES", doc: "SERVER_START_RETRIES = 2" },
   { file: "headless-runtime/opencodeServerManager.ts", kind: "timeout", needle: "cold start", capText: "800", doc: "cold-start 800ms" },
@@ -216,6 +216,29 @@ const BOUNDED: readonly Bounded[] = [
   // Rondas de sesión por nodo de loop (VIEW AGENT por ronda, LOOPS G07):
   // `for...of` sobre el historial acotado (las viejas se descartan).
   { file: "headless-runtime/factory/engineBridge.ts", kind: "for", needle: "for (const entry of rounds)", capText: "NODE_SESSION_ROUNDS_MAX", doc: "NODE_SESSION_ROUNDS_MAX = 50" },
+  // Auditoría 2026-09-16: los 9 `for` restantes de engineBridge con entrada
+  // individual (E01-E09 del doc) + su timer de auto-resume (E10). Cada uno
+  // itera una colección finita (mapa, array acotado, timeline) con evidencia
+  // de finitud chequeada contra el fuente.
+  { file: "headless-runtime/factory/engineBridge.ts", kind: "for", needle: "for (const [itemId, runId] of Object.entries(raw))", capText: "hydrated = true", doc: "hydrateMap — mapa finito (engine-map.json) + guard hydrated" },
+  { file: "headless-runtime/factory/engineBridge.ts", kind: "for", needle: "for (const entry of findings)", capText: "Array.isArray(findings)", doc: "renderFindingsText — array findings finito" },
+  { file: "headless-runtime/factory/engineBridge.ts", kind: "for", needle: "for (const step of steps)", capText: "steps: Array<Record<string, unknown>>", doc: "renderVerifyLog — steps finitos (verify-runner)" },
+  { file: "headless-runtime/factory/engineBridge.ts", kind: "for", needle: "for (const n of nodes)", capText: "Object.keys(nodeSessions).length < 50", doc: "syncEngineRunFromRun — cap 50 por mapa + break" },
+  { file: "headless-runtime/factory/engineBridge.ts", kind: "for", needle: "for (const [key, spec] of Object.entries(def.inputs))", capText: "def.inputs", doc: "runInputsForWorkflowDef — def.inputs finito" },
+  { file: "headless-runtime/factory/engineBridge.ts", kind: "for", needle: "for (const entry of timeline)", capText: "Array.isArray(timeline)", doc: "countAutoResumes — timeline finito" },
+  { file: "headless-runtime/factory/engineBridge.ts", kind: "for", needle: "for (let i = timeline.length - 1; i >= 0; i--)", capText: "Array.isArray(timeline)", doc: "interruptionMs — barrido reverso del timeline" },
+  { file: "headless-runtime/factory/engineBridge.ts", kind: "for", needle: "for (const item of workItemStore.list())", capText: "AUTO_RESUME_MAX_ATTEMPTS", doc: "autoResume candidatos — workItemStore.list() finito + AUTO_RESUME_MAX_ATTEMPTS = 3" },
+  { file: "headless-runtime/factory/engineBridge.ts", kind: "for", needle: "for (const candidate of candidates.slice(0, autoResumeMaxPerBoot()))", capText: "AUTO_RESUME_MAX_ATTEMPTS", doc: "autoResume resume — slice(0, autoResumeMaxPerBoot())" },
+  // E10: stagger de auto-resume one-shot (un disparo, sin re-arme), kill
+  // switch TERMCANVAS_FACTORY_NO_AUTORESUME=1.
+  { file: "headless-runtime/factory/engineBridge.ts", kind: "timeout", needle: "const timer = setTimeout", capText: "delayMs = 3000", doc: "autoResumeParkedEngineJobs delayMs = 3000" },
+  // RS01: restart del runner con backoff acotado por maxRestarts (default
+  // RUNNER_MAX_RESTARTS = 5), timer con clearTimeout en stop + unref.
+  { file: "headless-runtime/factory/github/runnerSupervisor.ts", kind: "timeout", needle: "this.timer = setTimeout", capText: "this.deps.maxRestarts", doc: "RUNNER_MAX_RESTARTS = 5" },
+  // Option A (publicación tras el revisor externo, LOOPS R01): sleep
+  // one-shot entre polls (nunca re-armado) + intento acotado del waiter.
+  { file: "headless-runtime/review/botReview.ts", kind: "timeout", needle: "setTimeout(resolve, ms)", capText: "BOT_REVIEW_POLL_MS", doc: "BOT_REVIEW_POLL_MS = 60000" },
+  { file: "headless-runtime/review/botReview.ts", kind: "for", needle: "attempt < maxPolls", capText: "BOT_REVIEW_MAX_POLLS", doc: "BOT_REVIEW_MAX_POLLS = 20" },
 ];
 
 /**
@@ -289,6 +312,15 @@ const FOR_EXEMPT_FILES: readonly string[] = [
   // descubierta y tokens de frontmatter — todo finito, sin re-arme.
   "headless-runtime/factory/agents/agentHooks.ts",
   "headless-runtime/runner/toolPolicy.ts",
+  // Auditoría 2026-09-16 (Exención 1): iteración estructural sobre
+  // colecciones finitas — entries de mapas validados (mcpFileRoutes,
+  // runnersService), líneas de texto (isolationStore), listado de jobs en
+  // memoria (mergeReconcile, workerActivity).
+  "headless-runtime/factory/mcps/mcpFileRoutes.ts",
+  "headless-runtime/factory/github/runnersService.ts",
+  "headless-runtime/factory/isolation/isolationStore.ts",
+  "headless-runtime/factory/isolation/mergeReconcile.ts",
+  "headless-runtime/workItem/workerActivity.ts",
 ];
 
 /**
@@ -339,6 +371,12 @@ const RETRY_EXEMPT_TOKENS: readonly string[] = [
   // straight line, not a loop; registered per the doc's Exención 3).
   "repair retry",
   "Repair retry",
+  // Auditoría 2026-09-16 (Exención 3): acciones del panel y guards
+  // retirados/mensajes que nombran "retry" sin ser loops.
+  "accept/retry",
+  "Retry review",
+  "review retry legacy",
+  "VERIFY-RETRY",
 ];
 
 /** Constantes: el número del doc debe seguir igual en el código. */
@@ -385,6 +423,10 @@ const CONSTANTS: readonly Array<{ file: string; code: string; doc: string }> = [
   { file: "headless-runtime/review/reviewDisk.ts", code: "REVIEW_RAW_MAX_BYTES = 64 * 1024", doc: "REVIEW_RAW_MAX_BYTES = 64KB" },
   { file: "headless-runtime/measure/scorerLoader.ts", code: "SCORER_MAX_FILE_BYTES = 64 * 1024", doc: "SCORER_MAX_FILE_BYTES = 64KB" },
   { file: "headless-runtime/factory/agentLoader.ts", code: "SKILL_MAX_BYTES = 8 * 1024", doc: "SKILL_MAX_BYTES = 8KB" },
+  // Auditoría 2026-09-16: cotas de auto-resume del engine (E10) y de
+  // restart del runner supervisor (RS01).
+  { file: "headless-runtime/factory/engineBridge.ts", code: "AUTO_RESUME_MAX_ATTEMPTS = 3", doc: "AUTO_RESUME_MAX_ATTEMPTS = 3" },
+  { file: "headless-runtime/factory/github/runnerSupervisor.ts", code: "RUNNER_MAX_RESTARTS = 5", doc: "RUNNER_MAX_RESTARTS = 5" },
 ];
 
 // ── Escaneo ─────────────────────────────────────────────────────────────────

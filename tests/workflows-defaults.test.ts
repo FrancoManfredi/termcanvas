@@ -241,7 +241,7 @@ test("fix-issue: cadena triage -> implement -> review", async () => {
       ? "triaje"
       : req.prompt.includes("Implementá la solución")
         ? "hecho"
-        : '{"green":true,"findings":[]}',
+        : '{"green":true,"dispositionsComplete":true,"contractCoverage":[{"requirement":"Rq1: el botón roto responde al click","coveredBy":"R1","status":"covered"}],"findings":[]}',
   });
   const run = await runWorkflow(
     loadWorkflow("fix-issue", { repoRoot, globalDir: emptyGlobal }),
@@ -273,8 +273,8 @@ test("revisión iterativa: review rojo → implement corrige con findings → ve
     return {
       output:
         reviews === 1
-          ? '{"green":false,"findings":[{"id":"f1","severity":"major","message":"el contador no se actualiza"}]}'
-          : '{"green":true,"findings":[]}',
+          ? '{"green":false,"dispositionsComplete":false,"contractCoverage":[{"requirement":"Rq1: el contador se actualiza","coveredBy":"","status":"missing","note":"el contrato no cubre el requisito"}],"findings":[{"id":"f1","severity":"major","message":"el contador no se actualiza"}]}'
+          : '{"green":true,"dispositionsComplete":true,"contractCoverage":[{"requirement":"Rq1: el contador se actualiza","coveredBy":"R1","status":"covered"}],"findings":[]}',
     };
   };
   const run = await runWorkflow(
@@ -309,7 +309,7 @@ test("revisión iterativa: rojo tras agotar las rondas → outcome failed", asyn
     if (req.prompt.includes("Analizá el issue")) return { output: "triaje" };
     if (req.prompt.includes("Implementá la solución")) return { output: "v1" };
     reviews += 1;
-    return { output: `{"green":false,"findings":[{"id":"f1","severity":"major","message":"ronda ${reviews}"}]}` };
+    return { output: `{"green":false,"dispositionsComplete":false,"contractCoverage":[{"requirement":"Rq1: el botón responde","coveredBy":"","status":"missing"}],"findings":[{"id":"f1","severity":"major","message":"ronda ${reviews}"}]}` };
   };
   const run = await runWorkflow(
     loadWorkflow("fix-issue", { repoRoot, globalDir: emptyGlobal }),

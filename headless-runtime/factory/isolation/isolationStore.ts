@@ -102,9 +102,78 @@ export function parseIssueTitleFromPrompt(
 }
 
 /**
- * PR title for an isolated job. Outcome-first (prp-pr rule): when the
- * accepted outcome is known it leads the title in behavior language
- * (first line, capped); the issue title is the fallback. Never throws.
+ * Heurística conservadora: true cuando `text` parece un finding de review
+ * (hallazgo con severidad/ubicación/estado), no un outcome en lenguaje de
+ * comportamiento. Un outcome limpio es una oración ("El conteo del kanban
+ * ya suma bien"); un finding arranca con tag de severidad (`[info] ...`),
+ * bullet markdown, id de finding/discovery (`f2 — ...`, `d3: ...`), o
+ * combina id `fN` con un ancla `archivo:línea` (en cualquier orden) dentro
+ * de los primeros 160 chars. También marca los `Status: OPEN|FIXED`.
+ * Nunca lanza: cualquier valor no-string devuelve false.
+ */
+export function looksLikeFindingText(text: unknown): boolean {
+  try {
+    if (typeof text !== "string") return false;
+    const raw = text.trim();
+    if (raw.length === 0) return false;
+    // Tag de severidad inicial: "[info] ...", "(critical) ...".
+    if (
+      /^\s*[\[(]?\s*(info|minor|major|blocker|critical|suggestion)\s*[\])]/i.test(
+        raw,
+      )
+    ) {
+      return true;
+    }
+    // Bullet markdown inicial: un outcome limpio es una oración, no una lista.
+    if (/^\s*[-*]\s/.test(raw)) return true;
+    // Id de finding/discovery inicial: "f2 — ...", "D3: ...".
+    if (/^\s*[fdFD]\d+\s*[—:-]/.test(raw)) return true;
+    // Marcador de disposición/estado escrito por el review.
+    if (/\bstatus:\s*(open|fixed|open at)\b/i.test(raw)) return true;
+    // Id de finding + ancla archivo:línea en la cabecera (cualquier orden).
+    const head = raw.slice(0, 160);
+    if (/\bf\d+\b/i.test(head) && /[\w./\\-]+:\d+\b/.test(head)) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True cuando `text` es prosa de compliance/veredicto (auto-certificación)
+ * en vez de un outcome de comportamiento: "el fix cumple el issue", "the fix
+ * satisfies the contract", "READY TO MERGE", "veredicto: ...". Caso PR #162:
+ * el summary del review llegó al título del PR. Nunca lanza.
+ */
+export function looksLikeComplianceText(text: unknown): boolean {
+  try {
+    if (typeof text !== "string") return false;
+    const raw = text.trim();
+    if (raw.length === 0) return false;
+    const head = raw.slice(0, 200).toLowerCase();
+    if (
+      /\b(cumple|satisface|satisfies|meets|fulfills)\b/.test(head) &&
+      /\b(issue|contrato|contract|requisito|requirement)\b/.test(head)
+    ) {
+      return true;
+    }
+    if (/\bready to merge\b|\bneeds fixes\b|\breview incomplete\b/.test(head)) return true;
+    if (/^(el|the)\s+(fix|change|cambio|patch)\b/.test(head) && /\b(cumple|satisfies|meets)\b/.test(head)) {
+      return true;
+    }
+    if (/^\s*(veredicto|verdict)\b/.test(head)) return true;
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * PR title for an isolated job. Issue-first (skill prp-pr): el título del PR
+ * espeja el título del issue — texto humano, estable y comportamental. La
+ * prosa del review/implement (outcome) solo entra como fallback sin título,
+ * y nunca si parece finding (caso PR #160) ni frase de compliance ("el fix
+ * cumple el issue" — caso PR #162). Never throws.
  */
 export function buildPrTitle(
   issueNumber: number,
@@ -112,22 +181,76 @@ export function buildPrTitle(
   outcome?: unknown,
 ): string {
   try {
-    const outcomeLine =
+    const clean =
+      typeof title === "string" && title.trim().length > 0
+        ? title.trim().replace(/\s+/g, " ").slice(0, 200)
+        : "";
+    if (clean.length > 0) {
+      return `Resolve issue #${issueNumber} — ${clean}`;
+    }
+    const rawOutcome =
       typeof outcome === "string" && outcome.trim().length > 0
-        ? (outcome.split("\n")[0] ?? "").trim().slice(0, 120)
+        ? (outcome.split("\n")[0] ?? "").trim()
+        : "";
+    const outcomeLine =
+      rawOutcome.length > 0 &&
+      !looksLikeFindingText(rawOutcome) &&
+      !looksLikeComplianceText(rawOutcome)
+        ? rawOutcome.slice(0, 120)
         : "";
     if (outcomeLine.length > 0) {
       return `Resolve issue #${issueNumber} — ${outcomeLine}`;
     }
-    const clean =
-      typeof title === "string" && title.trim().length > 0
-        ? title.trim().slice(0, 200)
-        : "";
-    return clean.length > 0
-      ? `Resolve issue #${issueNumber} — ${clean}`
-      : `Resolve issue #${issueNumber}`;
+    return `Resolve issue #${issueNumber}`;
   } catch {
     return `Resolve issue #${issueNumber}`;
+  }
+}
+
+/** Sinónimos de prefijo de issue → tipo conventional-commit. */
+const COMMIT_TYPE_SYNONYMS: Readonly<Record<string, string>> = {
+  bug: "fix",
+  bugfix: "fix",
+  hotfix: "fix",
+  feature: "feat",
+  enhancement: "feat",
+};
+
+/**
+ * Subject conventional para el commit del orquestador. El prefijo del
+ * título del issue manda el tipo (`bug:` → `fix:`, `feature:` → `feat:`;
+ * cualquier otro prefijo válido pasa tal cual: `test:`, `refactor:`,
+ * `a11y:`); sin prefijo → `chore:`. El subject termina en ` (#N)` para el
+ * autolink. Sin título utilizable cae al headline legacy
+ * `factory: implement issue #N (handoff)`. Una línea, cap 120. Nunca lanza.
+ */
+export function buildCommitSubject(issueNumber: number, title?: unknown): string {
+  const n =
+    typeof issueNumber === "number" && Number.isInteger(issueNumber) && issueNumber > 0
+      ? issueNumber
+      : 0;
+  try {
+    const clean =
+      typeof title === "string"
+        ? title.replace(/\s+/g, " ").trim().slice(0, 120)
+        : "";
+    const m = clean.match(/^([A-Za-z][A-Za-z0-9_-]{1,19}):\s*(.+)$/);
+    const rawType = m ? (m[1] as string).toLowerCase() : "";
+    const type = rawType === "" ? "chore" : (COMMIT_TYPE_SYNONYMS[rawType] ?? rawType);
+    const rest = m ? (m[2] as string).trim() : clean;
+    if (rest.length === 0) return `factory: implement issue #${n} (handoff)`;
+    const suffix = n > 0 ? ` (#${n})` : "";
+    const subject = `${type}: ${rest}`;
+    if (subject.length + suffix.length <= 120) return `${subject}${suffix}`;
+    // Cap por palabra: nunca a mitad de palabra (defecto visto en el commit
+    // del PR #162: "…fall…a (#151)").
+    const room = Math.max(1, 120 - suffix.length - 3);
+    const cut = subject.slice(0, room);
+    const lastSpace = cut.lastIndexOf(" ");
+    const head = (lastSpace > room * 0.4 ? cut.slice(0, lastSpace) : cut).trim();
+    return `${head}...${suffix}`;
+  } catch {
+    return `factory: implement issue #${n} (handoff)`;
   }
 }
 
@@ -199,11 +322,13 @@ export function extractReportSection(text: unknown, names: readonly string[]): s
     const end = lines.findIndex(
       (line, idx) => idx > start && /^#{1,3}\s+/.test(line),
     );
-    return lines
-      .slice(start + 1, end < 0 ? undefined : end)
-      .join("\n")
-      .trim()
-      .slice(0, 1500);
+    return capTextAtBoundary(
+      lines
+        .slice(start + 1, end < 0 ? undefined : end)
+        .join("\n")
+        .trim(),
+      1500,
+    );
   } catch {
     return "";
   }
@@ -218,9 +343,60 @@ export function reportIntro(text: unknown, max = 1200): string {
     if (typeof text !== "string") return "";
     const flat = text.replace(/\r/g, "");
     const cut = flat.search(/\n#{1,3}\s+/);
-    return (cut < 0 ? flat : flat.slice(0, cut)).trim().slice(0, max);
+    return capTextAtBoundary((cut < 0 ? flat : flat.slice(0, cut)).trim(), max);
   } catch {
     return "";
+  }
+}
+
+/** Una unidad de commit declarada por el implement (`## Commit units`). */
+export interface CommitUnit {
+  subject: string;
+  paths: string[];
+}
+
+/**
+ * Parsea la sección `## Commit units` del reporte del implement:
+ * líneas `- <type>: <subject> — <path1>, <path2>` (paths backtickeados o
+ * planos, separados por coma). Sección ausente o sin líneas válidas → `[]`
+ * (el caller mantiene el commit único legacy). Hasta 8 unidades y 50 paths
+ * por unidad; el committer valida cada path contra los candidatos reales.
+ * Nunca lanza.
+ */
+export function extractCommitUnits(text: unknown): CommitUnit[] {
+  try {
+    if (typeof text !== "string" || text.trim() === "") return [];
+    const section = extractReportSection(text, ["commit units", "unidades de commit"]);
+    if (section === "") return [];
+    const out: CommitUnit[] = [];
+    for (const raw of section.split("\n")) {
+      const line = raw.replace(/^\s*[-*]\s+/, "").trim();
+      if (line === "") continue;
+      const m = line.match(/^(.+?)\s+[—–]\s+(.+)$/);
+      if (!m) continue;
+      const subject = (m[1] ?? "").replace(/`/g, "").trim().slice(0, 120);
+      if (subject === "") continue;
+      const seen = new Set<string>();
+      const paths: string[] = [];
+      for (const piece of (m[2] ?? "").split(",")) {
+        const p = piece
+          .replace(/`/g, "")
+          .trim()
+          .replace(/\\/g, "/")
+          .replace(/^\.\//, "");
+        if (p === "" || /\s/.test(p) || p.startsWith("/") || p.includes("..")) continue;
+        if (seen.has(p)) continue;
+        seen.add(p);
+        paths.push(p);
+        if (paths.length >= 50) break;
+      }
+      if (paths.length === 0) continue;
+      out.push({ subject, paths });
+      if (out.length >= 8) break;
+    }
+    return out;
+  } catch {
+    return [];
   }
 }
 
@@ -338,7 +514,7 @@ export function summarizeDetailsForCommit(details: unknown): string {
         parts.push(`Validation: ${rec.overall.trim().slice(0, 120)}`);
       }
     }
-    return parts.join("\n").slice(0, 1000);
+    return capTextAtBoundary(parts.join("\n"), 1000);
   } catch {
     return "";
   }
@@ -365,6 +541,36 @@ function cleanDetailList(v: unknown, cap: number): string[] {
       .slice(0, cap);
   } catch {
     return [];
+  }
+}
+
+/**
+ * Recorta `text` a `max` chars cortando SIEMPRE en boundary (oración, línea
+ * o palabra) y marcando el corte con `…`; nunca a mitad de palabra (defecto
+ * visto en la evidencia del PR #162: "Sin esta cita no hay ve"). Nunca
+ * lanza.
+ */
+export function capTextAtBoundary(text: unknown, max: number): string {
+  try {
+    if (typeof text !== "string") return "";
+    const s = text.replace(/\r/g, "").trim();
+    const cap = typeof max === "number" && Number.isFinite(max) && max > 0 ? Math.trunc(max) : 0;
+    if (cap === 0) return "";
+    if (s.length <= cap) return s;
+    const cut = s.slice(0, cap);
+    const marks = [
+      cut.lastIndexOf(". "),
+      cut.lastIndexOf("! "),
+      cut.lastIndexOf("? "),
+      cut.lastIndexOf("\n"),
+    ];
+    const boundary = marks.reduce((a, b) => (a > b ? a : b), -1);
+    if (boundary > cap * 0.4) return cut.slice(0, boundary + 1).trim();
+    const lastSpace = cut.lastIndexOf(" ");
+    if (lastSpace > cap * 0.4) return `${cut.slice(0, lastSpace).trim()}…`;
+    return `${cut.trim()}…`;
+  } catch {
+    return "";
   }
 }
 
@@ -460,6 +666,51 @@ function verificationLines(v: unknown): string[] {
 }
 
 /**
+ * Descarta narrativa de ronda/proceso (worktree, stash, "no toqué código",
+ * "Ronda revise N") del intro del implement: describe el proceso interno,
+ * no el cambio final, y no debe viajar al body del PR (caso PR #162).
+ * Conservador, por párrafo; si todo se descarta devuelve "". Nunca lanza.
+ */
+export function stripRoundNarrative(text: unknown): string {
+  try {
+    if (typeof text !== "string") return "";
+    const flat = text.replace(/\r/g, "").trim();
+    if (flat === "") return "";
+    const kept = flat.split(/\n\s*\n/).filter((p) => {
+      const head = p.trim().slice(0, 200);
+      // "Ronda revise N" / "Round 2", nunca "Round-trip".
+      if (/^\s*[-*]?\s*(ronda|round)\b(?!\s*-?\s*trip)/i.test(head)) return false;
+      if (/\bno toqué código\b|\bsin cambios de código\b|\bworktree ya contiene\b/i.test(head)) {
+        return false;
+      }
+      // Solo menciones de proceso (git stash), no el concepto técnico.
+      if (/\b(git\s+stash|stash\s*\/\s*unstash|hice stash|hizo stash|stash y)\b/i.test(head)) {
+        return false;
+      }
+      return true;
+    });
+    return kept.join("\n\n").trim();
+  } catch {
+    return "";
+  }
+}
+
+/** Primera oración del texto (cap 240 en boundary), o "". Nunca lanza. */
+function firstBehaviorSentence(text: string): string {
+  try {
+    const line = text.split("\n").map((l) => l.trim()).find((l) => l !== "") ?? "";
+    if (line === "") return "";
+    const cut = line.slice(0, 300);
+    const ends = [cut.indexOf(". "), cut.indexOf("! "), cut.indexOf("? ")].filter((i) => i > 0);
+    const min = ends.length > 0 ? Math.min(...ends) : -1;
+    const sentence = min > 0 ? cut.slice(0, min + 1) : cut;
+    return capTextAtBoundary(sentence.trim(), 240);
+  } catch {
+    return "";
+  }
+}
+
+/**
  * PR body de un job aislado, estilo guía de review (problema + outcome,
  * solución, review guidance, archivos, validación, entrega). Siempre lleva
  * `Closes #N`; cada sección aparece solo cuando aporta información (nunca
@@ -478,16 +729,14 @@ export function buildPrBody(
       "Automated change set, opened by the factory daemon for human review.",
       "Merging stays a human decision (panel Merge action or GitHub UI).",
     ];
-    // Problem and outcome: el issue es el problema; el outcome es el
-    // resumen aceptado del review (veredicto) o la intro del implement.
-    const outcome = cleanDetailText(details?.summary, 400);
+    // Problem and outcome: el issue es el problema; el outcome describe el
+    // COMPORTAMIENTO resultante desde la intro del implement (nunca el
+    // summary del review, que es veredicto, ni narrativa de ronda).
     const reportText =
       typeof details?.implementReport === "string" ? details.implementReport : "";
     const solution =
-      reportText.trim() !== "" ? reportIntro(reportText, 1200) : "";
-    const solutionFirst = solution.length > 0 ? (solution.split("\n")[0] ?? "") : "";
-    const outcomeLine =
-      outcome.length > 0 ? (outcome.split("\n")[0] ?? "") : solutionFirst;
+      reportText.trim() !== "" ? stripRoundNarrative(reportIntro(reportText, 1200)) : "";
+    const outcomeLine = solution.length > 0 ? firstBehaviorSentence(solution) : "";
     const po: string[] = [`- **Issue:** #${issueNumber}`];
     if (outcomeLine.trim().length > 0) {
       po.push(`- **Outcome:** ${outcomeLine.trim().slice(0, 400)}`);

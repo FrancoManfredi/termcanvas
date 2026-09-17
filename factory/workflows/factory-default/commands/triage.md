@@ -24,3 +24,5 @@ Cerrá siempre con una línea de veredicto de contrato (sin excepción):
 - NO_ACTION: ya entregado, duplicado, obsoleto o fuera de dirección; citá la evidencia.
 
 No inventes intención de producto. Una duda de ingeniería que se resuelve con código a la vista no bloquea: solo bloquea la intención faltante o el trabajo que debe aterrizar primero.
+
+Cuando el issue use una frase de comportamiento ("mantiene el estado en memoria", "informa el fallo"), citá esa frase TEXTUALMENTE (entre comillas) y no la parafrasees ni le agregues calificativos que la debiliten ("por el throw", "retorna el valor"): la spec y el review se anclan en esa cita.

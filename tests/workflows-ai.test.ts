@@ -39,6 +39,20 @@ function stubRunner(
   };
 }
 
+interface RecordedEvent {
+  type: string;
+  nodeId?: string;
+  data?: Record<string, unknown>;
+}
+
+function readEvents(runsDir: string, runId: string): RecordedEvent[] {
+  return fs
+    .readFileSync(path.join(runsDir, runId, "events.jsonl"), "utf-8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as RecordedEvent);
+}
+
 test("prompt: ejecuta el runner, guarda sesión y propaga modelo/effort", async () => {
   const { tmp, runsDir } = sandbox();
   const log: AiNodeRequest[] = [];
@@ -378,4 +392,215 @@ nodes:
   assert.equal(req.workflowDir, tmp);
   assert.equal(req.repoRoot, tmp);
   assert.ok(req.scopeDir.includes("scopes"));
+});
+
+test("output_format: la reparación manda un turno extra en la misma sesión", async () => {
+  const { tmp, runsDir } = sandbox();
+  const log: AiNodeRequest[] = [];
+  const yaml = `name: ai-repair
+description: reparación de formato
+nodes:
+  - id: plan
+    prompt: "planificá"
+    output_format:
+      type: object
+      properties:
+        summary: { type: string }
+      required: [summary]
+`;
+  const runner: AiNodeRunner = async (req) => {
+    log.push(req);
+    // El runner real avisa la sesión resuelta antes de enviar el turno
+    // (nodes/ai.ts): acá se emula para verificar el filtrado silencioso.
+    req.onSessionCreated?.("s-fixed");
+    if (log.length === 1) {
+      return {
+        output: "## Plan\n\nSin JSON en la respuesta.",
+        sessionId: "s-fixed",
+        costUsd: 0.25,
+        usage: { inputTokens: 10, outputTokens: 4 },
+      };
+    }
+    return {
+      output: '{"summary":"ok"}',
+      sessionId: "s-fixed",
+      costUsd: 0.5,
+      usage: { inputTokens: 6, outputTokens: 2 },
+    };
+  };
+  const run = await runWorkflow(loaded(yaml, tmp), {
+    cwd: tmp,
+    runsDir,
+    aiRunner: runner,
+  });
+  assert.equal(run.status, "completed", run.error ?? "");
+  assert.equal(
+    (run.nodes.plan.outputJson as { summary?: string }).summary,
+    "ok",
+  );
+  assert.equal(run.nodes.plan.output, '{"summary":"ok"}');
+  assert.equal(log.length, 2);
+  assert.ok(log[1].prompt.includes("REPARACIÓN DE FORMATO"));
+  assert.equal(log[1].sessionId, "s-fixed");
+  // La contabilidad suma ambos turnos, no pisa el usage/costo del primero.
+  assert.equal(run.nodes.plan.costUsd, 0.75);
+  assert.deepEqual(run.nodes.plan.usage, {
+    inputTokens: 16,
+    outputTokens: 6,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+  });
+  // El turno reparador reutiliza la sesión ya emitida: no duplica la fila
+  // de Agent Sessions.
+  const attached = readEvents(runsDir, run.id).filter(
+    (event) => event.type === "node_session_attached" && event.nodeId === "plan",
+  );
+  assert.equal(attached.length, 1);
+});
+
+test("output_format: si la reparación tampoco parsea, falla con el error original", async () => {
+  const { tmp, runsDir } = sandbox();
+  const log: AiNodeRequest[] = [];
+  const yaml = `name: ai-repair-fail
+description: reparación fallida
+nodes:
+  - id: plan
+    prompt: "planificá"
+    output_format:
+      type: object
+      properties:
+        summary: { type: string }
+      required: [summary]
+`;
+  const run = await runWorkflow(loaded(yaml, tmp), {
+    cwd: tmp,
+    runsDir,
+    aiRunner: async (req) => {
+      log.push(req);
+      return { output: "solo prosa, sin JSON", sessionId: "s-fixed" };
+    },
+  });
+  assert.equal(run.status, "failed");
+  assert.match(run.error ?? "", /output no contiene JSON válido/);
+  // Exactamente dos llamadas: una original y una de reparación, sin retry.
+  assert.equal(log.length, 2);
+});
+
+test("output_format: JSON válido a la primera no dispara reparación", async () => {
+  const { tmp, runsDir } = sandbox();
+  const log: AiNodeRequest[] = [];
+  const yaml = `name: ai-repair-happy
+description: sin reparación
+nodes:
+  - id: plan
+    prompt: "planificá"
+    output_format:
+      type: object
+      properties:
+        summary: { type: string }
+      required: [summary]
+`;
+  const run = await runWorkflow(loaded(yaml, tmp), {
+    cwd: tmp,
+    runsDir,
+    aiRunner: async (req) => {
+      log.push(req);
+      return { output: '{"summary":"ok"}', sessionId: "s-happy" };
+    },
+  });
+  assert.equal(run.status, "completed", run.error ?? "");
+  assert.deepEqual(run.nodes.plan.outputJson, { summary: "ok" });
+  assert.equal(log.length, 1);
+});
+
+test("output_format: schema inválido se repara con un segundo turno", async () => {
+  const { tmp, runsDir } = sandbox();
+  const log: AiNodeRequest[] = [];
+  const yaml = `name: ai-repair-schema
+description: reparación de schema
+nodes:
+  - id: plan
+    prompt: "planificá"
+    output_format:
+      type: object
+      properties:
+        summary: { type: string }
+      required: [summary]
+`;
+  const runner: AiNodeRunner = async (req) => {
+    log.push(req);
+    if (log.length === 1) {
+      return { output: '{"summary":42}', sessionId: "s-schema" };
+    }
+    return { output: '{"summary":"ok"}', sessionId: "s-schema" };
+  };
+  const run = await runWorkflow(loaded(yaml, tmp), {
+    cwd: tmp,
+    runsDir,
+    aiRunner: runner,
+  });
+  assert.equal(run.status, "completed", run.error ?? "");
+  assert.deepEqual(run.nodes.plan.outputJson, { summary: "ok" });
+  assert.equal(log.length, 2);
+});
+
+test("loop_group: el sub-nodo repara formato con un turno extra", async () => {
+  const { tmp, runsDir } = sandbox();
+  const log: AiNodeRequest[] = [];
+  const yaml = `name: group-repair
+description: reparación en loop_group
+nodes:
+  - id: grp
+    loop_group:
+      max_iterations: 1
+      nodes:
+        - id: review
+          prompt: "revisá"
+          output_format:
+            type: object
+            properties:
+              green: { type: boolean }
+            required: [green]
+`;
+  const runner: AiNodeRunner = async (req) => {
+    log.push(req);
+    // El runner real avisa la sesión resuelta antes de enviar el turno
+    // (nodes/ai.ts): acá se emula para verificar el filtrado silencioso.
+    req.onSessionCreated?.("s-group");
+    if (log.length === 1) {
+      return {
+        output: "revisión en prosa, sin JSON",
+        sessionId: "s-group",
+        costUsd: 0.25,
+        usage: { inputTokens: 4, outputTokens: 1 },
+      };
+    }
+    return {
+      output: '{"green":true}',
+      sessionId: "s-group",
+      costUsd: 0.5,
+      usage: { inputTokens: 2, outputTokens: 1 },
+    };
+  };
+  const run = await runWorkflow(loaded(yaml, tmp), {
+    cwd: tmp,
+    runsDir,
+    aiRunner: runner,
+  });
+  assert.equal(run.status, "completed", run.error ?? "");
+  assert.equal(run.nodes["grp.review"].status, "completed");
+  assert.deepEqual(run.nodes["grp.review"].outputJson, { green: true });
+  assert.equal(log.length, 2);
+  assert.ok(log[1].prompt.includes("REPARACIÓN DE FORMATO"));
+  assert.equal(log[1].sessionId, "s-group");
+  // La contabilidad del grupo suma ambos turnos.
+  assert.equal(run.nodes.grp.costUsd, 0.75);
+  assert.equal(run.totals?.tokens?.input, 6);
+  // El nodo del grupo queda persistido una sola vez por ronda (sin duplicar
+  // la sesión en Agent Sessions).
+  const attached = readEvents(runsDir, run.id).filter(
+    (event) =>
+      event.type === "node_session_attached" && event.nodeId === "grp.review",
+  );
+  assert.equal(attached.length, 1);
 });

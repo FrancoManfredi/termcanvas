@@ -29,6 +29,11 @@ import { PhaseModelsSection } from "./settings/PhaseModelsSection";
 import { McpIntegrationsSection } from "./settings/McpSection";
 import { SkillsSettingsSection } from "./settings/SkillsSettingsSection";
 import { useUpdaterStore } from "../stores/updaterStore";
+import {
+  getFactorySettings,
+  postFactorySettings,
+  type FactorySettings,
+} from "../lib/factoryClient";
 
 const platform = window.termcanvas?.app.platform ?? "darwin";
 const isMac = platform === "darwin";
@@ -695,6 +700,11 @@ export function SettingsModal({ onClose }: Props) {
   const [cliPendingAction, setCliPendingAction] = useState<
     "register" | "unregister" | null
   >(null);
+  const [factorySettings, setFactorySettings] = useState<FactorySettings | null>(
+    null,
+  );
+  const [factorySettingsLoading, setFactorySettingsLoading] = useState(true);
+  const [factorySettingsSaving, setFactorySettingsSaving] = useState(false);
   const [appVersion, setAppVersion] = useState<string | null>(null);
 
   const tabs = useMemo<Tab[]>(() => {
@@ -711,6 +721,24 @@ export function SettingsModal({ onClose }: Props) {
 
   useEffect(() => {
     window.termcanvas?.cli.isRegistered().then(setCliRegistered);
+  }, []);
+
+  // Daemon-persisted settings load once per modal open; the row stays
+  // disabled until the GET resolves (or if the daemon is unreachable).
+  useEffect(() => {
+    let cancelled = false;
+    void getFactorySettings()
+      .then((result) => {
+        if (cancelled) return;
+        if (result.ok && result.data !== null) setFactorySettings(result.data);
+        setFactorySettingsLoading(false);
+      })
+      .catch(() => {
+        if (!cancelled) setFactorySettingsLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -799,6 +827,38 @@ export function SettingsModal({ onClose }: Props) {
     },
     [t],
   );
+
+  // Optimistic toggle: show the next value immediately, revert if the
+  // POST fails so the row never drifts from the daemon's truth.
+  const handleFactoryBotReconcileToggle = useCallback(
+    async (nextEnabled: boolean) => {
+      const previous = factorySettings;
+      if (previous === null) return;
+      setFactorySettings({ ...previous, botReconcile: nextEnabled });
+      setFactorySettingsSaving(true);
+      try {
+        const result = await postFactorySettings(nextEnabled);
+        if (!result.ok || result.data === null) {
+          setFactorySettings(previous);
+          useNotificationStore
+            .getState()
+            .notify("error", t.bot_reconcile_update_failed);
+          return;
+        }
+        setFactorySettings(result.data);
+      } finally {
+        setFactorySettingsSaving(false);
+      }
+    },
+    [factorySettings, t],
+  );
+
+  const envForcesBotReconcile = factorySettings?.gate.source === "env";
+  const botReconcileLocked =
+    factorySettingsLoading ||
+    factorySettingsSaving ||
+    factorySettings === null ||
+    envForcesBotReconcile;
 
   // Keyboard handling. Three concerns share this listener so we can keep
   // capture-phase semantics consistent:
@@ -1020,6 +1080,26 @@ export function SettingsModal({ onClose }: Props) {
                       />
                     </SettingsRow>
                   )}
+
+                  <SettingsRow
+                    label={t.bot_reconcile_label}
+                    description={
+                      envForcesBotReconcile
+                        ? t.bot_reconcile_env_override
+                        : t.bot_reconcile_desc
+                    }
+                  >
+                    <OnOffSegment
+                      value={factorySettings?.botReconcile ?? false}
+                      onChange={(next) =>
+                        void handleFactoryBotReconcileToggle(next)
+                      }
+                      disabled={{
+                        on: botReconcileLocked,
+                        off: botReconcileLocked,
+                      }}
+                    />
+                  </SettingsRow>
 
                   {isMac && (
                     <SettingsRow

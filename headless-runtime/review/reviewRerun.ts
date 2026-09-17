@@ -3,7 +3,9 @@
  *
  * POST /factory/jobs/:id/review/rerun (+ alias): corre UN solo turno del
  * review agent sobre un job en `Complete` (filas Ready to Merge) SIN mover
- * su status (Complete es terminal: no hay transición). El veredicto se
+ * su status (esta ruta nunca transiciona: el único reopen deliberado de
+ * Complete es la ronda de reconciliación post-bot, `startBotReconcileRun`).
+ * El veredicto se
  * anexa al timeline + raw a disco para auditoría y viaja en la respuesta
  * para que el panel lo muestre; si sale `revise`, el humano decide con los
  * botones existentes (el daemon no reabre nada solo).

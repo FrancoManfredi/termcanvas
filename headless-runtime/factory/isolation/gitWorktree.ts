@@ -100,8 +100,22 @@ export interface EnsureIsolatedWorktreeInput {
 /** Marca de los excludes locales del factory (idempotencia por contenido). */
 const WORKTREE_EXCLUDE_MARKER = "termcanvas-factory local excludes";
 
-/** Ruido de daemon/toolchain que jamás debe ser commiteable ni listado. */
-const WORKTREE_LOCAL_EXCLUDES = ".agents/\nlogs/\n*.log\n";
+/**
+ * Ruido de daemon/toolchain + review aids del ciclo que jamás debe ser
+ * commiteable ni listado. Espejo de los filtros de `gitHubPr.ts` (los
+ * archivos de review van anclados a la raíz; `review/` a cualquier nivel).
+ */
+const WORKTREE_LOCAL_EXCLUDES =
+  ".agents/\n" +
+  "logs/\n" +
+  "*.log\n" +
+  "/artifacts/scope.md\n" +
+  "/scope.md\n" +
+  "/plan.md\n" +
+  "/triage.md\n" +
+  "/discoveries.json\n" +
+  "/discoveries.md\n" +
+  "review/\n";
 
 export type EnsureIsolatedWorktreeResult =
   | {
@@ -120,12 +134,14 @@ function normalizeSlashes(p: string): string {
 
 /**
  * Excludes locales del worktree recién creado (`$GIT_DIR/info/exclude`):
- * `.agents/`, `logs/`, `*.log` — el ruido del daemon y del toolchain que
- * el commit selectivo ya filtra, pero que tampoco debe ensuciar `git
- * status` ni depender del `.gitignore` del repo target (fix PRs +1M
- * líneas, issue #69/#70). Vive fuera del worktree (nunca commiteado),
- * idempotente por marcador, best-effort (nunca rompe el ensure). Nunca
- * lanza.
+ * `.agents/`, `logs/`, `*.log` y las review aids del ciclo (`scope.md`,
+ * `plan.md`, `triage.md`, `discoveries.*`, `artifacts/scope.md`,
+ * `review/`) — ruido del daemon y ayudas que el commit selectivo ya
+ * filtra, pero que tampoco deben ensuciar `git status` ni depender del
+ * `.gitignore` del repo target (fix PRs +1M líneas, issue #69/#70; aids
+ * coladas al commit en PR #158). Vive fuera del worktree (nunca
+ * commiteado), idempotente por marcador, best-effort (nunca rompe el
+ * ensure). Nunca lanza.
  */
 async function ensureWorktreeLocalExcludesBestEffort(
   run: GitExecRun,

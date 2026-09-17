@@ -157,6 +157,12 @@ import {
   buildHealthPayload as buildHealthPayloadE2,
   buildMinimalHealthSnapshot as buildMinimalHealthSnapshotE2,
 } from "./health/healthRoutes";
+// ── P4 (2026-09-17) gate persistente del factory (settings/) ──
+import {
+  applyBotReconcileSetting,
+  buildFactorySettingsSnapshot,
+  resolveBotReconcileGate as resolveBotReconcileGateP4,
+} from "./settings/factorySettingsStore";
 import {
   MVP_TRACKING_PING_PREFIX,
   MVP_TRACKING_PING_SUFFIX,
@@ -209,6 +215,7 @@ import {
   handleGate,
   handleRunEvent,
   isWorkflowEngineEnabled,
+  reconcileFromAnyCaller,
   runWorkflowJob,
   setWorkflowRuntimeProvider,
   tryHandleWorkflowAction,
@@ -2292,6 +2299,9 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
         await handleHealthRoute(res);
         break;
       }
+      // P4: gate persistente del factory (GET lectura / POST escritura).
+      case "settings-get": await handleSettingsGetRoute(res); break;
+      case "settings-set": await handleSettingsSetRoute(req, res); break;
       case "jobs-list": await handleJobsListRoute(pathname, res, url); break;
       case "foreman-logs": await handleForemanLogsRoute(url, res); break;
       case "jobs-create": await handleJobsCreateRoute(req, res); break;
@@ -2418,10 +2428,39 @@ async function handleHealthRoute(res: http.ServerResponse): Promise<void> {
     opencodePort,
     opencodeUptime: opencodeServerManager.getStartedAt() ? Date.now() - (opencodeServerManager.getStartedAt() as number) : 0,
     ...(mgrErr ? { opencodeError: mgrErr } : {}),
+    // P1: el gate efectivo viaja en salud (env > setting > default) para que
+    // el operador verifique el PROCESO VIVO, no un log de otro daemon.
+    botReconcile: resolveBotReconcileGateP4(),
   });
   // ── FIN FASE 3 E2 — Snapshot salud ──
   res.writeHead(200, { "Content-Type": "application/json" });
   res.end(JSON.stringify(payload));
+  return;
+}
+
+// ── P4: GET/POST /factory/settings (gate persistente; handler delgado) ──
+// GET: snapshot `{ok, settings, gate, envOverride}` (el valor efectivo, la
+// fuente y el override de env). POST: valida `{botReconcile: boolean}`,
+// persiste y devuelve el mismo snapshot. Nunca lanza (dominio fail-safe).
+async function handleSettingsGetRoute(res: http.ServerResponse): Promise<void> {
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(buildFactorySettingsSnapshot()));
+  return;
+}
+
+async function handleSettingsSetRoute(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+): Promise<void> {
+  const { parsed } = await readBody(req);
+  const out = applyBotReconcileSetting(parsed);
+  if (!out.ok) {
+    res.writeHead(400, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ error: out.error }));
+    return;
+  }
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(buildFactorySettingsSnapshot()));
   return;
 }
 
@@ -3232,8 +3271,12 @@ async function handleReviewAcceptRoute(method: string, pathname: string, res: ht
         } catch {}
         // T01 isolation: primer Complete de un job aislado abre el PR de
         // handoff (una vez por job, best-effort; legados son no-op).
+        // WS-4: el hook de reconciliación viaja también en el accept humano
+        // (run del engine en rojo que el humano acepta igual → PR → bot).
         setImmediate(() => {
-          void maybeOpenPrForCompletedJob(aid);
+          void maybeOpenPrForCompletedJob(aid, {
+            onBotReconcile: (jobId, feedback) => reconcileFromAnyCaller(jobId, feedback),
+          });
         });
         setImmediate(() => {
           void runHumanAcceptAutoScore(aid);
@@ -4232,6 +4275,32 @@ export async function ensureFactoryServer(): Promise<number> {
     try {
       parkInterruptedJobs();
     } catch {}
+  }
+
+  // P6b: recupera publicaciones de review pendientes (el daemon anterior murió
+  // antes del publish del reporte). Best-effort, una pasada por boot; el
+  // publish es idempotente por head y el wait del bot se repite acotado.
+  // Kill switch: TERMCANVAS_FACTORY_NO_PUBLISH_RESUME=1.
+  if (ownsPipeline && (process.env.TERMCANVAS_FACTORY_NO_PUBLISH_RESUME ?? "") !== "1") {
+    void import("./isolation/gitHubPr")
+      .then((module) => module.resumePendingReviewPublications())
+      .catch(() => {});
+  }
+
+  // P3: recupera rondas de reconciliación post-bot perdidas (gate apagado al
+  // publicar el reporte, o hook muerto tras preparar el evento): reconstruye
+  // el feedback desde los findings estructurados del timeline, prepara el
+  // evento `botReconcile` si falta y re-dispara el starter con el runtime del
+  // daemon (ya registrado arriba). Best-effort, una pasada por boot; cap real
+  // `botReconcileRun` intacto. Kill switch: TERMCANVAS_FACTORY_NO_BOT_RECONCILE_RESUME=1.
+  if (ownsPipeline && (process.env.TERMCANVAS_FACTORY_NO_BOT_RECONCILE_RESUME ?? "") !== "1") {
+    void import("./isolation/gitHubPr")
+      .then((module) =>
+        module.resumeMissedBotReconcileRounds({
+          onBotReconcile: (jobId, feedback) => reconcileFromAnyCaller(jobId, feedback),
+        }),
+      )
+      .catch(() => {});
   }
 
   // Levantar OpencodeServerManager efímero solo con trabajo real: en una app

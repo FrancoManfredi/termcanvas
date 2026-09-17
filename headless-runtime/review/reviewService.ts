@@ -38,6 +38,7 @@ import { foremanLogStore } from "../foreman/foremanLog";
 // legado en caso contrario). El hook post-Complete abre el PR de handoff.
 import { effectiveWorktreeFor } from "../factory/isolation/isolationStore";
 import { maybeOpenPrForCompletedJob } from "../factory/isolation/gitHubPr";
+import { reconcileFromAnyCaller } from "../factory/engineBridge";
 
 function extractImplementMeta(item: WorkItem): {
   createdFiles: string[];
@@ -308,8 +309,12 @@ export class ReviewService {
           // T01 isolation (§5.1 Store→PR): el accept automático también abre
           // el PR de handoff (una vez por job, best-effort). Sin esta arista
           // el camino principal Building→Review→Complete nunca abriría PR.
+          // WS-4: el hook de reconciliación también viaja en este camino
+          // (jobs sin run del engine o aceptados por el flujo job-level).
           setImmediate(() => {
-            void maybeOpenPrForCompletedJob(id);
+            void maybeOpenPrForCompletedJob(id, {
+              onBotReconcile: (jobId, feedback) => reconcileFromAnyCaller(jobId, feedback),
+            });
           });
           return completed;
         } catch (e) {

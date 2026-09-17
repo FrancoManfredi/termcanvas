@@ -213,6 +213,36 @@ function parseStructuredOutput(raw: string, schema?: JsonSchemaLike): unknown {
 }
 
 /**
+ * Uso agregado de dos llamadas IA (reparación de formato): suma campo a campo.
+ * Si una sola llamada reportó usage, ese valor se conserva tal cual.
+ */
+function mergeUsage(
+  first: NodeExecutionResult["usage"],
+  second: NodeExecutionResult["usage"],
+): NodeExecutionResult["usage"] {
+  if (!first) return second;
+  if (!second) return first;
+  return {
+    inputTokens: (first.inputTokens ?? 0) + (second.inputTokens ?? 0),
+    outputTokens: (first.outputTokens ?? 0) + (second.outputTokens ?? 0),
+    cacheReadTokens:
+      (first.cacheReadTokens ?? 0) + (second.cacheReadTokens ?? 0),
+    cacheWriteTokens:
+      (first.cacheWriteTokens ?? 0) + (second.cacheWriteTokens ?? 0),
+  };
+}
+
+/** Costo agregado de dos llamadas IA; undefined si ninguna reportó costo. */
+function mergeCostUsd(
+  first: number | undefined,
+  second: number | undefined,
+): number | undefined {
+  if (typeof first !== "number") return second;
+  if (typeof second !== "number") return first;
+  return first + second;
+}
+
+/**
  * Ronda previa de un `loop_group` para `$LOOP_HISTORY` y el bloque
  * auto-inyectado (WS1): nada mecánico, solo lo completado de esa ronda.
  */
@@ -224,6 +254,15 @@ interface LoopHistoryEntry {
 const LOOP_HISTORY_MAX_ITERATIONS = 5;
 const LOOP_HISTORY_MAX_CHARS_PER_NODE = 2_000;
 const LOOP_HISTORY_MAX_TOTAL_CHARS = 12_000;
+
+/**
+ * Reparación acotada de formato: si un nodo con `output_format` devuelve texto
+ * sin JSON válido (o con schema inválido), se manda UN turno extra a la misma
+ * sesión pidiendo solo el objeto del contrato. Si tampoco parsea, el nodo falla
+ * con el error original.
+ */
+const FORMAT_REPAIR_INSTRUCTION =
+  "[REPARACIÓN DE FORMATO] Tu mensaje anterior no produjo el JSON válido que exige el contrato del nodo (output_format). Respondé ahora ÚNICAMENTE con el objeto JSON válido, sin prosa, sin fences ni markdown, sin repetir trabajo ni usar tools.";
 
 function trimHistoryText(text: string, max: number): string {
   if (text.length <= max) return text;
@@ -427,6 +466,7 @@ export async function runWorkflow(
     prompt: string,
     sessionOverride?: string | null,
     sessionMeta?: Record<string, unknown>,
+    runOpts?: { silentSession?: boolean },
   ): Promise<NodeExecutionResult> =>
     aiRunner({
       runId: run.id,
@@ -455,6 +495,9 @@ export async function runWorkflow(
       workflowDir: loaded.dir,
       scopeDir: path.join(artifacts.artifactsDir, "scopes", node.id),
       onSessionCreated: (sessionId: string) => {
+        // La reparación de formato reutiliza una sesión YA emitida: repetir la
+        // fila/ronda en Agent Sessions solo duplicaría el registro.
+        if (runOpts?.silentSession) return;
         // Agent Sessions se habilita al ENVIAR el mensaje, no al completar.
         // `iteration` (loops): número de ronda 1-based para que el panel
         // distinga las sesiones de cada ronda del mismo nodo.
@@ -736,8 +779,9 @@ export async function runWorkflow(
             for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
               state.attempts = attempt;
               try {
+                const namedSubNode = { ...subNode, id: namespacedId };
                 const result = await executeBody(
-                  { ...subNode, id: namespacedId },
+                  namedSubNode,
                   groupVarCtx(),
                   historyBlock,
                   { iteration },
@@ -745,57 +789,83 @@ export async function runWorkflow(
                 state.status = "completed";
                 state.finishedAt = nowIso();
                 state.output = result.output;
-                if (result.outputJson !== undefined) {
-                  state.outputJson = result.outputJson;
-                } else if (subNode.output_format) {
-                  const parsed = parseStructuredOutput(
-                    result.output,
-                    subNode.output_format,
+                let outputJson =
+                  result.outputJson !== undefined
+                    ? result.outputJson
+                    : subNode.output_format
+                      ? parseStructuredOutput(
+                          result.output,
+                          subNode.output_format,
+                        )
+                      : undefined;
+                let schemaError =
+                  subNode.output_format && outputJson !== undefined
+                    ? validateAgainstSchema(outputJson, subNode.output_format)
+                    : null;
+                let finalResult = result;
+                let usage = result.usage;
+                let costUsd = result.costUsd;
+                // Reparación acotada de formato: mismo criterio que el camino
+                // top-level — UN turno extra en la misma sesión (silencioso
+                // para Agent Sessions) antes de fallar con el error original.
+                if (
+                  subNode.output_format &&
+                  (outputJson === undefined || schemaError !== null) &&
+                  (subNode.prompt !== undefined ||
+                    subNode.command !== undefined)
+                ) {
+                  const repaired = await repairStructuredOutput(
+                    namedSubNode,
+                    result,
+                    { iteration },
                   );
-                  if (parsed === undefined) {
-                    throw new NodeExecutionError(
-                      subId,
-                      "output no contiene JSON válido y el nodo declara output_format",
-                    );
+                  if (repaired) {
+                    finalResult = repaired.result;
+                    outputJson = repaired.outputJson;
+                    schemaError = null;
+                    state.output = finalResult.output;
+                    // El primer intento ya pudo reportar usage/costo: se suma.
+                    usage = mergeUsage(result.usage, finalResult.usage);
+                    costUsd = mergeCostUsd(result.costUsd, finalResult.costUsd);
                   }
-                  state.outputJson = parsed;
                 }
-                if (subNode.output_format && state.outputJson !== undefined) {
-                  const schemaError = validateAgainstSchema(
-                    state.outputJson,
-                    subNode.output_format,
+                if (subNode.output_format && outputJson === undefined) {
+                  throw new NodeExecutionError(
+                    subId,
+                    "output no contiene JSON válido y el nodo declara output_format",
                   );
-                  if (schemaError) {
-                    throw new NodeExecutionError(
-                      subId,
-                      `output_format inválido: ${schemaError}`,
-                    );
-                  }
                 }
+                if (subNode.output_format && schemaError !== null) {
+                  throw new NodeExecutionError(
+                    subId,
+                    `output_format inválido: ${schemaError}`,
+                  );
+                }
+                if (outputJson !== undefined) state.outputJson = outputJson;
                 if (subNode.output_type) {
                   artifacts.writeNodeSidecar(
                     namespacedId,
                     subNode.output_type,
-                    result.output,
+                    finalResult.output,
                   );
                 }
-                if (result.sessionId) state.sessionId = result.sessionId;
-                if (typeof result.costUsd === "number") {
-                  groupCost += result.costUsd;
+                if (finalResult.sessionId) state.sessionId = finalResult.sessionId;
+                if (typeof costUsd === "number") {
+                  groupCost += costUsd;
                   hasGroupCost = true;
                 }
-                if (result.usage) {
-                  groupInputTokens += result.usage.inputTokens ?? 0;
-                  groupOutputTokens += result.usage.outputTokens ?? 0;
-                  groupCacheRead += result.usage.cacheReadTokens ?? 0;
-                  groupCacheWrite += result.usage.cacheWriteTokens ?? 0;
+                if (usage) {
+                  groupInputTokens += usage.inputTokens ?? 0;
+                  groupOutputTokens += usage.outputTokens ?? 0;
+                  groupCacheRead += usage.cacheReadTokens ?? 0;
+                  groupCacheWrite += usage.cacheWriteTokens ?? 0;
                   hasGroupTokens = true;
                 }
                 emit("node_completed", namespacedId, {
                   attempts: attempt,
-                  outputPreview: redactSecrets(result.output.slice(0, 4_000)),
-                  sessionId: result.sessionId,
-                  costUsd: result.costUsd,
+                  outputPreview: redactSecrets(finalResult.output.slice(0, 4_000)),
+                  sessionId: finalResult.sessionId,
+                  costUsd,
                 });
                 return;
               } catch (error) {
@@ -1143,6 +1213,41 @@ export async function runWorkflow(
     return { iteration };
   };
 
+  /**
+   * Reparación acotada de formato (UN turno extra, misma sesión): pide solo el
+   * objeto del contrato cuando el primer intento no parseó o no validó. Devuelve
+   * null si no aplica (nodo no IA, sin contrato) o si el turno reparador tampoco
+   * produce JSON válido — nunca lanza: el call site decide fallar con su error
+   * original.
+   */
+  const repairStructuredOutput = async (
+    node: WorkflowNode,
+    first: NodeExecutionResult,
+    execMeta?: { iteration?: number },
+  ): Promise<{ result: NodeExecutionResult; outputJson: unknown } | null> => {
+    if (!node.output_format) return null;
+    if (node.prompt === undefined && node.command === undefined) return null;
+    try {
+      const result = await runAiNode(
+        node,
+        FORMAT_REPAIR_INSTRUCTION,
+        first.sessionId ?? undefined,
+        sessionMetaFor(execMeta),
+        { silentSession: true },
+      );
+      const outputJson =
+        result.outputJson ??
+        parseStructuredOutput(result.output, node.output_format);
+      if (outputJson === undefined) return null;
+      if (validateAgainstSchema(outputJson, node.output_format) !== null) {
+        return null;
+      }
+      return { result, outputJson };
+    } catch {
+      return null;
+    }
+  };
+
   const executeBody = (
     node: WorkflowNode,
     varCtx: VarContext,
@@ -1305,45 +1410,67 @@ export async function runWorkflow(
         state.status = "completed";
         state.finishedAt = nowIso();
         state.output = result.output;
-        if (result.outputJson !== undefined) {
-          state.outputJson = result.outputJson;
-        } else if (node.output_format) {
-          const parsed = parseStructuredOutput(result.output, node.output_format);
-          if (parsed === undefined) {
-            throw new NodeExecutionError(
-              node.id,
-              "output no contiene JSON válido y el nodo declara output_format",
-            );
+        let outputJson =
+          result.outputJson !== undefined
+            ? result.outputJson
+            : node.output_format
+              ? parseStructuredOutput(result.output, node.output_format)
+              : undefined;
+        let schemaError =
+          node.output_format && outputJson !== undefined
+            ? validateAgainstSchema(outputJson, node.output_format)
+            : null;
+        let finalResult = result;
+        let usage = result.usage;
+        let costUsd = result.costUsd;
+        // Reparación acotada de formato (incidente run-mu5qisqz-c-75icdi): un
+        // nodo IA con contrato que devolvía markdown sin JSON mataba el run
+        // entero. Se le da UN turno extra en la misma sesión pidiendo solo el
+        // JSON; si tampoco parsea, se tira el error original de siempre.
+        if (
+          node.output_format &&
+          (outputJson === undefined || schemaError !== null) &&
+          (node.prompt !== undefined || node.command !== undefined)
+        ) {
+          const repaired = await repairStructuredOutput(node, result);
+          if (repaired) {
+            finalResult = repaired.result;
+            outputJson = repaired.outputJson;
+            schemaError = null;
+            state.output = finalResult.output;
+            // El primer intento ya pudo reportar usage/costo: se suma.
+            usage = mergeUsage(result.usage, finalResult.usage);
+            costUsd = mergeCostUsd(result.costUsd, finalResult.costUsd);
           }
-          state.outputJson = parsed;
         }
-        if (node.output_format && state.outputJson !== undefined) {
-          const schemaError = validateAgainstSchema(
-            state.outputJson,
-            node.output_format,
+        if (node.output_format && outputJson === undefined) {
+          throw new NodeExecutionError(
+            node.id,
+            "output no contiene JSON válido y el nodo declara output_format",
           );
-          if (schemaError) {
-            throw new NodeExecutionError(
-              node.id,
-              `output_format inválido: ${schemaError}`,
-            );
-          }
         }
-        artifacts.writeNodeOutput(node.id, result.output);
+        if (node.output_format && schemaError !== null) {
+          throw new NodeExecutionError(
+            node.id,
+            `output_format inválido: ${schemaError}`,
+          );
+        }
+        if (outputJson !== undefined) state.outputJson = outputJson;
+        artifacts.writeNodeOutput(node.id, finalResult.output);
         if (state.outputJson !== undefined) {
           artifacts.writeNodeStructured(node.id, state.outputJson);
         }
-        if (result.sessionId) state.sessionId = result.sessionId;
-        if (result.usage) state.usage = result.usage;
-        if (typeof result.costUsd === "number") state.costUsd = result.costUsd;
+        if (finalResult.sessionId) state.sessionId = finalResult.sessionId;
+        if (usage) state.usage = usage;
+        if (typeof costUsd === "number") state.costUsd = costUsd;
         if (node.output_type) {
-          artifacts.writeNodeSidecar(node.id, node.output_type, result.output);
+          artifacts.writeNodeSidecar(node.id, node.output_type, finalResult.output);
         }
         emit("node_completed", node.id, {
           attempts: attempt,
-          outputPreview: redactSecrets(result.output.slice(0, 4_000)),
-          sessionId: result.sessionId,
-          costUsd: result.costUsd,
+          outputPreview: redactSecrets(finalResult.output.slice(0, 4_000)),
+          sessionId: finalResult.sessionId,
+          costUsd,
         });
         store.save(run);
         return;

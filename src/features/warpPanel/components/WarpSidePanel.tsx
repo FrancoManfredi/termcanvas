@@ -8,9 +8,7 @@ import {
   IconDiagnostic,
   IconTerminal,
   IconBranch,
-  IconChevronDown,
   IconChevronLeft,
-  IconClose,
 } from "./warpIcons";
 import type { NavSection } from "../types";
 import { useProjectStore } from "../../../stores/projectStore";
@@ -34,14 +32,15 @@ interface NavItem {
   Icon: ComponentType<{ size?: number; color?: string }>;
 }
 
-const NAV_ITEMS: NavItem[] = [
+const DEPENDENCIES_ITEM: NavItem = { id: "dependencies", label: "Dependencies", Icon: IconTerminal };
+
+const PROJECT_NAV_ITEMS: NavItem[] = [
   { id: "issues", label: "Issues", Icon: IconIssue },
   { id: "activity", label: "Activity", Icon: IconActivity },
   { id: "agents", label: "Agents", Icon: IconAgents },
   { id: "workflows", label: "Workflows", Icon: IconWorkflow },
   { id: "context", label: "Repository Context", Icon: IconContext },
   { id: "diagnostic", label: "Diagnostic", Icon: IconDiagnostic },
-  { id: "dependencies", label: "Dependencies", Icon: IconTerminal },
 ];
 
 /**
@@ -114,9 +113,6 @@ export function WarpSidePanel({
   onSectionChange,
 }: WarpSidePanelProps) {
   const [expanded, setExpanded] = useState(true);
-  const [repoOpen, setRepoOpen] = useState(true);
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const [overrideIdx, setOverrideIdx] = useState<number | null>(null);
 
   // Real projects from the canvas store. Header shows ONLY the project
   // name resolved by projectId; nothing is invented when absent. A
@@ -128,19 +124,20 @@ export function WarpSidePanel({
   // (primitivo estable: solo re-renderiza al cambiar el flag).
   const pollDegraded = useWorkItemStore((s) => s.pollDegraded);
   // Perf Ola 1: memoized so unrelated project-store churn (terminal ticks
-  // that keep the array identity) doesn't rebuild + re-render the picker
+  // that keep the array identity) doesn't rebuild + re-render the header
   // every tick. Derivation itself is the pure `deriveWarpRepos` above.
   const repos: WarpProjectRepo[] = useMemo(
     () => deriveWarpRepos(projects),
     [projects],
   );
   const focusedIdx = repos.findIndex((r) => r.projectId === focusedProjectId);
-  const fallbackIdx = focusedIdx >= 0 ? focusedIdx : 0;
-  const rawIdx = overrideIdx ?? fallbackIdx;
   const safeIdx =
-    repos.length === 0 ? -1 : Math.min(Math.max(rawIdx, 0), repos.length - 1);
+    repos.length === 0
+      ? -1
+      : Math.min(Math.max(focusedIdx >= 0 ? focusedIdx : 0, 0), repos.length - 1);
   const activeRepo = safeIdx >= 0 ? repos[safeIdx] : null;
   const activeName = activeRepo?.name ?? "No project";
+  const activeBranch = activeRepo?.branch ?? "";
   const W = expanded ? 232 : 52;
 
   return (
@@ -210,21 +207,24 @@ export function WarpSidePanel({
       <div
         style={{ flex: 1, overflowY: "auto", overflowX: "hidden", paddingTop: 4 }}
       >
-        {/* Repository section */}
+        {/* Dependencies first: machine-global tools, above the project card */}
         <div style={{ padding: "4px 0" }}>
-          {/* Repo header — clickable row */}
-          <button
-            aria-expanded={repoOpen}
-            aria-label={
-              expanded ? "Toggle repository section" : "Expand sidebar"
-            }
+          <NavButton
+            item={DEPENDENCIES_ITEM}
+            active={activeSection === DEPENDENCIES_ITEM.id}
+            expanded={expanded}
             onClick={() => {
-              if (!expanded) {
-                setExpanded(true);
-                return;
-              }
-              setRepoOpen((v) => !v);
+              if (!expanded) setExpanded(true);
+              onSectionChange(DEPENDENCIES_ITEM.id);
             }}
+          />
+        </div>
+
+        {/* Repository section — static header, no picker dropdown */}
+        <div style={{ padding: "4px 0" }}>
+          {/* Repo header — static row (project name + branch, never a slug) */}
+          <div
+            aria-label="Active repository"
             style={{
               width: "100%",
               height: 40,
@@ -235,30 +235,8 @@ export function WarpSidePanel({
               justifyContent: expanded ? "flex-start" : "center",
               background: "transparent",
               border: "none",
-              cursor: "pointer",
-              transition: "background 120ms",
             }}
-            onMouseEnter={(e) =>
-              (e.currentTarget.style.background = "var(--wp-bg-hover)")
-            }
-            onMouseLeave={(e) =>
-              (e.currentTarget.style.background = "transparent")
-            }
           >
-            {expanded && (
-              <span
-                style={{
-                  color: "var(--wp-text-disabled)",
-                  fontSize: 9,
-                  transition: "transform 150ms",
-                  transform: repoOpen ? "rotate(0deg)" : "rotate(-90deg)",
-                  display: "flex",
-                  flexShrink: 0,
-                }}
-              >
-                <IconChevronDown size={9} />
-              </span>
-            )}
             <span
               style={{
                 color: "var(--wp-text-tertiary)",
@@ -284,185 +262,35 @@ export function WarpSidePanel({
                 {activeName}
               </span>
             )}
-            {expanded && (
+            {expanded && activeBranch !== "" && (
               <span
-                role="button"
-                tabIndex={0}
-                aria-label="Switch repository"
-                title="Switch repository"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setPickerOpen((v) => !v);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.stopPropagation();
-                    setPickerOpen((v) => !v);
-                  }
-                }}
                 style={{
-                  width: 22,
-                  height: 22,
-                  borderRadius: 4,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  color: pickerOpen
-                    ? "var(--wp-text-primary)"
-                    : "var(--wp-text-disabled)",
-                  background: pickerOpen
-                    ? "var(--wp-bg-hover)"
-                    : "transparent",
-                  transition: "color 120ms, background 120ms",
+                  fontFamily: "var(--wp-font-mono)",
+                  fontSize: 10,
+                  color: "var(--wp-text-disabled)",
                   flexShrink: 0,
                 }}
-                onMouseEnter={(e) => {
-                  (e.currentTarget as HTMLElement).style.color =
-                    "var(--wp-text-primary)";
-                  (e.currentTarget as HTMLElement).style.background =
-                    "var(--wp-bg-hover)";
-                }}
-                onMouseLeave={(e) => {
-                  if (!pickerOpen) {
-                    (e.currentTarget as HTMLElement).style.color =
-                      "var(--wp-text-disabled)";
-                    (e.currentTarget as HTMLElement).style.background =
-                      "transparent";
-                  }
-                }}
               >
-                <span
-                  style={{
-                    transform: pickerOpen ? "rotate(180deg)" : "none",
-                    transition: "transform 150ms",
-                    display: "flex",
-                  }}
-                >
-                  <IconChevronDown size={9} />
-                </span>
+                {activeBranch}
               </span>
             )}
-          </button>
-
-          {/* Repo picker */}
-          {expanded && pickerOpen && (
-            <div
-              role="listbox"
-              aria-label="Repository list"
-              style={{
-                margin: "2px 8px 4px",
-                borderRadius: 6,
-                border: "1px solid var(--wp-border)",
-                background: "#161616",
-                overflow: "hidden",
-              }}
-            >
-              {repos.length === 0 ? (
-                <div
-                  style={{
-                    padding: "8px 12px",
-                    fontFamily: "var(--wp-font-mono)",
-                    fontSize: 12,
-                    color: "var(--wp-text-disabled)",
-                  }}
-                >
-                  No projects on canvas
-                </div>
-              ) : (
-                repos.map((repo, idx) => {
-                  const isActive = idx === safeIdx;
-                  return (
-                    <button
-                      key={repo.projectId}
-                      role="option"
-                      aria-selected={isActive}
-                      onClick={() => {
-                        setOverrideIdx(idx);
-                        setPickerOpen(false);
-                      }}
-                    style={{
-                      width: "100%",
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 8,
-                      padding: "8px 12px",
-                      background: isActive
-                        ? "var(--wp-accent-dim)"
-                        : "transparent",
-                      border: "none",
-                      cursor: "pointer",
-                      transition: "background 100ms",
-                    }}
-                    onMouseEnter={(e) => {
-                      if (!isActive)
-                        (e.currentTarget as HTMLButtonElement).style.background =
-                          "var(--wp-bg-hover)";
-                    }}
-                    onMouseLeave={(e) => {
-                      if (!isActive)
-                        (e.currentTarget as HTMLButtonElement).style.background =
-                          "transparent";
-                    }}
-                  >
-                    <IconBranch
-                      size={11}
-                      color={
-                        isActive
-                          ? "var(--wp-accent)"
-                          : "var(--wp-text-tertiary)"
-                      }
-                    />
-                    <span
-                      style={{
-                        fontFamily: "var(--wp-font-mono)",
-                        fontSize: 12,
-                        color: isActive
-                          ? "var(--wp-accent)"
-                          : "var(--wp-text-secondary)",
-                        flex: 1,
-                        textAlign: "left",
-                      }}
-                    >
-                      {repo.name}
-                    </span>
-                    {repo.branch !== "" && (
-                      <span
-                        style={{
-                          fontFamily: "var(--wp-font-mono)",
-                          fontSize: 10,
-                          color: "var(--wp-text-disabled)",
-                        }}
-                      >
-                        {repo.branch}
-                      </span>
-                    )}
-                    {isActive && (
-                      <IconClose size={9} color="var(--wp-accent)" />
-                    )}
-                  </button>
-                  );
-                })
-              )}
-            </div>
-          )}
+          </div>
 
           {/* Nav items */}
-          {(repoOpen || !expanded) && (
-            <div style={{ marginTop: 2 }}>
-              {NAV_ITEMS.map((item) => (
-                <NavButton
-                  key={item.id}
-                  item={item}
-                  active={activeSection === item.id}
-                  expanded={expanded}
-                  onClick={() => {
-                    if (!expanded) setExpanded(true);
-                    onSectionChange(item.id);
-                  }}
-                />
-              ))}
-            </div>
-          )}
+          <div style={{ marginTop: 2 }}>
+            {PROJECT_NAV_ITEMS.map((item) => (
+              <NavButton
+                key={item.id}
+                item={item}
+                active={activeSection === item.id}
+                expanded={expanded}
+                onClick={() => {
+                  if (!expanded) setExpanded(true);
+                  onSectionChange(item.id);
+                }}
+              />
+            ))}
+          </div>
         </div>
       </div>
 

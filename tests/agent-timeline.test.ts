@@ -140,6 +140,41 @@ test("nodo failed no aparece como completed", () => {
   assert.equal(implement?.state, "failed");
 });
 
+test("cancelled con run iniciado: Foreman completed (ruteó), el fallo es del nodo", () => {
+  const t = buildAgentTimeline(
+    baseFactory({
+      stage: "Cancelled",
+      family: "terminal",
+      terminal: true,
+      engineRun: {
+        runId: "run-1",
+        workflow: "plan-approve-implement",
+        status: "failed",
+        currentNodeId: null,
+        nodes: ["plan", "gate", "build.implement"],
+        nodeStates: {
+          plan: "failed",
+          gate: "skipped",
+          "build.implement": "pending",
+        },
+      },
+    }),
+  );
+  assert.equal(
+    t.stages.find((s) => s.id === "foreman")?.state,
+    "completed",
+    "el Foreman ya había ruteado antes de que el run fallara",
+  );
+  assert.equal(t.stages.find((s) => s.id === "plan")?.state, "failed");
+});
+
+test("cancelled sin run: Foreman failed (no llegó a rutear)", () => {
+  const t = buildAgentTimeline(
+    baseFactory({ stage: "Cancelled", family: "terminal", terminal: true }),
+  );
+  assert.equal(t.stages.find((s) => s.id === "foreman")?.state, "failed");
+});
+
 test("sesión sin nodo en el orden (legacy/resume) se anexa al final", () => {
   const t = buildAgentTimeline(
     baseFactory({

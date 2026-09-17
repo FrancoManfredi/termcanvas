@@ -3,6 +3,7 @@ import {
   useCallback,
   useDeferredValue,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
@@ -4477,6 +4478,534 @@ export function parseGateMessage(message: unknown): GateMessageParts {
   }
 }
 
+// ─── Gate body markdown + mermaid (spec/approve gates) ────────────────────────
+//
+// Los gates del engine traen la spec en markdown (negritas, listas, código y,
+// a veces, un diagrama `flowchart`). El bloque de espera lo renderiza como
+// GitHub: markdown real via el `renderMarkdown` compartido (marked+DOMPurify)
+// y diagramas SVG propios sin dependencias nuevas. Todo puro y nunca lanza.
+
+export type GateBodySegment =
+  | { type: "markdown"; text: string }
+  | { type: "mermaid"; code: string };
+
+export interface MermaidFlowNode {
+  id: string;
+  label: string;
+  lines: string[];
+  /** Nombre del subgraph, "" cuando va suelto. */
+  group: string;
+}
+
+export interface MermaidFlowEdge {
+  from: string;
+  to: string;
+}
+
+export interface MermaidFlowchart {
+  /** true = LR/RL (columnas), false = TD/TB/BT (filas). */
+  horizontal: boolean;
+  groups: string[];
+  nodes: MermaidFlowNode[];
+  edges: MermaidFlowEdge[];
+}
+
+const GATE_MERMAID_MAX_NODES = 30;
+const GATE_MERMAID_MAX_EDGES = 40;
+
+function cleanMermaidLabel(raw: string): string[] {
+  try {
+    const text = raw
+      .replace(/<br\s*\/?>/gi, "\n")
+      .replace(/^["']|["']$/g, "")
+      .trim()
+      .slice(0, 160);
+    const lines = text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line !== "");
+    return lines.length > 0
+      ? lines.slice(0, 6)
+      : [raw.trim().slice(0, 40) || "?"];
+  } catch {
+    return ["?"];
+  }
+}
+
+/**
+ * Parser mínimo de `flowchart/graph LR|TD` con subgraphs, nodos `ID[etiqueta]`
+ * / `ID(etiqueta)` y aristas `A --> B` (con o sin `|etiqueta|`). Otros
+ * diagramas (sequence, class, …) devuelven null para que el caller caiga al
+ * bloque de código. Puro, nunca lanza.
+ */
+export function parseMermaidFlowchart(code: unknown): MermaidFlowchart | null {
+  try {
+    if (typeof code !== "string") return null;
+    let horizontal = true;
+    let seenHead = false;
+    const groups: string[] = [];
+    const nodes = new Map<string, MermaidFlowNode>();
+    const edges: MermaidFlowEdge[] = [];
+    const seenEdges = new Set<string>();
+    let current = "";
+    for (const rawLine of code.split("\n")) {
+      const line = rawLine.trim();
+      if (line === "" || line.startsWith("```")) continue;
+      const head = line.match(/^(flowchart|graph)\s+(LR|RL|TD|TB|BT)\b/i);
+      if (head) {
+        seenHead = true;
+        horizontal = /LR|RL/i.test(head[2]);
+        continue;
+      }
+      const subgraph = line.match(/^subgraph\s+(.+?)\s*$/i);
+      if (subgraph) {
+        current = subgraph[1].replace(/^["']|["']$/g, "").trim().slice(0, 64);
+        if (current !== "" && !groups.includes(current)) {
+          groups.push(current);
+        }
+        continue;
+      }
+      if (/^end\s*$/i.test(line)) {
+        current = "";
+        continue;
+      }
+      // Etiquetas con corchetes anidados (`return []`): balanceo manual en
+      // vez de `[^]]*`, que cortaría en el primer `]` interno.
+      const idOpenRe = /([A-Za-z0-9_]+)\[/g;
+      let match: RegExpExecArray | null;
+      while ((match = idOpenRe.exec(line)) !== null) {
+        const id = match[1];
+        if (nodes.has(id) || nodes.size >= GATE_MERMAID_MAX_NODES) continue;
+        let depth = 0;
+        let end = -1;
+        for (let k = match.index + id.length; k < line.length; k += 1) {
+          if (line[k] === "[") depth += 1;
+          else if (line[k] === "]") {
+            depth -= 1;
+            if (depth === 0) {
+              end = k;
+              break;
+            }
+          }
+        }
+        if (end === -1) continue;
+        const lines = cleanMermaidLabel(
+          line.slice(match.index + id.length + 1, end),
+        );
+        nodes.set(id, {
+          id,
+          label: lines.join(" "),
+          lines,
+          group: current,
+        });
+      }
+      const parenRe = /([A-Za-z0-9_]+)\(([^)]*)\)/g;
+      while ((match = parenRe.exec(line)) !== null) {
+        const id = match[1];
+        if (!nodes.has(id) && nodes.size < GATE_MERMAID_MAX_NODES) {
+          const lines = cleanMermaidLabel(match[2]);
+          nodes.set(id, {
+            id,
+            label: lines.join(" "),
+            lines,
+            group: current,
+          });
+        }
+      }
+      // Cadenas (`A --> B --> C`): se parte por flecha y se toma el último
+      // id a la izquierda y el primero a la derecha de cada tramo.
+      if (line.includes("-->")) {
+        const chunks = line.split("-->");
+        for (let c = 0; c + 1 < chunks.length; c += 1) {
+          // `.*` greedy: la etiqueta puede traer `[]` adentro (`return []`)
+          // y el cierre real es el último `]` del tramo.
+          const from = chunks[c].match(
+            /([A-Za-z0-9_]+)(?:\[.*\]|\(.*\))?\s*$/,
+          );
+          const to = chunks[c + 1].match(
+            /^\s*(?:\|[^|]*\|\s*)?([A-Za-z0-9_]+)/,
+          );
+          if (!from || !to) continue;
+          const key = `${from[1]}>${to[1]}`;
+          if (!seenEdges.has(key) && edges.length < GATE_MERMAID_MAX_EDGES) {
+            seenEdges.add(key);
+            edges.push({ from: from[1], to: to[1] });
+          }
+        }
+      }
+    }
+    if (!seenHead || nodes.size === 0) return null;
+    if (nodes.size > GATE_MERMAID_MAX_NODES) return null;
+    return { horizontal, groups, nodes: [...nodes.values()], edges };
+  } catch {
+    return null;
+  }
+}
+
+/** Parte el cuerpo del gate en segmentos markdown y diagramas mermaid. */
+export function splitGateBodySegments(input: unknown): GateBodySegment[] {
+  try {
+    if (typeof input !== "string") return [];
+    if (input.trim() === "") return [];
+    const segments: GateBodySegment[] = [];
+    const fenceRe = /```(\w*)\s*\n([\s\S]*?)```/g;
+    let last = 0;
+    const pushMarkdown = (chunk: string) => {
+      if (chunk.trim() === "") return;
+      for (const seg of splitBareFlowchart(chunk)) segments.push(seg);
+    };
+    for (;;) {
+      const m = fenceRe.exec(input);
+      if (!m) break;
+      pushMarkdown(input.slice(last, m.index));
+      const lang = (m[1] ?? "").trim().toLowerCase();
+      if (lang === "mermaid") {
+        const code = m[2].replace(/^\n+|\s+$/g, "");
+        if (code !== "") segments.push({ type: "mermaid", code });
+      } else {
+        segments.push({ type: "markdown", text: m[0] });
+      }
+      last = m.index + m[0].length;
+    }
+    pushMarkdown(input.slice(last));
+    return segments.length > 0
+      ? segments
+      : [{ type: "markdown", text: input }];
+  } catch {
+    return typeof input === "string" && input !== ""
+      ? [{ type: "markdown", text: input }]
+      : [];
+  }
+}
+
+/** Detecta bloques `flowchart/graph …` sin cercar dentro de un tramo. */
+function splitBareFlowchart(chunk: string): GateBodySegment[] {
+  try {
+    const out: GateBodySegment[] = [];
+    const lines = chunk.split("\n");
+    const headRe = /^\s*(flowchart|graph)\s+(LR|RL|TD|TB|BT)\s*$/i;
+    const bodyRe =
+      /^\s*($|subgraph\b|end\b|[A-Za-z0-9_]+\s*[[(]|.*-->.*)/;
+    let i = 0;
+    let buf: string[] = [];
+    const flush = () => {
+      const text = buf.join("\n");
+      if (text.trim() !== "") out.push({ type: "markdown", text });
+      buf = [];
+    };
+    while (i < lines.length) {
+      if (headRe.test(lines[i])) {
+        const start = i;
+        i += 1;
+        while (i < lines.length && bodyRe.test(lines[i])) i += 1;
+        const content = lines
+          .slice(start + 1, i)
+          .filter((line) => line.trim() !== "");
+        if (content.length >= 1) {
+          flush();
+          out.push({
+            type: "mermaid",
+            code: lines.slice(start, i).join("\n").trim(),
+          });
+        } else {
+          buf.push(lines[start]);
+        }
+      } else {
+        buf.push(lines[i]);
+        i += 1;
+      }
+    }
+    flush();
+    return out.length > 0 ? out : [{ type: "markdown", text: chunk }];
+  } catch {
+    return [{ type: "markdown", text: chunk }];
+  }
+}
+
+function safeGateMarkdown(text: string): string {
+  try {
+    return renderMarkdown(text);
+  } catch {
+    return "";
+  }
+}
+
+interface FlowBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+function mermaidNodeHeight(lineCount: number): number {
+  return 18 + Math.max(1, lineCount) * 15;
+}
+
+function mermaidEdgePath(source: FlowBox, target: FlowBox): string {
+  try {
+    const scx = source.x + source.w / 2;
+    const scy = source.y + source.h / 2;
+    const tcx = target.x + target.w / 2;
+    const tcy = target.y + target.h / 2;
+    // Adyacentes apilados: línea recta con flecha.
+    if (Math.abs(scx - tcx) < 1 && tcy > scy) {
+      return `M ${scx} ${source.y + source.h} L ${tcx} ${target.y}`;
+    }
+    if (Math.abs(scy - tcy) < 1 && tcx > scx) {
+      return `M ${source.x + source.w} ${scy} L ${target.x} ${tcy}`;
+    }
+    const fromRight = tcx >= scx;
+    const x1 = fromRight ? source.x + source.w : source.x;
+    const y1 = scy;
+    const x2 = fromRight ? target.x : target.x + target.w;
+    const y2 = tcy;
+    const dx = Math.max(24, Math.abs(x2 - x1) / 2);
+    return (
+      `M ${x1} ${y1} C ${x1 + (fromRight ? dx : -dx)} ${y1}, ` +
+      `${x2 - (fromRight ? dx : -dx)} ${y2}, ${x2} ${y2}`
+    );
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Diagrama de flujo estilo GitHub sin dependencias nuevas: nodos como cajas
+ * redondeadas y aristas con flecha. Si el código no es un flowchart
+ * soportado, cae a bloque de código legible (nunca crudo sin estilo).
+ */
+function MermaidDiagram({ code }: { code: string }) {
+  const uid = useId().replace(/[^a-zA-Z0-9_-]/g, "");
+  const chart = useMemo(() => parseMermaidFlowchart(code), [code]);
+  if (chart === null) {
+    return (
+      <div style={{ margin: "8px 0" }}>
+        <div
+          style={{
+            fontFamily: "var(--wp-font-mono)",
+            fontSize: 10,
+            color: "var(--wp-text-disabled)",
+            marginBottom: 4,
+          }}
+        >
+          mermaid
+        </div>
+        <pre
+          style={{
+            background: "#1c1c1c",
+            borderRadius: 6,
+            padding: "10px 12px",
+            fontSize: 12,
+            overflowX: "auto",
+            margin: 0,
+            color: "#e6edf3",
+            whiteSpace: "pre-wrap",
+            overflowWrap: "break-word",
+          }}
+        >
+          {code}
+        </pre>
+      </div>
+    );
+  }
+  const NODE_W = 176;
+  const FLOW_GAP = 56;
+  const STACK_GAP = 26;
+  const PAD = 14;
+  const TITLE_H = 24;
+  const cols = chart.groups.length > 0 ? chart.groups : [""];
+  const byCol = cols.map((group, index) =>
+    chart.nodes.filter(
+      (node) => node.group === group || (node.group === "" && index === 0),
+    ),
+  );
+  const boxes = new Map<string, FlowBox>();
+  let svgW = PAD * 2;
+  let svgH = PAD * 2;
+  if (chart.horizontal) {
+    byCol.forEach((nodes, col) => {
+      const x = PAD + col * (NODE_W + FLOW_GAP);
+      let y = PAD + (cols[col] !== "" ? TITLE_H : 0);
+      for (const node of nodes) {
+        const h = mermaidNodeHeight(node.lines.length);
+        boxes.set(node.id, { x, y, w: NODE_W, h });
+        y += h + STACK_GAP;
+      }
+      svgH = Math.max(svgH, y - STACK_GAP + PAD);
+    });
+    svgW +=
+      cols.length * NODE_W + Math.max(0, cols.length - 1) * FLOW_GAP;
+  } else {
+    let y = PAD;
+    byCol.forEach((nodes, row) => {
+      let x = PAD + (cols[row] !== "" ? 0 : 0);
+      let rowH = 40;
+      const heights = nodes.map((node) =>
+        mermaidNodeHeight(node.lines.length),
+      );
+      rowH = Math.max(rowH, ...heights);
+      for (let k = 0; k < nodes.length; k += 1) {
+        boxes.set(nodes[k].id, { x, y: y + (cols[row] !== "" ? TITLE_H : 0), w: NODE_W, h: heights[k] });
+        x += NODE_W + STACK_GAP;
+      }
+      svgW = Math.max(svgW, x - STACK_GAP + PAD);
+      y += (cols[row] !== "" ? TITLE_H : 0) + rowH + FLOW_GAP;
+    });
+    svgH = y - FLOW_GAP + PAD;
+  }
+  const arrowId = `gate-arrow-${uid}`;
+  return (
+    <div style={{ overflowX: "auto", margin: "8px 0" }}>
+      <svg
+        width={svgW}
+        height={svgH}
+        viewBox={`0 0 ${svgW} ${svgH}`}
+        role="img"
+        aria-label={`Diagrama: ${cols.filter((c) => c !== "").join(", ") || "flujo"}`}
+        style={{ maxWidth: "100%", display: "block" }}
+      >
+        <defs>
+          <marker
+            id={arrowId}
+            viewBox="0 0 10 10"
+            refX="8"
+            refY="5"
+            markerWidth="7"
+            markerHeight="7"
+            orient="auto-start-reverse"
+          >
+            <path d="M 0 1 L 9 5 L 0 9 z" fill="#58a6ff" />
+          </marker>
+        </defs>
+        {chart.horizontal
+          ? byCol.map((nodes, col) =>
+              cols[col] === "" ? null : (
+                <g key={col}>
+                  <rect
+                    x={PAD + col * (NODE_W + FLOW_GAP) - 8}
+                    y={PAD}
+                    width={NODE_W + 16}
+                    height={Math.max(
+                      40,
+                      nodes.reduce(
+                        (acc, node) =>
+                          acc +
+                          (boxes.get(node.id)?.h ?? 40) +
+                          STACK_GAP,
+                        -STACK_GAP,
+                      ) + TITLE_H + 16,
+                    )}
+                    rx={8}
+                    fill="transparent"
+                    stroke="#30363d"
+                    strokeDasharray="4 3"
+                  />
+                  <text
+                    x={PAD + col * (NODE_W + FLOW_GAP) + NODE_W / 2}
+                    y={PAD + 15}
+                    textAnchor="middle"
+                    fontSize={10}
+                    fill="#8b949e"
+                    fontFamily="var(--wp-font-sans)"
+                  >
+                    {cols[col]}
+                  </text>
+                </g>
+              ),
+            )
+          : null}
+        {chart.edges.map((edge, index) => {
+          const source = boxes.get(edge.from);
+          const target = boxes.get(edge.to);
+          if (!source || !target) return null;
+          const d = mermaidEdgePath(source, target);
+          if (d === "") return null;
+          return (
+            <path
+              key={index}
+              d={d}
+              fill="none"
+              stroke="#58a6ff"
+              strokeWidth={1.5}
+              markerEnd={`url(#${arrowId})`}
+            />
+          );
+        })}
+        {chart.nodes.map((node) => {
+          const box = boxes.get(node.id);
+          if (!box) return null;
+          const cx = box.x + box.w / 2;
+          return (
+            <g key={node.id}>
+              <title>{node.label}</title>
+              <rect
+                x={box.x}
+                y={box.y}
+                width={box.w}
+                height={box.h}
+                rx={8}
+                fill="#1c1c1c"
+                stroke="#30363d"
+              />
+              <text
+                x={cx}
+                y={box.y + box.h / 2 - ((node.lines.length - 1) * 15) / 2}
+                textAnchor="middle"
+                fontSize={11}
+                fill="#e6edf3"
+                fontFamily="var(--wp-font-sans)"
+              >
+                {node.lines.map((line, lineIndex) => (
+                  <tspan
+                    key={lineIndex}
+                    x={cx}
+                    dy={lineIndex === 0 ? 4 : 15}
+                  >
+                    {line.length > 28 ? `${line.slice(0, 27)}…` : line}
+                  </tspan>
+                ))}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+/** Cuerpo del gate: markdown real + diagramas, con links externos. */
+function GateBodyMarkdown({ text }: { text: string }) {
+  const segments = useMemo(() => splitGateBodySegments(text), [text]);
+  const handleLinkClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    try {
+      const anchor = (e.target as HTMLElement).closest("a");
+      if (!anchor) return;
+      const href = anchor.getAttribute("href");
+      if (href && /^https?:\/\//.test(href)) {
+        e.preventDefault();
+        openIssueInGitHub(href);
+      }
+    } catch {
+      // nunca lanza
+    }
+  };
+  return (
+    <div onClick={handleLinkClick}>
+      {segments.map((segment, index) =>
+        segment.type === "mermaid" ? (
+          <MermaidDiagram key={index} code={segment.code} />
+        ) : (
+          <div
+            key={index}
+            className={activityMarkdownClass}
+            dangerouslySetInnerHTML={{ __html: safeGateMarkdown(segment.text) }}
+          />
+        ),
+      )}
+    </div>
+  );
+}
+
 // ─── Primary action button ────────────────────────────────────────────────────
 
 const PRIMARY_KIND: Record<AwaitingAction, ActivityActionKind> = {
@@ -4838,20 +5367,17 @@ function FactoryNeedBlock({
         (() => {
           // Mensaje con JSON estructurado embebido (plan/spec con
           // output_format): prosa + summary + pasos como lista, nunca el JSON
-          // crudo.
+          // crudo. Todo en markdown estilo GitHub + diagramas mermaid.
           const parts = parseGateMessage(contextText);
-          const proseStyle = {
-            fontFamily: "var(--wp-font-sans)",
-            fontSize: 12,
-            color: "var(--wp-text-secondary)",
-            lineHeight: 1.6,
-            margin: "0 0 4px",
-            overflowWrap: "break-word" as const,
-          };
+          if (parts.summary === null && parts.steps.length === 0) {
+            return <GateBodyMarkdown text={parts.text} />;
+          }
           return (
             <div>
-              {parts.text !== "" && <p style={proseStyle}>{parts.text}</p>}
-              {parts.summary !== null && <p style={proseStyle}>{parts.summary}</p>}
+              {parts.text !== "" && <GateBodyMarkdown text={parts.text} />}
+              {parts.summary !== null && (
+                <GateBodyMarkdown text={parts.summary} />
+              )}
               {parts.steps.length > 0 && (
                 <ol
                   style={{
@@ -4866,14 +5392,16 @@ function FactoryNeedBlock({
                     <li
                       key={index}
                       style={{
-                        fontFamily: "var(--wp-font-sans)",
-                        fontSize: 12,
                         color: "var(--wp-text-secondary)",
-                        lineHeight: 1.6,
                         overflowWrap: "break-word",
                       }}
                     >
-                      {step}
+                      <div
+                        className={activityMarkdownClass}
+                        dangerouslySetInnerHTML={{
+                          __html: safeGateMarkdown(step),
+                        }}
+                      />
                     </li>
                   ))}
                 </ol>

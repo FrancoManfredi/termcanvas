@@ -96,7 +96,7 @@
 | S11 | `headless-runtime/factory/factoryServer.ts:394,460,484` + `foreman/foreman.ts:83` | sondas de URLs / listados | `for` sobre arrays fijos (2 URLs opencode, jobs en memoria, work items) — iteración acotada, ver Exenciones | ninguno |
 | S12 | `headless-runtime/foreman/foreman.ts` (`pollForAssistantJson`) | espera de JSON del asistente (último recurso cuando no hay `session.prompt`) | `while(Date.now() - start < timeoutMs)` (acotado por el fusible global del caller) + fetch con abort 2000ms + sleep 500ms entre polls | `GLOBAL_AGENT_FUSE_MS = 600000` (fusible único, en código) |
 | S13 | `headless-runtime/implement/implementService.ts:142-155` | holds de sincronización (path pact-mock) | sleeps ÚNICOS de 8000ms (ventana de cancel F04) / 1000ms (sin loop; re-chequean estado y salen) | ninguno |
-| S14 | `headless-runtime/factory/factoryServer.ts:1316-1334` | worker-kick diferido tras crear job | `setTimeout` single-shot 0ms (1 disparo, sin reintento; guarda `state -> running`) | ninguno |
+| S14 | ELIMINADO — worker-kick legacy retirado (engine) | el worker legacy ya no existe: el engine corre los nodos por su cuenta, sin timer que re-dispare | sin cota (código recto, 0 timers) | ninguno |
 | S15 | `headless-runtime/lifecycle.ts:51-87` (`createPersistenceController`) | debounce de persistencia de estado | `delayMs = 500` (re-programa con `clearTimeout`; `flush()`/`cancel()` explícitos; 1 timer vivo como máximo) | ninguno |
 | S16 | `headless-runtime/factory/factoryServer.ts:397-403,1784,1902-1904` | aborts de fetch internos | 800ms ×2 (sonda web), 1000ms (abort control), 12000ms (`opencode prompt` + `timeout 12000ms waiting`) | timeouts yaml |
 | S17 | `headless-runtime/opencodeServerManager.ts:115` | búsqueda de puerto efímero | `encontrarPuertoServidor(20000, 45000, 12)` (≤ 12 intentos) | `OPENCODE_EPHEMERAL_HINT` (hint, no hardcodeo) |
@@ -176,11 +176,19 @@ ahí mismo) y se resumen acá para el lector humano:
     (listas/mapas/readdir finitos + denies estáticos), `review/reviewDiff.ts`
     (líneas de `git status` + lista acotada slice 0,50),
     `factory/agents/agentHooks.ts` (dir entries, findings slice 0,20, lista
-    de hooks descubierta) y `runner/toolPolicy.ts` (tokens de frontmatter).
+    de hooks descubierta) y `runner/toolPolicy.ts` (tokens de frontmatter),
+    más auditoría 2026-09-16: `factory/mcps/mcpFileRoutes.ts` (entries de
+    mapas validados + readdir), `factory/github/runnersService.ts` (labels y
+    runners del JSON de la API), `factory/isolation/isolationStore.ts`
+    (líneas de texto), `factory/isolation/mergeReconcile.ts` (listado de jobs
+    con TTL `MERGE_RECONCILE_TTL_MS`) y `workItem/workerActivity.ts` (array
+    de jobs en memoria). Los `for` de `engineBridge.ts` NO van por exención:
+    tienen entradas individuales E01-E09 (ver sección E).
    El test lo enforcea por archivo + prohíbe `for(;;)` en todo el daemon.
 2. **`setTimeout` one-shot sin reintento** (no re-programa: dispara 1 vez):
    AbortController de fetch (S16, L04), sleeps únicos de sincronización (S13),
-   worker-kick diferido (S14), debounce con cleanup (S15), kill-timers de spann
+   auto-resume del engine (E10), restart del runner supervisor (RS01),
+   debounce con cleanup (S15), kill-timers de spann
    (P02-P04, que además resuelven la promesa). Un `setTimeout` que no se
    re-programa a sí mismo no es un loop.
 3. **Nombres con "retry" que no son loops**: rutas y handlers single-shot
@@ -197,6 +205,10 @@ ahí mismo) y se resumen acá para el lector humano:
      F1 que describen la cota L-IN-02 (`retry cap 3`, `adapter with retry` →
      apuntan a L-IN-02, intentos acotados sin reintento libre) y etiquetas de
      intento humano en comentarios (`A-retry`: nombre del intento, no loop).
+    Auditoría 2026-09-16: `accept/retry` (acciones del panel en docs/comentarios),
+    `Retry review` (guard G1 en comentarios y mensajes 409), `review retry legacy`
+    (handlers 410 retirados) y `VERIFY-RETRY` (comentario de retirados) → strings
+    y comentarios, no loops.
     Su cota real es B01 (sin budget: el humano reintenta siempre) o la fila correspondiente y
     está inventariada arriba.
 4. **`while` de truncado con progreso garantizado**: `while(store.length >
@@ -272,6 +284,34 @@ cambio de yaml adelanta el armado.
 No new `setInterval`/`setTimeout`/loop: all execs are single-shot with the
 `timeout` option; per-job concurrency is an in-flight `Set` cleared in
 `finally` (structural dedupe, same family as LOOPS.md B05).
+
+## E — Engine bridge: auditoría de loops y auto-resume (2026-09-16)
+
+| # | Where (approx line) | Mechanism | Exact bound | Rule / kill-switch |
+|---|---|---|---|---|
+| E01 | `headless-runtime/factory/engineBridge.ts` (`hydrateMap`) | hydrateMap — mapa finito (engine-map.json) + guard hydrated | `Object.entries` de un JSON parseado, una sola corrida (`hydrated = true`); sin re-arme | ninguno |
+| E02 | `headless-runtime/factory/engineBridge.ts` (`renderFindingsText`) | renderFindingsText — array findings finito | `Array.isArray(findings)` acotado aguas arriba (findings ≤ 50 en el contrato del review) | ninguno |
+| E03 | `headless-runtime/factory/engineBridge.ts` (`renderVerifyLog`) | renderVerifyLog — steps finitos (verify-runner) | `steps: Array<Record<string, unknown>>` (verify-runner ya slicea a 20) | ninguno |
+| E04 | `headless-runtime/factory/engineBridge.ts` (`syncEngineRunFromRun`) | syncEngineRunFromRun — cap 50 por mapa + break | `Object.keys(nodeSessions).length < 50` por mapa y break al llenar ambos | ninguno |
+| E05 | `headless-runtime/factory/engineBridge.ts` (`runInputsForWorkflowDef`) | runInputsForWorkflowDef — def.inputs finito | `def.inputs` es el record validado del workflow (keys declaradas, finito) | ninguno |
+| E06 | `headless-runtime/factory/engineBridge.ts` (`countAutoResumes`) | countAutoResumes — timeline finito | `Array.isArray(timeline)`: timeline en memoria del work item, terminación por longitud | ninguno |
+| E07 | `headless-runtime/factory/engineBridge.ts` (`interruptionMs`) | interruptionMs — barrido reverso del timeline | índice `for (let i = timeline.length - 1; i >= 0; i--)` sobre el timeline finito | ninguno |
+| E08 | `headless-runtime/factory/engineBridge.ts` (`autoResumeParkedEngineJobs`) | autoResume candidatos — workItemStore.list() finito + AUTO_RESUME_MAX_ATTEMPTS = 3 | lista en memoria + `AUTO_RESUME_MAX_ATTEMPTS`; edad máxima `autoResumeMaxAgeMs()` (default 24h) | `TERMCANVAS_FACTORY_NO_AUTORESUME=1` |
+| E09 | `headless-runtime/factory/engineBridge.ts` (`autoResumeParkedEngineJobs`) | autoResume resume — slice(0, autoResumeMaxPerBoot()) | `autoResumeMaxPerBoot()` (default 5, env `TERMCANVAS_FACTORY_AUTORESUME_MAX`); un resume por candidato en la pasada | `TERMCANVAS_FACTORY_NO_AUTORESUME=1` |
+| E10 | `headless-runtime/factory/engineBridge.ts` (`autoResumeParkedEngineJobs`) | autoResumeParkedEngineJobs delayMs = 3000 | `setTimeout` one-shot de stagger (`delayMs = 3000`, un solo disparo, nunca re-armado) | `TERMCANVAS_FACTORY_NO_AUTORESUME=1` |
+
+## RS — Runner supervisor (auditoría 2026-09-16)
+
+| # | Where (approx line) | Mechanism | Exact bound | Rule / kill-switch |
+|---|---|---|---|---|
+| RS01 | `headless-runtime/factory/github/runnerSupervisor.ts` (`onChildExit`) | restart del runner con backoff | `this.deps.maxRestarts` (`RUNNER_MAX_RESTARTS = 5` por default) + `clearTimeout` en `stop()` + `unref()` (no sostiene el daemon) | `stop()` / `maxRestarts` inyectable |
+
+
+## R — Review report publication / external reviewer wait (option A, 2026-09-16)
+
+| # | Where (approx line) | Mechanism | Exact bound | Rule / kill-switch |
+|---|---|---|---|---|
+| R01 | `headless-runtime/review/botReview.ts` (`waitForBotReview`, `fetchBotFindings`) | espera acotada del revisor externo (pullfrog/CodeRabbit) antes de publicar el reporte: polls con sleep one-shot entre intentos (nunca re-armado); corta al primer lote de findings o al tope | `BOT_REVIEW_POLL_MS = 60000` (intervalo entre polls), `BOT_REVIEW_MAX_POLLS = 20` (≤ 20 polls ≈ 20 min); el tope global lo fija `TERMCANVAS_REVIEW_WAIT_MS` (default `BOT_REVIEW_WAIT_MS_DEFAULT = 1200000`, techo `BOT_REVIEW_WAIT_MS_MAX = 3600000`, `0` = publish inmediato legacy) | `TERMCANVAS_REVIEW_WAIT_MS=0` (kill-switch) o `TERMCANVAS_REVIEW_BOTS=""` (sin bots = publish inmediato) |
 
 ## SIN COTA — veredicto para QA
 

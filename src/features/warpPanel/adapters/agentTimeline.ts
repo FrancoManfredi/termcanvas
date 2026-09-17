@@ -254,16 +254,22 @@ export function buildAgentTimeline(
 
   const foremanRefs = sessions.get("foreman") ?? [];
   const foremanSessions = resolveStageSessions(foremanRefs);
+  // Cancelado ANTES de rutear (sin run): el Foreman no completó → failed.
+  // Con run iniciado el ruteo ya ocurrió (aunque el job muera después por un
+  // nodo del workflow): Foreman completed, nunca failed.
+  const foremanState: AgentStageState = cancelled
+    ? hasRun
+      ? "completed"
+      : "failed"
+    : hasRun || terminal
+      ? "completed"
+      : "running";
   const foreman: AgentStage = {
     id: "foreman",
     label: "Foreman",
     kind: "agent",
     agent: "foreman",
-    state: cancelled
-      ? "failed"
-      : hasRun || terminal
-        ? "completed"
-        : "running",
+    state: foremanState,
     sessionUrl: foremanSessions.sessionUrl,
     rounds: foremanSessions.rounds,
     currentRound: foremanSessions.currentRound,

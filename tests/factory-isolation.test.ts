@@ -14,6 +14,8 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { buildIssueBranchName } from "../src/canvas/issueWorktreeNaming.ts";
 import {
@@ -21,16 +23,20 @@ import {
   type WorkItem,
 } from "../shared/types/workItem.ts";
 import {
+  buildCommitSubject,
   buildIsolationBranchName,
   buildPrBody,
   buildPrTitle,
+  capTextAtBoundary,
   cleanDetailUrl,
   decideWorktreeDelete,
   effectiveWorktreeFor,
+  extractCommitUnits,
   extractDispositions,
   extractNotVerified,
   extractReportSection,
   isPactIsolationJob,
+  looksLikeFindingText,
   parseIssueTitleFromPrompt,
   parseWorktreeDeletePath,
   prGuard,
@@ -40,8 +46,17 @@ import {
   sanitizeIsolationIssueRef,
   shouldIsolate,
   slugifyIssueTitle,
+  stripRoundNarrative,
 } from "../headless-runtime/factory/isolation/isolationStore.ts";
-import { buildPrDetailsFromJob } from "../headless-runtime/factory/isolation/gitHubPr.ts";
+import {
+  buildPrDetailsFromJob,
+  formatBotFindingsForPrompt,
+  readBotFindingsFromTimeline,
+  readBotReconcileFeedback,
+  resumeMissedBotReconcileRounds,
+  resumePendingReviewPublications,
+} from "../headless-runtime/factory/isolation/gitHubPr.ts";
+import { writeBotReconcileSetting } from "../headless-runtime/factory/settings/factorySettingsStore.ts";
 import {
   ensureIsolatedWorktree,
   isWorkingTreeDirty,
@@ -54,6 +69,7 @@ import {
   commitWorktreeChanges,
   countBranchCommitsVsBase,
   gateAcceptOnBranchDiff,
+  isReviewAidPath,
   maybePublishReviewReportForJob,
   openPrForJob,
   publishReviewReport,
@@ -61,6 +77,8 @@ import {
   readPrState,
   readReviewReportFromTimeline,
   readWorktreeStatusPorcelain,
+  resolveBotReviewPolicy,
+  scheduleReviewReportPublish,
   verifyCreatedPr,
   GIT_COMMIT_TIMEOUT_MS,
   GIT_PUSH_TIMEOUT_MS,
@@ -441,7 +459,14 @@ test("pr body estilo guía: secciones solo con datos", () => {
   });
   assert.ok(body.includes("## Problem and outcome"));
   assert.ok(body.includes("- **Issue:** #412"));
-  assert.ok(body.includes("- **Outcome:** Review OK: el cambio cumple el issue."));
+  assert.ok(
+    body.includes("- **Outcome:** Arreglado el parseo corrupto en `js/store.js`: try/catch + backup."),
+    "el outcome describe comportamiento desde el intro del implement",
+  );
+  assert.ok(
+    !body.includes("Review OK: el cambio cumple el issue."),
+    "el summary del review (veredicto/compliance) no viaja como Outcome",
+  );
   assert.ok(body.includes("## Solution"));
   assert.ok(body.includes("## Review guidance"));
   assert.ok(body.includes("js/store.js:41"));
@@ -485,6 +510,48 @@ test("buildPrDetailsFromJob: implementReport alimenta solution/guidance", () => 
 test("pr title shape", () => {
   assert.equal(buildPrTitle(412, "Fix kanban count"), "Resolve issue #412 — Fix kanban count");
   assert.equal(buildPrTitle(412), "Resolve issue #412");
+});
+
+test("pr title anti-finding: hallazgo en outcome cae al título del issue", () => {
+  assert.equal(
+    buildPrTitle(412, "Fix kanban count", "[info] f1 (js/app.js): copy raro"),
+    "Resolve issue #412 — Fix kanban count",
+  );
+  assert.equal(
+    buildPrTitle(412, "Fix kanban count", "- bullet con hallazgo"),
+    "Resolve issue #412 — Fix kanban count",
+  );
+  assert.equal(
+    buildPrTitle(412, "Fix kanban count", "f2 — algo abierto"),
+    "Resolve issue #412 — Fix kanban count",
+  );
+  assert.equal(
+    buildPrTitle(412, "Fix kanban count", "Status: OPEN en path/to/file.ts:12"),
+    "Resolve issue #412 — Fix kanban count",
+  );
+  // Sin título utilizable no hay fallback al finding: headline pelado.
+  assert.equal(
+    buildPrTitle(412, "", "[info] f1 (js/app.js): copy raro"),
+    "Resolve issue #412",
+  );
+});
+
+test("looksLikeFindingText: heurística conservadora, nunca lanza", () => {
+  assert.equal(looksLikeFindingText("[info] f1 (js/app.js): copy raro"), true);
+  assert.equal(looksLikeFindingText("f1 js/app.js:12 copy raro"), true);
+  assert.equal(looksLikeFindingText("js/app.js:12 f1 copy raro"), true);
+  assert.equal(looksLikeFindingText("- bullet con hallazgo"), true);
+  assert.equal(looksLikeFindingText("f2 — algo abierto"), true);
+  assert.equal(looksLikeFindingText("d3: descubrimiento"), true);
+  assert.equal(looksLikeFindingText("Status: OPEN en path/to/file.ts:12"), true);
+  assert.equal(looksLikeFindingText("El conteo del kanban ya suma bien"), false);
+  assert.equal(looksLikeFindingText("Major improvement in the kanban counter"), false);
+  assert.equal(looksLikeFindingText(""), false);
+  assert.equal(looksLikeFindingText(null), false);
+  assert.equal(looksLikeFindingText(undefined), false);
+  assert.equal(looksLikeFindingText(42), false);
+  assert.equal(looksLikeFindingText({}), false);
+  assert.equal(looksLikeFindingText([]), false);
 });
 
 // ── prGuard (once per job) ──
@@ -902,6 +969,14 @@ test("exec: fresh worktree gets local excludes (.agents/logs/*.log, never commit
   assert.ok(content.includes(".agents/"));
   assert.ok(content.includes("logs/"));
   assert.ok(content.includes("*.log"));
+  // Review aids del ciclo: tampoco aparecen en status ni son commiteables.
+  assert.ok(content.includes("/artifacts/scope.md"));
+  assert.ok(content.includes("/scope.md"));
+  assert.ok(content.includes("/plan.md"));
+  assert.ok(content.includes("/triage.md"));
+  assert.ok(content.includes("/discoveries.json"));
+  assert.ok(content.includes("/discoveries.md"));
+  assert.ok(content.includes("review/"));
 });
 
 test("exec: local excludes are idempotent (marker present → no write)", async () => {
@@ -1360,8 +1435,8 @@ test("exec: dirty worktree → add+commit del sistema antes de push+pr", async (
     "gh pr",
     "git add",
     "git commit",
-    "git push",
     "git diff",
+    "git push",
     "gh pr",
     "gh pr",
     "gh pr",
@@ -1428,6 +1503,10 @@ test("commit: isCommittablePath excluye ruido y acepta código", async () => {
     "discoveries.json",
     "discoveries.md",
     "review/report-round-1.md",
+    // Forma de directorio (porcelain sin -uall colapsaba untracked dirs a
+    // `artifacts/`: el dir pasaba el filtro y barría la aid adentro — PR #158).
+    "artifacts/",
+    "review/",
     "",
     "../escape.ts",
   ]) {
@@ -1460,6 +1539,67 @@ test("status: readWorktreeStatusPorcelain preserva el offset XY de la primera l�
   });
   const status = await readWorktreeStatusPorcelain({ repoPath: "/r/wt", run });
   assert.equal(status, " M js/app.js\n?? src/b.ts");
+});
+
+test("status: porcelain pide -uall (untracked dirs enumerados, no colapsados)", async () => {
+  const { calls, run } = fakeGit({
+    "git status": { stdout: "?? artifacts/scope.md\n" },
+  });
+  const status = await readWorktreeStatusPorcelain({ repoPath: "/r/wt", run });
+  assert.equal(status, "?? artifacts/scope.md");
+  const statusCall = calls.find((c) => c.cmd === "git" && c.args[0] === "status");
+  assert.ok(statusCall?.args.includes("-uall"), "sin -uall el dir colapsa y la aid shipea");
+});
+
+test("review-aid: isReviewAidPath reconoce archivos, prefijo y formas de dir", () => {
+  for (const aid of [
+    "artifacts/scope.md",
+    "scope.md",
+    "plan.md",
+    "triage.md",
+    "discoveries.json",
+    "discoveries.md",
+    "review/report.md",
+    "review/",
+    "artifacts/",
+  ]) {
+    assert.equal(isReviewAidPath(aid), true, aid);
+  }
+  for (const ok of [
+    "src/a.ts",
+    "src/scope.md",
+    "docs/review-guide.md",
+    "artifacts/notes.md",
+    "",
+  ]) {
+    assert.equal(isReviewAidPath(ok), false, ok || "(vacío)");
+  }
+});
+
+test("commit subject: conventional type desde el prefijo del issue", () => {
+  assert.equal(
+    buildCommitSubject(
+      151,
+      "bug: saveTransactions() sin guardia rompe add/remove si el write falla",
+    ),
+    "fix: saveTransactions() sin guardia rompe add/remove si el write falla (#151)",
+  );
+  assert.equal(
+    buildCommitSubject(155, "feat: modo oscuro con preferencia persistida"),
+    "feat: modo oscuro con preferencia persistida (#155)",
+  );
+  assert.equal(
+    buildCommitSubject(137, "a11y: los cambios del balance no se anuncian"),
+    "a11y: los cambios del balance no se anuncian (#137)",
+  );
+  assert.equal(
+    buildCommitSubject(99, "[F-10] Fix todo stuff that is broken"),
+    "chore: [F-10] Fix todo stuff that is broken (#99)",
+  );
+  assert.equal(buildCommitSubject(9, undefined), "factory: implement issue #9 (handoff)");
+  assert.equal(buildCommitSubject(9, "   "), "factory: implement issue #9 (handoff)");
+  assert.ok(!buildCommitSubject(9, "bug: a\nb").includes("\n"), "una sola línea");
+  assert.ok(buildCommitSubject(9, `bug: ${"x".repeat(400)}`).length <= 120, "cap 120");
 });
 
 test("exec: commit selectivo deja fuera node_modules/logs (sin -A ciego)", async () => {
@@ -1521,6 +1661,103 @@ test("exec: commit lleva body del job record; headline intacto sin body", async 
   assert.equal(mFlags.length, 2);
   assert.ok(commits[0]?.args.includes("factory: implement issue #9 (handoff)"));
   assert.ok(commits[0]?.args.includes("Fixes the crash\nFiles: src/a.ts"));
+});
+
+test("exec: scope.md untracked (con -uall) queda fuera del add selectivo", async () => {
+  const { calls, run } = fakeGit({
+    "git status": { stdout: "?? artifacts/scope.md\n M src/a.ts\n" },
+    "git add": { stdout: "" },
+    "git -c": { stdout: "[issue-9-x abc1234] factory: implement\n" },
+  });
+  const got = await commitWorktreeChanges({
+    repoPath: "/r/wt",
+    issueNumber: 9,
+    run,
+    knownStatus: "?? artifacts/scope.md\n M src/a.ts\n",
+  });
+  assert.equal(got.ok, true);
+  const adds = calls.filter((c) => c.cmd === "git" && c.args[0] === "add");
+  assert.equal(adds.length, 1);
+  const addArgs = [...(adds[0]?.args ?? [])];
+  assert.ok(addArgs.includes("src/a.ts"));
+  assert.ok(!addArgs.some((a) => String(a).includes("scope.md")), "la aid jamás se stagea");
+});
+
+test("exec: dir colapsado (?? artifacts/) no es commiteable: honesto sin add", async () => {
+  const { calls, run } = fakeGit({ git: { stdout: "" } });
+  const got = await commitWorktreeChanges({
+    repoPath: "/r/wt",
+    issueNumber: 9,
+    run,
+    knownStatus: "?? artifacts/\n",
+  });
+  assert.equal(got.ok, false);
+  if (!got.ok) assert.ok(got.error.includes("nothing committable"));
+  assert.ok(calls.every((c) => !(c.cmd === "git" && c.args[0] === "add")));
+});
+
+test("exec: commit subject conventional sale del título del issue", async () => {
+  const { calls, run } = fakeGit({
+    "git rev-list": { stdout: "" },
+    "git status": { stdout: " M js/store.js\n" },
+    "git add": { stdout: "" },
+    "git -c": { stdout: "[issue-151-x abc1234] fix\n" },
+    "git diff": { stdout: "js/store.js\n" },
+    "git push": { stdout: "" },
+    "gh pr view": { stdout: "" },
+    "gh pr create": { stdout: "https://github.com/o/r/pull/158\n" },
+  });
+  const got = await openPrForJob({
+    repoPath: "/r/wt",
+    branch: "issue-151-bug-savetransactions",
+    baseBranch: "main",
+    issueNumber: 151,
+    title: "bug: saveTransactions() sin guardia rompe add/remove si el write falla",
+    run,
+    writeBodyFile: () => {},
+    unlinkBodyFile: () => {},
+    details: { summary: "Fixes the crash" },
+  });
+  assert.equal(got.ok, true);
+  const commits = calls.filter((c) => c.cmd === "git" && c.args[0] === "-c");
+  assert.equal(commits.length, 1);
+  assert.ok(
+    commits[0]?.args.includes(
+      "fix: saveTransactions() sin guardia rompe add/remove si el write falla (#151)",
+    ),
+  );
+});
+
+test("exec: review-aid en el diff aborta push/PR (gate anti-fuga)", async () => {
+  const { calls, run } = fakeGit({
+    "git rev-list": { stdout: "" },
+    "git status": { stdout: " M src/a.ts\n" },
+    "git add": { stdout: "" },
+    "git -c": { stdout: "[issue-9-x abc1234] factory: implement\n" },
+    "git diff": { stdout: "artifacts/scope.md\nsrc/a.ts\n" },
+    "git push": { stdout: "" },
+    "gh pr view": { stdout: "" },
+    "gh pr create": { stdout: "https://github.com/o/r/pull/99\n" },
+  });
+  const got = await openPrForJob({
+    repoPath: "/r/wt",
+    branch: "issue-9-x",
+    baseBranch: "main",
+    issueNumber: 9,
+    run,
+    writeBodyFile: () => {},
+    unlinkBodyFile: () => {},
+  });
+  assert.equal(got.ok, false);
+  if (!got.ok) assert.ok(got.error.includes("review-aid leaked"));
+  assert.ok(
+    !calls.some((c) => c.cmd === "git" && c.args[0] === "push"),
+    "sin push cuando hay fuga",
+  );
+  assert.ok(
+    !calls.some((c) => c.cmd === "gh" && c.args[0] === "pr" && c.args[1] === "create"),
+    "sin PR cuando hay fuga",
+  );
 });
 
 test("exec: commit todo-excluido es honesto (ok:false, sin commit)", async () => {
@@ -1661,9 +1898,15 @@ test("gate: trabajo sucio o commits permiten el accept (fail-open honesto)", asy
 
 // ── P1: PR estilo prp-pr (título outcome, validación honesta, links, anti-duplicado) ──
 
-test("p1: título outcome-first en lenguaje de comportamiento", () => {
+test("p1: título espeja el issue; el outcome solo entra como fallback", () => {
+  // Issue-first: texto humano, estable y comportamental.
   assert.equal(
     buildPrTitle(412, "Fix kanban count", "El conteo del kanban ya suma bien\nsegunda línea"),
+    "Resolve issue #412 — Fix kanban count",
+  );
+  // Sin título el outcome comportamental entra como fallback.
+  assert.equal(
+    buildPrTitle(412, undefined, "El conteo del kanban ya suma bien\nsegunda línea"),
     "Resolve issue #412 — El conteo del kanban ya suma bien",
   );
   assert.equal(
@@ -1673,7 +1916,24 @@ test("p1: título outcome-first en lenguaje de comportamiento", () => {
   assert.equal(buildPrTitle(412, "", ""), "Resolve issue #412");
   assert.equal(buildPrTitle(412, null, null), "Resolve issue #412");
   const long = `x${"y".repeat(300)}`;
-  assert.ok((buildPrTitle(1, "t", long).split("— ")[1] ?? "").length <= 120);
+  assert.ok((buildPrTitle(1, undefined, long).split("— ")[1] ?? "").length <= 120);
+  // Anti-finding (PR #160) y anti-compliance (PR #162): jamás titulan.
+  assert.equal(
+    buildPrTitle(412, "Fix kanban count", "[info] f1 (js/app.js): copy raro"),
+    "Resolve issue #412 — Fix kanban count",
+  );
+  assert.equal(
+    buildPrTitle(412, null, "f1 js/app.js:12 ida y vuelta"),
+    "Resolve issue #412",
+  );
+  assert.equal(
+    buildPrTitle(412, null, "El fix cumple el issue #151 y el contrato congelado"),
+    "Resolve issue #412",
+  );
+  assert.equal(
+    buildPrTitle(412, undefined, "The fix satisfies the contract"),
+    "Resolve issue #412",
+  );
 });
 
 test("p1: cleanDetailUrl solo acepta http(s)", () => {
@@ -1901,7 +2161,7 @@ function p3bCommentBody(head: string): string {
     "publication: pending",
     "-->",
     "",
-    "## Ready to merge",
+    "## 1. Verdict",
   ].join("\n");
 }
 
@@ -2095,6 +2355,1054 @@ test("p3b: hook publica con reporte y salta sin reporte o ya publicado", async (
   assert.deepEqual(pub, { published: true, url: P3B_URL, duplicate: false });
   const events = workItemStore.get("job-p3b-pub01")?.timeline ?? [];
   assert.ok(events.some((e) => e.message.includes("review report published")));
+  workItemStore.clear();
+});
+
+// ── Option A: publicación esperando al revisor externo (pullfrog) ──
+
+test("p3b: resolveBotReviewPolicy default/acotado/kill-switch", () => {
+  assert.deepEqual(resolveBotReviewPolicy({}), {
+    waitMs: 1_200_000,
+    bots: ["pullfrog", "coderabbit"],
+  });
+  assert.equal(resolveBotReviewPolicy({ TERMCANVAS_REVIEW_WAIT_MS: "0" }).waitMs, 0);
+  assert.deepEqual(resolveBotReviewPolicy({ TERMCANVAS_REVIEW_BOTS: "" }).bots, []);
+  assert.deepEqual(resolveBotReviewPolicy({ TERMCANVAS_REVIEW_BOTS: "PullFrog" }).bots, ["pullfrog"]);
+  assert.equal(resolveBotReviewPolicy({ TERMCANVAS_REVIEW_WAIT_MS: "junk" }).waitMs, 1_200_000);
+  assert.equal(
+    resolveBotReviewPolicy({ TERMCANVAS_REVIEW_WAIT_MS: "999999999" }).waitMs,
+    3_600_000,
+    "cota máxima de espera",
+  );
+});
+
+function botPublishRun(): {
+  run: (cmd: string, args: readonly string[]) => Promise<{ stdout: string; stderr: string }>;
+  calls: string[];
+  bodies: string[];
+} {
+  const calls: string[] = [];
+  const bodies: string[] = [];
+  let commented = false;
+  const run = async (cmd: string, args: readonly string[]) => {
+    calls.push(`${cmd} ${args.join(" ")}`);
+    if (cmd === "git" && args[0] === "rev-parse") return { stdout: "abc123\n", stderr: "" };
+    if (cmd === "git" && args[0] === "log") return { stdout: "a.ts\nb.ts\n", stderr: "" };
+    if (cmd === "gh" && args[1] === "comment") {
+      // WS1b: captura el body real (`--body-file`) para los asserts de contenido.
+      try {
+        const fileArg = args.indexOf("--body-file");
+        const file = fileArg >= 0 ? (args[fileArg + 1] ?? "") : "";
+        if (file.length > 0) bodies.push(fs.readFileSync(file, "utf-8"));
+      } catch {
+        // best-effort: la captura nunca rompe el fake
+      }
+      commented = true;
+      return { stdout: `${P3B_URL}\n`, stderr: "" };
+    }
+    if (cmd === "gh" && args[1] === "view") {
+      return {
+        stdout: JSON.stringify({
+          comments: commented ? [{ body: p3bCommentBody("abc123"), url: P3B_URL }] : [],
+        }),
+        stderr: "",
+      };
+    }
+    throw new Error(`unexpected: ${cmd} ${args.join(" ")}`);
+  };
+  return { run, calls, bodies };
+}
+
+test("p3b: wait 0 (kill switch) publica inmediato sin esperar al bot", async () => {
+  p3bJob("job-p3b-now01", {
+    verdict: "READY TO MERGE",
+    publication: "pending",
+    report: P3B_LOCAL,
+  });
+  const fake = botPublishRun();
+  const got = await scheduleReviewReportPublish("job-p3b-now01", {
+    run: fake.run,
+    env: { TERMCANVAS_REVIEW_WAIT_MS: "0" },
+  });
+  assert.equal(got.mode, "immediate");
+  assert.equal(got.outcome?.published, true);
+  assert.ok(
+    !fake.calls.some((c) => c.startsWith("git log")),
+    "sin espera no se inspeccionan commits post-bot",
+  );
+  workItemStore.clear();
+});
+
+test("p3b: wait activo agenda el wait acotado y publica con la sección de bot", async () => {
+  p3bJob("job-p3b-deferred01", {
+    verdict: "READY TO MERGE",
+    publication: "pending",
+    report: P3B_LOCAL,
+  });
+  const fake = botPublishRun();
+  const waits: Array<{ timeoutMs?: number }> = [];
+  const got = await scheduleReviewReportPublish("job-p3b-deferred01", {
+    run: fake.run,
+    env: { TERMCANVAS_BOT_RECONCILE: "0" },
+    waitMs: 60_000,
+    waitForBot: async (input) => {
+      waits.push({ timeoutMs: input.timeoutMs });
+      return {
+        status: "found",
+        reviewer: "pullfrog[bot]",
+        findings: [
+          {
+            id: "bot-1",
+            source: "pullfrog[bot]",
+            file: "a.ts:10",
+            message: "guard faltante",
+            url: "",
+            createdAt: "2026-09-14T00:00:00Z",
+          },
+        ],
+      };
+    },
+  });
+  assert.equal(got.mode, "deferred");
+  assert.equal(waits.length, 1);
+  assert.equal(waits[0]?.timeoutMs, 60_000);
+  let events = workItemStore.get("job-p3b-deferred01")?.timeline ?? [];
+  for (let i = 0; i < 40 && !events.some((e) => e.message.includes("review report published")); i += 1) {
+    await new Promise((r) => setTimeout(r, 25));
+    events = workItemStore.get("job-p3b-deferred01")?.timeline ?? [];
+  }
+  assert.ok(
+    events.some((e) => e.message.includes("review report bot section: 1 finding(s), 0 open (found)")),
+    "sección de bot registrada antes de publicar",
+  );
+  assert.ok(events.some((e) => e.message.includes("review report published")));
+  const published = events.find((e) => e.message.includes("review report published"));
+  const report = (published?.meta as Record<string, unknown> | undefined)?.reviewReport as
+    | Record<string, unknown>
+    | undefined;
+  assert.ok(
+    typeof report?.report === "string" && report.report.includes("| `bot-1` — guard faltante | `a.ts:10` | Taken |"),
+    "el reporte publicado reconcilia el finding del bot (fix posterior toca a.ts)",
+  );
+  workItemStore.clear();
+});
+
+// ── WS1b: bot settle wiring (publish refrescado + status del wait + readiness) ──
+
+test("ws1b: el publish recibe el body refrescado (sin placeholders de PR #0/unknown)", async () => {
+  p3bJob("job-ws1b-body01", {
+    verdict: "READY TO MERGE",
+    publication: "pending",
+    report: P3B_LOCAL,
+  });
+  const fake = botPublishRun();
+  const pub = await maybePublishReviewReportForJob("job-ws1b-body01", { run: fake.run });
+  assert.deepEqual(pub, { published: true, url: P3B_URL, duplicate: false });
+  const body = fake.bodies.at(-1) ?? "";
+  assert.ok(body.length > 0, "se capturó el body real publicado");
+  assert.ok(!body.includes("# Review report — PR #0"), "sin prosa placeholder de PR #0");
+  assert.ok(!body.includes("Reviewed head SHA: `unknown`."), "sin head SHA placeholder");
+  assert.ok(body.includes("prp-review-id: pr-77"));
+  assert.ok(body.includes("pr: 77"));
+  assert.ok(body.includes("reviewed_head: abc123"));
+  assert.ok(body.includes("# Review report — PR #77"));
+  assert.ok(body.includes("Reviewed head SHA: `abc123`."));
+  const events = workItemStore.get("job-ws1b-body01")?.timeline ?? [];
+  const published = events.find((e) => e.message.includes("review report published"));
+  const stored = ((published?.meta as Record<string, unknown> | undefined)?.reviewReport as
+    | Record<string, unknown>
+    | undefined)?.report;
+  assert.ok(
+    typeof stored === "string" && stored.includes(`publication: ${P3B_URL}`),
+    "el reporte persistido parte del body refrescado y lleva la URL",
+  );
+  assert.ok(typeof stored === "string" && !stored.includes("# Review report — PR #0"));
+  workItemStore.clear();
+});
+
+test("ws1b: timeout del wait renderiza el copy de deadline y no bloquea la readiness", async () => {
+  p3bJob("job-ws1b-timeout01", {
+    verdict: "READY TO MERGE",
+    publication: "pending",
+    report: P3B_LOCAL,
+  });
+  const fake = botPublishRun();
+  const got = await scheduleReviewReportPublish("job-ws1b-timeout01", {
+    run: fake.run,
+    env: { TERMCANVAS_BOT_RECONCILE: "0" },
+    waitMs: 60_000,
+    waitForBot: async () => ({ status: "timeout", reviewer: "pullfrog", findings: [] }),
+  });
+  assert.equal(got.mode, "deferred");
+  let events = workItemStore.get("job-ws1b-timeout01")?.timeline ?? [];
+  for (let i = 0; i < 40 && !events.some((e) => e.message.includes("review report published")); i += 1) {
+    await new Promise((r) => setTimeout(r, 25));
+    events = workItemStore.get("job-ws1b-timeout01")?.timeline ?? [];
+  }
+  assert.ok(
+    events.some((e) => e.message.includes("review report bot section: 0 finding(s), 0 open (timeout)")),
+    "la sección de bot registra el timeout",
+  );
+  const body = fake.bodies.at(-1) ?? "";
+  assert.ok(
+    body.includes("had not posted findings for head `abc123` by the deadline"),
+    "el copy de deadline-pending viaja al PR",
+  );
+  assert.ok(!body.includes("No bot findings were posted for head"), "sin copy de bot ausente");
+  assert.ok(!/^readiness: blocked$/m.test(body), "timeout sin findings abiertos no bloquea");
+  workItemStore.clear();
+});
+
+test("ws1b: finding del bot sin reconciliar deja readiness: blocked antes de publicar", async () => {
+  p3bJob("job-ws1b-open01", {
+    verdict: "READY TO MERGE",
+    publication: "pending",
+    report: P3B_LOCAL,
+  });
+  const fake = botPublishRun();
+  const got = await scheduleReviewReportPublish("job-ws1b-open01", {
+    run: fake.run,
+    env: { TERMCANVAS_BOT_RECONCILE: "0" },
+    waitMs: 60_000,
+    waitForBot: async () => ({
+      status: "found",
+      reviewer: "pullfrog[bot]",
+      findings: [
+        {
+          id: "bot-open-1",
+          source: "pullfrog[bot]",
+          file: "c.ts:9",
+          message: "falta validación",
+          url: "",
+          createdAt: "2026-09-14T00:00:00Z",
+        },
+      ],
+    }),
+  });
+  assert.equal(got.mode, "deferred");
+  let events = workItemStore.get("job-ws1b-open01")?.timeline ?? [];
+  for (let i = 0; i < 40 && !events.some((e) => e.message.includes("review report published")); i += 1) {
+    await new Promise((r) => setTimeout(r, 25));
+    events = workItemStore.get("job-ws1b-open01")?.timeline ?? [];
+  }
+  const sectionEvent = events.find((e) =>
+    e.message.includes("review report bot section: 1 finding(s), 1 open (found)"),
+  );
+  const sectionReport = ((sectionEvent?.meta as Record<string, unknown> | undefined)?.reviewReport as
+    | Record<string, unknown>
+    | undefined)?.report as string | undefined;
+  assert.ok(
+    typeof sectionReport === "string" && /^readiness: blocked$/m.test(sectionReport),
+    "el header queda bloqueado ya en el store",
+  );
+  const published = events.find((e) => e.message.includes("review report published"));
+  const publishedReport = ((published?.meta as Record<string, unknown> | undefined)?.reviewReport as
+    | Record<string, unknown>
+    | undefined)?.report as string | undefined;
+  assert.ok(
+    typeof publishedReport === "string" && /^readiness: blocked$/m.test(publishedReport),
+    "el header bloqueado viaja en el reporte publicado",
+  );
+  assert.ok(
+    typeof publishedReport === "string" &&
+      publishedReport.includes("| `bot-open-1` — falta validación | `c.ts:9` | Open |"),
+    "el finding abierto viaja en la tabla del bot",
+  );
+  workItemStore.clear();
+});
+
+// ── WS-B: ronda de reconciliación post-bot (flag + cap 1) ──
+
+test("wsB: flag activo prepara UNA ronda de revise con los bot findings abiertos", async () => {
+  p3bJob("job-wsb-reconcile01", {
+    verdict: "READY TO MERGE",
+    publication: "pending",
+    report: P3B_LOCAL,
+  });
+  const fake = botPublishRun();
+  const seen: unknown[] = [];
+  const waitFound = async () => ({
+    status: "found" as const,
+    reviewer: "pullfrog[bot]",
+    findings: [
+      {
+        id: "bot-open-1",
+        source: "pullfrog[bot]",
+        file: "c.ts:9",
+        message: "falta validación",
+        url: "",
+        createdAt: "2026-09-14T00:00:00Z",
+      },
+    ],
+  });
+  const got = await scheduleReviewReportPublish("job-wsb-reconcile01", {
+    run: fake.run,
+    env: { TERMCANVAS_BOT_RECONCILE: "1" },
+    waitMs: 60_000,
+    waitForBot: waitFound,
+    onBotReconcile: (_id, feedback) => {
+      seen.push(feedback);
+    },
+  });
+  assert.equal(got.mode, "deferred");
+  let events = workItemStore.get("job-wsb-reconcile01")?.timeline ?? [];
+  for (let i = 0; i < 40 && !events.some((e) => e.message.includes("review report published")); i += 1) {
+    await new Promise((r) => setTimeout(r, 25));
+    events = workItemStore.get("job-wsb-reconcile01")?.timeline ?? [];
+  }
+  const prep = events.find((e) => e.message.startsWith("bot reconcile:"));
+  assert.ok(prep, "evento durable de ronda preparada");
+  const meta = prep?.meta as Record<string, unknown> | undefined;
+  const bc = meta?.botReconcile as Record<string, unknown> | undefined;
+  const feedback = bc?.feedback as
+    | { verdict?: string; findings?: Array<{ message?: string; file?: string }> }
+    | undefined;
+  assert.equal(feedback?.verdict, "revise");
+  assert.equal(feedback?.findings?.[0]?.message, "falta validación");
+  assert.equal(feedback?.findings?.[0]?.file, "c.ts:9");
+  assert.equal(seen.length, 1, "callback invocado una vez");
+  // Cap: una segunda corrida no vuelve a preparar la ronda.
+  await scheduleReviewReportPublish("job-wsb-reconcile01", {
+    run: fake.run,
+    env: { TERMCANVAS_BOT_RECONCILE: "1" },
+    waitMs: 60_000,
+    waitForBot: waitFound,
+    onBotReconcile: (_id, feedback) => {
+      seen.push(feedback);
+    },
+  });
+  let events2 = workItemStore.get("job-wsb-reconcile01")?.timeline ?? [];
+  for (
+    let i = 0;
+    i < 40 && events2.filter((e) => e.message.includes("review report published")).length < 2;
+    i += 1
+  ) {
+    await new Promise((r) => setTimeout(r, 25));
+    events2 = workItemStore.get("job-wsb-reconcile01")?.timeline ?? [];
+  }
+  assert.equal(
+    events2.filter((e) => e.message.startsWith("bot reconcile:")).length,
+    1,
+    "cap 1: sin duplicado",
+  );
+  assert.equal(seen.length, 1, "sin segunda invocación del hook");
+  workItemStore.clear();
+});
+
+test("wsB: sin flag la ronda no se prepara (el publish sigue igual)", async () => {
+  p3bJob("job-wsb-noreconcile01", {
+    verdict: "READY TO MERGE",
+    publication: "pending",
+    report: P3B_LOCAL,
+  });
+  const fake = botPublishRun();
+  let called = 0;
+  const got = await scheduleReviewReportPublish("job-wsb-noreconcile01", {
+    run: fake.run,
+    env: { TERMCANVAS_BOT_RECONCILE: "0" },
+    waitMs: 60_000,
+    waitForBot: async () => ({
+      status: "found" as const,
+      reviewer: "pullfrog[bot]",
+      findings: [
+        {
+          id: "bot-open-2",
+          source: "pullfrog[bot]",
+          file: "d.ts:1",
+          message: "otro",
+          url: "",
+          createdAt: "2026-09-14T00:00:00Z",
+        },
+      ],
+    }),
+    onBotReconcile: () => {
+      called += 1;
+    },
+  });
+  assert.equal(got.mode, "deferred");
+  let events = workItemStore.get("job-wsb-noreconcile01")?.timeline ?? [];
+  for (let i = 0; i < 40 && !events.some((e) => e.message.includes("review report published")); i += 1) {
+    await new Promise((r) => setTimeout(r, 25));
+    events = workItemStore.get("job-wsb-noreconcile01")?.timeline ?? [];
+  }
+  assert.ok(!events.some((e) => e.message.startsWith("bot reconcile:")), "sin evento sin flag");
+  assert.equal(called, 0, "sin hook sin flag");
+  // P2: el skip ya no es mudo — deja traza con el motivo para el operador.
+  assert.ok(
+    events.some((e) => e.message.startsWith("bot reconcile skipped:")),
+    "skip trazado en el timeline",
+  );
+  workItemStore.clear();
+});
+
+test("wsB P4: el setting persistido habilita la ronda con env ausente", async () => {
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), "wsb-p4-setting-"));
+  const prevDir = process.env.TERMCANVAS_FACTORY_DIR;
+  process.env.TERMCANVAS_FACTORY_DIR = sandbox;
+  try {
+    assert.deepEqual(writeBotReconcileSetting(true), { ok: true, value: true });
+    p3bJob("job-wsb-setting01", {
+      verdict: "READY TO MERGE",
+      publication: "pending",
+      report: P3B_LOCAL,
+    });
+    const fake = botPublishRun();
+    let feedback: unknown = null;
+    const got = await scheduleReviewReportPublish("job-wsb-setting01", {
+      run: fake.run,
+      env: {},
+      waitMs: 60_000,
+      waitForBot: async () => ({
+        status: "found" as const,
+        reviewer: "pullfrog[bot]",
+        findings: [
+          {
+            id: "bot-open-3",
+            source: "pullfrog[bot]",
+            file: "d.ts:1",
+            message: "otro",
+            url: "",
+            createdAt: "2026-09-14T00:00:00Z",
+          },
+        ],
+      }),
+      onBotReconcile: (_id, fb) => {
+        feedback = fb;
+      },
+    });
+    assert.equal(got.mode, "deferred");
+    let events = workItemStore.get("job-wsb-setting01")?.timeline ?? [];
+    for (let i = 0; i < 40 && !events.some((e) => e.message.includes("review report published")); i += 1) {
+      await new Promise((r) => setTimeout(r, 25));
+      events = workItemStore.get("job-wsb-setting01")?.timeline ?? [];
+    }
+    assert.ok(
+      events.some((e) => e.message.startsWith("bot reconcile:")),
+      "setting on → ronda preparada",
+    );
+    assert.ok(feedback !== null, "hook llamado con el feedback del bot");
+    // Traza P3: los findings estructurados viajan en el evento de la sección.
+    assert.ok(
+      events.some(
+        (e) =>
+          !!e.meta &&
+          Array.isArray((e.meta as Record<string, unknown>).botFindings) &&
+          ((e.meta as Record<string, unknown>).botFindings as unknown[]).length > 0,
+      ),
+      "botFindings estructurados persistidos",
+    );
+  } finally {
+    if (prevDir === undefined) delete process.env.TERMCANVAS_FACTORY_DIR;
+    else process.env.TERMCANVAS_FACTORY_DIR = prevDir;
+    try {
+      fs.rmSync(sandbox, { recursive: true, force: true });
+    } catch {}
+    workItemStore.clear();
+  }
+});
+
+// ── WS-C: body sin narrativa de ronda, outcome comportamental, caps en boundary ──
+
+test("wsC: narrativa de ronda del implement no viaja al body", () => {
+  const report = [
+    "Ronda revise 3: no toqué código porque el worktree ya contiene el fix correcto y cualquier corrección reintroduciría el bug.",
+    "",
+    "El guard de escritura ahora conserva el estado en memoria y lo sirve al render.",
+    "",
+    "## Review guidance",
+    "- Empezar por: `js/store.js:48`.",
+  ].join("\n");
+  const body = buildPrBody(151, "bug: write path", { implementReport: report });
+  assert.ok(!body.includes("Ronda revise"), "sin narrativa de ronda");
+  assert.ok(!body.includes("worktree ya contiene"), "sin provenance de worktree");
+  assert.ok(
+    body.includes(
+      "- **Outcome:** El guard de escritura ahora conserva el estado en memoria y lo sirve al render.",
+    ),
+    "el outcome sale del párrafo comportamental",
+  );
+  assert.equal(
+    stripRoundNarrative("Ronda revise 2: no toqué código.\n\nCambio real final."),
+    "Cambio real final.",
+  );
+});
+
+test("wsC: capTextAtBoundary corta en boundary y marca el corte", () => {
+  const long = "palabra ".repeat(40).trim();
+  const capped = capTextAtBoundary(long, 60);
+  assert.ok(capped.endsWith("…"), "marca el corte");
+  assert.ok(!capped.includes(" …"), "sin espacio colgando antes de la elipsis");
+  assert.ok(capped.length <= 61, "cap respetado");
+  assert.equal(capTextAtBoundary("corto", 60), "corto");
+  assert.equal(capTextAtBoundary(null, 60), "");
+  assert.equal(capTextAtBoundary("x", 0), "");
+});
+
+test("wsC: stripRoundNarrative no descarta contenido legítimo", () => {
+  assert.equal(
+    stripRoundNarrative("Round-trip del parser arreglado: el token ya no se pierde."),
+    "Round-trip del parser arreglado: el token ya no se pierde.",
+  );
+  assert.equal(
+    stripRoundNarrative("El stash se aplica despues del commit fallido."),
+    "El stash se aplica despues del commit fallido.",
+  );
+  assert.equal(stripRoundNarrative("Ronda revise 2: no toqué código."), "");
+});
+
+// ── WS-F: unidades de commit ──
+
+test("wsF: extractCommitUnits parsea la sección y descarta paths sucios", () => {
+  const report = [
+    "Intro del cambio.",
+    "",
+    "## Commit units",
+    "- fix: guarda de escritura — `js/store.js`",
+    "- test: regresión del write — `tests/store.write-fail.test.js`, `tests/description.test.js`",
+    "- chore: sin paths",
+  ].join("\n");
+  const units = extractCommitUnits(report);
+  assert.equal(units.length, 2);
+  assert.deepEqual(units[0], {
+    subject: "fix: guarda de escritura",
+    paths: ["js/store.js"],
+  });
+  assert.deepEqual(units[1]?.paths, [
+    "tests/store.write-fail.test.js",
+    "tests/description.test.js",
+  ]);
+  assert.equal(extractCommitUnits("sin sección").length, 0);
+  assert.equal(extractCommitUnits(null).length, 0);
+});
+
+test("wsF: units producen N commits y los sobrantes cierran en chore", async () => {
+  const status = " M src/a.ts\n M tests/a.test.ts\n M docs/x.md\n";
+  const { calls, run } = fakeGit({
+    "git add": { stdout: "" },
+    "git -c": { stdout: "[issue-9-x abc] ok\n" },
+  });
+  const { commitWorktreeChanges } = await import(
+    "../headless-runtime/factory/isolation/gitHubPr.ts"
+  );
+  const got = await commitWorktreeChanges({
+    repoPath: "/r/wt",
+    issueNumber: 9,
+    run,
+    knownStatus: status,
+    units: [
+      { subject: "fix: a", paths: ["src/a.ts"] },
+      { subject: "test: a", paths: ["tests/a.test.ts"] },
+      { subject: "chore: ignorada", paths: ["no/existe.ts"] },
+    ],
+  });
+  assert.deepEqual(got, { ok: true });
+  const subjects = calls
+    .filter((c) => c.args[0] === "-c")
+    .map((c) => {
+      const i = c.args.indexOf("commit");
+      return i >= 0 ? (c.args[i + 2] as string) : "";
+    });
+  assert.deepEqual(
+    subjects,
+    ["fix: a", "test: a", "chore: remaining changes"],
+    "una unidad por commit + sobrantes",
+  );
+  const adds = calls.filter((c) => c.args[0] === "add");
+  assert.deepEqual(adds[0]?.args, ["add", "--", "src/a.ts"]);
+  assert.deepEqual(adds[1]?.args, ["add", "--", "tests/a.test.ts"]);
+  assert.deepEqual(adds[2]?.args, ["add", "--", "docs/x.md"]);
+});
+
+test("wsF: units inválidas caen al commit único legacy", async () => {
+  const { calls, run } = fakeGit({
+    "git add": { stdout: "" },
+    "git -c": { stdout: "[issue-9-x abc] ok\n" },
+  });
+  const { commitWorktreeChanges } = await import(
+    "../headless-runtime/factory/isolation/gitHubPr.ts"
+  );
+  const got = await commitWorktreeChanges({
+    repoPath: "/r/wt",
+    issueNumber: 9,
+    run,
+    knownStatus: " M src/a.ts\n",
+    messageSubject: "fix: a (#9)",
+    units: [{ subject: "", paths: ["src/a.ts"] }],
+  });
+  assert.deepEqual(got, { ok: true });
+  const commits = calls.filter((c) => c.args[0] === "-c");
+  assert.equal(commits.length, 1, "sin unidades válidas: un commit");
+});
+
+// ── WS-2: reconciliación post-bot — PR abierto reutilizado sin cortar commit/push ──
+
+test("ws2: reconcile reutiliza el PR abierto y commitea/pushea el trabajo nuevo", async () => {
+  const { calls, run } = fakeGit({
+    "git rev-list": { stdout: "1\n" },
+    "git status": { stdout: " M js/store.js\n" },
+    "git add": { stdout: "" },
+    "git -c": { stdout: "[issue-9-x abc] fix\n" },
+    "git diff": { stdout: "js/store.js\n" },
+    "git push": { stdout: "" },
+    "gh pr view": {
+      stdout: JSON.stringify({
+        state: "OPEN",
+        number: 9,
+        url: "https://github.com/o/r/pull/9",
+      }),
+    },
+    "gh pr": { stdout: "" },
+  });
+  const { openPrForJob } = await import(
+    "../headless-runtime/factory/isolation/gitHubPr.ts"
+  );
+  const got = await openPrForJob({
+    repoPath: "/r/wt",
+    branch: "issue-9-x",
+    baseBranch: "main",
+    issueNumber: 9,
+    run,
+    reconcile: true,
+    writeBodyFile: () => {},
+    unlinkBodyFile: () => {},
+  });
+  assert.deepEqual(got, {
+    ok: true,
+    prNumber: 9,
+    prUrl: "https://github.com/o/r/pull/9",
+    duplicate: true,
+  });
+  assert.equal(
+    calls.filter((c) => c.args[0] === "-c").length,
+    1,
+    "commitea el trabajo nuevo de la ronda",
+  );
+  assert.equal(calls.filter((c) => c.args[0] === "push").length, 1, "pushea la rama");
+  assert.equal(
+    calls.filter((c) => c.args[0] === "pr" && c.args[1] === "create").length,
+    0,
+    "jamás crea otro PR",
+  );
+});
+
+test("ws2: reconcile con PR mergeado aborta sin pushear ni crear otro PR", async () => {
+  const { calls, run } = fakeGit({
+    "git rev-list": { stdout: "1\n" },
+    "git status": { stdout: " M js/store.js\n" },
+    "gh pr view": {
+      stdout: JSON.stringify({
+        state: "MERGED",
+        number: 9,
+        url: "https://github.com/o/r/pull/9",
+      }),
+    },
+  });
+  const { openPrForJob } = await import(
+    "../headless-runtime/factory/isolation/gitHubPr.ts"
+  );
+  const got = await openPrForJob({
+    repoPath: "/r/wt",
+    branch: "issue-9-x",
+    baseBranch: "main",
+    issueNumber: 9,
+    run,
+    reconcile: true,
+    writeBodyFile: () => {},
+    unlinkBodyFile: () => {},
+  });
+  assert.equal(got.ok, false, "la ronda no puede empujar tras el cierre");
+  assert.ok(!got.ok && got.error.includes("reconciliación abortada"));
+  assert.equal(calls.filter((c) => c.args[0] === "push").length, 0, "sin push");
+  assert.equal(
+    calls.filter((c) => c.args[0] === "pr" && c.args[1] === "create").length,
+    0,
+    "sin PR nuevo",
+  );
+});
+
+test("ws2: sin reconcile el PR abierto corta temprano (sin commit ni push)", async () => {
+  const { calls, run } = fakeGit({
+    "git rev-list": { stdout: "1\n" },
+    "git status": { stdout: " M js/store.js\n" },
+    "gh pr view": {
+      stdout: JSON.stringify({
+        state: "OPEN",
+        number: 9,
+        url: "https://github.com/o/r/pull/9",
+      }),
+    },
+  });
+  const { openPrForJob } = await import(
+    "../headless-runtime/factory/isolation/gitHubPr.ts"
+  );
+  const got = await openPrForJob({
+    repoPath: "/r/wt",
+    branch: "issue-9-x",
+    baseBranch: "main",
+    issueNumber: 9,
+    run,
+    writeBodyFile: () => {},
+    unlinkBodyFile: () => {},
+  });
+  assert.equal(got.ok, true);
+  assert.equal(got.ok && got.duplicate === true, true);
+  assert.equal(calls.filter((c) => c.args[0] === "-c").length, 0, "sin commit");
+  assert.equal(calls.filter((c) => c.args[0] === "push").length, 0, "sin push");
+});
+
+// ── WS-3: feedback del bot para el prompt del run de reconciliación ──
+
+test("ws3: formatBotFindingsForPrompt renumera f1..fn; readBotReconcileFeedback es restart-safe", () => {
+  const feedback = {
+    verdict: "revise",
+    findings: [
+      { message: "stale comment", file: "js/app.js:121" },
+      { message: "copy del banner", file: "index.html:16", suggestion: "cambiar el copy" },
+    ],
+  };
+  const block = formatBotFindingsForPrompt(feedback);
+  assert.ok(block.includes("- f1 (js/app.js:121) — stale comment"));
+  assert.ok(
+    block.includes("- f2 (index.html:16) — copy del banner — Suggested fix: cambiar el copy"),
+  );
+  assert.equal(formatBotFindingsForPrompt(null), "");
+  assert.equal(formatBotFindingsForPrompt({ findings: [] }), "");
+  const timeline = [{ meta: { botReconcile: { feedback, openCount: 2 } } }];
+  assert.deepEqual(readBotReconcileFeedback(timeline), feedback);
+  assert.equal(readBotReconcileFeedback([]), null);
+  assert.equal(readBotReconcileFeedback("junk"), null);
+});
+
+// ── P4: el publisher refleja las disposiciones de la ronda (no todo queda Open) ──
+
+test("p4: un bot finding dispuesto en la ronda queda Dispositioned y no bloquea", async () => {
+  p3bJob("job-p4-disp01", {
+    verdict: "READY TO MERGE",
+    publication: "pending",
+    report: P3B_LOCAL,
+  });
+  workItemStore.appendEvent(
+    "job-p4-disp01",
+    "system",
+    "bot reconcile: 1 open finding(s) prepared for a new revise round (cap 1)",
+    {
+      botReconcile: {
+        feedback: {
+          verdict: "revise",
+          summary: "Bot review sin reconciliar (1 finding).",
+          findings: [{ message: "falta validación", file: "c.ts:9" }],
+        },
+        openCount: 1,
+      },
+    } as unknown as Record<string, unknown>,
+  );
+  workItemStore.appendEvent("job-p4-disp01", "system", "engine: run de reconciliación run-disp", {
+    workflowRunId: "run-disp",
+    botReconcileRun: true,
+  } as unknown as Record<string, unknown>);
+  workItemStore.appendEvent("job-p4-disp01", "runner", "engine implement report", {
+    implementReport: [
+      "Cambio de la ronda.",
+      "",
+      "## Dispositions",
+      "- f1: TRACKED_FOLLOW_UP — issue #99 (seguimiento creado)",
+    ].join("\n"),
+  } as unknown as Record<string, unknown>);
+  const fake = botPublishRun();
+  await scheduleReviewReportPublish("job-p4-disp01", {
+    run: fake.run,
+    env: { TERMCANVAS_BOT_RECONCILE: "0" },
+    waitMs: 60_000,
+    waitForBot: async () => ({
+      status: "found" as const,
+      reviewer: "pullfrog[bot]",
+      findings: [
+        {
+          id: "bot-open-9",
+          source: "pullfrog[bot]",
+          file: "c.ts:9",
+          message: "falta validación",
+          url: "",
+          createdAt: "2026-09-14T00:00:00Z",
+        },
+      ],
+    }),
+  });
+  let events = workItemStore.get("job-p4-disp01")?.timeline ?? [];
+  for (
+    let i = 0;
+    i < 40 && !events.some((e) => e.message.includes("review report published"));
+    i += 1
+  ) {
+    await new Promise((r) => setTimeout(r, 25));
+    events = workItemStore.get("job-p4-disp01")?.timeline ?? [];
+  }
+  const body = fake.bodies.at(-1) ?? "";
+  assert.ok(body.includes("| Dispositioned |"), "el finding dispuesto no queda Open");
+  assert.ok(body.includes("TRACKED_FOLLOW_UP — issue #99"), "la razón de la ronda viaja");
+  assert.match(body, /^readiness: ready$/m, "sin abiertos la readiness vuelve a ready");
+  assert.ok(!body.includes("| Open |"), "sin filas Open");
+  workItemStore.clear();
+});
+
+test("p4-H1: disposiciones del review interno NO aplican a findings del bot sin ronda", async () => {
+  p3bJob("job-p4-noround01", {
+    verdict: "READY TO MERGE",
+    publication: "pending",
+    report: P3B_LOCAL,
+  });
+  workItemStore.appendEvent("job-p4-noround01", "runner", "engine implement report", {
+    implementReport: [
+      "Cambio.",
+      "",
+      "## Dispositions",
+      "- f1: FIXED — arreglé el finding interno del review (nada que ver con el bot)",
+    ].join("\n"),
+  } as unknown as Record<string, unknown>);
+  const fake = botPublishRun();
+  await scheduleReviewReportPublish("job-p4-noround01", {
+    run: fake.run,
+    env: { TERMCANVAS_BOT_RECONCILE: "0" },
+    waitMs: 60_000,
+    waitForBot: async () => ({
+      status: "found" as const,
+      reviewer: "pullfrog[bot]",
+      findings: [
+        {
+          id: "bot-open-1",
+          source: "pullfrog[bot]",
+          file: "c.ts:9",
+          message: "unrelated bot finding",
+          url: "",
+          createdAt: "2026-09-14T00:00:00Z",
+        },
+      ],
+    }),
+  });
+  let events = workItemStore.get("job-p4-noround01")?.timeline ?? [];
+  for (
+    let i = 0;
+    i < 40 && !events.some((e) => e.message.includes("review report published"));
+    i += 1
+  ) {
+    await new Promise((r) => setTimeout(r, 25));
+    events = workItemStore.get("job-p4-noround01")?.timeline ?? [];
+  }
+  const body = fake.bodies.at(-1) ?? "";
+  assert.ok(body.includes("| Open |"), "sin ronda el finding del bot no se dispone");
+  assert.ok(!body.includes("| Dispositioned |"), "sin provenance no hay disposición");
+  assert.match(body, /^readiness: blocked$/m, "sigue bloqueado para el humano");
+  workItemStore.clear();
+});
+
+// ── P6b: boot recovery de publicaciones pendientes ──
+
+test("p6b: resumePendingReviewPublications re-agenda y publica un reporte pendiente", async () => {
+  p3bJob("job-p6-resume01", {
+    verdict: "READY TO MERGE",
+    publication: "pending",
+    report: P3B_LOCAL,
+  });
+  workItemStore.transition("job-p6-resume01", "Foreman", "system", "test setup");
+  workItemStore.transition("job-p6-resume01", "Building", "system", "test setup");
+  workItemStore.transition("job-p6-resume01", "Complete", "system", "test setup");
+  const fake = botPublishRun();
+  const first = await resumePendingReviewPublications({ run: fake.run, env: {}, waitMs: 0 });
+  assert.deepEqual(first, { rescheduled: 1, skipped: 0 });
+  const events = workItemStore.get("job-p6-resume01")?.timeline ?? [];
+  assert.ok(
+    events.some((e) => e.message.includes("review report publish re-scheduled (boot recovery")),
+    "evento de recuperación",
+  );
+  assert.ok(
+    events.some((e) => e.message.includes("review report published")),
+    "publicado en la misma pasada",
+  );
+  const fake2 = botPublishRun();
+  const second = await resumePendingReviewPublications({ run: fake2.run, env: {}, waitMs: 0 });
+  assert.deepEqual(second, { rescheduled: 0, skipped: 1 }, "ya publicado → skip");
+  workItemStore.clear();
+});
+
+test("p6b: no toca jobs que no están Complete", async () => {
+  p3bJob("job-p6-notcomplete01", {
+    verdict: "READY TO MERGE",
+    publication: "pending",
+    report: P3B_LOCAL,
+  });
+  const fake = botPublishRun();
+  const got = await resumePendingReviewPublications({ run: fake.run, env: {}, waitMs: 0 });
+  assert.deepEqual(got, { rescheduled: 0, skipped: 1 });
+  assert.ok(
+    !(workItemStore.get("job-p6-notcomplete01")?.timeline ?? []).some((e) =>
+      e.message.includes("review report published"),
+    ),
+    "sin publish para un job no-Complete",
+  );
+  workItemStore.clear();
+});
+
+test("p6b: no re-publica un reporte con head revisado real distinto de la rama", async () => {
+  p3bJob("job-p6-drift01", {
+    verdict: "READY TO MERGE",
+    publication: "pending",
+    report: buildReviewReport({
+      pr: 0,
+      base: "main",
+      head: "issue-5-x",
+      reviewedHead: "aaaa1111",
+      verdict: "READY TO MERGE",
+      summary: "OK.",
+      findings: [],
+      validation: [],
+      scopes: [],
+    }),
+  });
+  workItemStore.transition("job-p6-drift01", "Foreman", "system", "test setup");
+  workItemStore.transition("job-p6-drift01", "Building", "system", "test setup");
+  workItemStore.transition("job-p6-drift01", "Complete", "system", "test setup");
+  const fake = botPublishRun(); // rev-parse → abc123 ≠ aaaa1111
+  const got = await resumePendingReviewPublications({ run: fake.run, env: {}, waitMs: 0 });
+  assert.deepEqual(got, { rescheduled: 0, skipped: 1 }, "drift detectado");
+  workItemStore.clear();
+});
+
+// ── P3r: boot recovery de rondas post-bot perdidas ──
+
+test("p3r: recovery prepara la ronda desde botFindings y el cap corta al arrancar", async () => {
+  p3bJob("job-p3r-recover01", {
+    verdict: "REVIEW INCOMPLETE",
+    publication: P3B_URL,
+    report: P3B_LOCAL,
+  });
+  workItemStore.appendEvent("job-p3r-recover01", "system", "review report bot section: 1", {
+    reviewReport: { verdict: "REVIEW INCOMPLETE", publication: P3B_URL, report: P3B_LOCAL },
+    botFindings: [
+      { id: "bot-1", status: "open", message: "stale comment misdescribes invariant", file: "js/app.js" },
+    ],
+  } as unknown as Record<string, unknown>);
+  workItemStore.transition("job-p3r-recover01", "Foreman", "system", "test setup");
+  workItemStore.transition("job-p3r-recover01", "Building", "system", "test setup");
+  workItemStore.transition("job-p3r-recover01", "Complete", "system", "test setup");
+  let feedback: unknown = null;
+  const first = await resumeMissedBotReconcileRounds({
+    env: { TERMCANVAS_BOT_RECONCILE: "1" },
+    onBotReconcile: (_id, fb) => {
+      feedback = fb;
+    },
+  });
+  assert.deepEqual(first, { prepared: 1, skipped: 0 });
+  assert.ok(feedback !== null, "hook re-disparado con feedback reconstruido");
+  assert.equal(readBotFindingsFromTimeline(workItemStore.get("job-p3r-recover01")?.timeline).length, 1);
+  let events = workItemStore.get("job-p3r-recover01")?.timeline ?? [];
+  const markers = events.filter(
+    (e) => !!e.meta && !!(e.meta as Record<string, unknown>).botReconcile,
+  );
+  assert.equal(markers.length, 1, "un solo evento de preparación");
+  assert.ok(
+    events.some((e) => e.message.includes("(cap 1, boot recovery)")),
+    "marca de recovery en el evento",
+  );
+  // Start exitoso simulado: el evento del run consume el cap.
+  workItemStore.appendEvent("job-p3r-recover01", "system", "engine: run de reconciliación x", {
+    botReconcileRun: true,
+  } as unknown as Record<string, unknown>);
+  const second = await resumeMissedBotReconcileRounds({
+    env: { TERMCANVAS_BOT_RECONCILE: "1" },
+    onBotReconcile: () => {
+      throw new Error("no debe re-disparar con el cap usado");
+    },
+  });
+  assert.deepEqual(second, { prepared: 0, skipped: 1 });
+  workItemStore.clear();
+});
+
+test("p3r: reportes sin botFindings estructurados se saltean (pre-P3)", async () => {
+  p3bJob("job-p3r-legacy01", {
+    verdict: "REVIEW INCOMPLETE",
+    publication: P3B_URL,
+    report: P3B_LOCAL,
+  });
+  workItemStore.transition("job-p3r-legacy01", "Foreman", "system", "test setup");
+  workItemStore.transition("job-p3r-legacy01", "Building", "system", "test setup");
+  workItemStore.transition("job-p3r-legacy01", "Complete", "system", "test setup");
+  const got = await resumeMissedBotReconcileRounds({
+    env: { TERMCANVAS_BOT_RECONCILE: "1" },
+    onBotReconcile: () => {
+      throw new Error("sin findings no hay ronda");
+    },
+  });
+  assert.deepEqual(got, { prepared: 0, skipped: 1 });
+  workItemStore.clear();
+});
+
+test("p3r: gate off no prepara nada (ni marca skip)", async () => {
+  p3bJob("job-p3r-gateoff01", {
+    verdict: "REVIEW INCOMPLETE",
+    publication: P3B_URL,
+    report: P3B_LOCAL,
+  });
+  workItemStore.appendEvent("job-p3r-gateoff01", "system", "review report bot section: 1", {
+    reviewReport: { verdict: "REVIEW INCOMPLETE", publication: P3B_URL, report: P3B_LOCAL },
+    botFindings: [{ id: "bot-1", status: "open", message: "x", file: "a.ts" }],
+  } as unknown as Record<string, unknown>);
+  workItemStore.transition("job-p3r-gateoff01", "Foreman", "system", "test setup");
+  workItemStore.transition("job-p3r-gateoff01", "Building", "system", "test setup");
+  workItemStore.transition("job-p3r-gateoff01", "Complete", "system", "test setup");
+  const got = await resumeMissedBotReconcileRounds({
+    env: { TERMCANVAS_BOT_RECONCILE: "0" },
+    onBotReconcile: () => {
+      throw new Error("gate off no dispara");
+    },
+  });
+  assert.deepEqual(got, { prepared: 0, skipped: 0 });
+  workItemStore.clear();
+});
+
+test("ws1b: violaciones de integridad dejan evento system sin bloquear el publish", async () => {
+  const noSummary = buildReviewReport({
+    pr: 0,
+    base: "main",
+    head: "issue-5-x",
+    verdict: "READY TO MERGE",
+    summary: "",
+    findings: [],
+    validation: [],
+    scopes: [],
+  });
+  p3bJob("job-ws1b-integrity01", {
+    verdict: "READY TO MERGE",
+    publication: "pending",
+    report: noSummary,
+  });
+  const fake = botPublishRun();
+  const pub = await maybePublishReviewReportForJob("job-ws1b-integrity01", { run: fake.run });
+  assert.deepEqual(pub, { published: true, url: P3B_URL, duplicate: false });
+  const events = workItemStore.get("job-ws1b-integrity01")?.timeline ?? [];
+  assert.ok(
+    events.some((e) => e.message === "review report integrity: placeholder summary"),
+    "el evento system reporta la violación de integridad",
+  );
+  workItemStore.clear();
+});
+
+test("p3b: sin PR target el wait no agenda (publish inmediato degradado)", async () => {
+  try {
+    workItemStore.clear();
+  } catch {}
+  const created = workItemStore.create({ id: "job-p3b-notarget01", prompt: "p", worktree: "C:/tmp" });
+  try {
+    workItemStore.appendEvent(created.id, "runner", "review report: READY TO MERGE (0 open)", {
+      reviewReport: { verdict: "READY TO MERGE", publication: "pending", report: P3B_LOCAL },
+    } as unknown as Record<string, unknown>);
+  } catch {}
+  const got = await scheduleReviewReportPublish("job-p3b-notarget01", {
+    env: { TERMCANVAS_BOT_RECONCILE: "0" },
+    run: async () => ({ stdout: "", stderr: "" }),
+  });
+  assert.equal(got.mode, "immediate");
+  assert.equal(got.outcome?.published, false);
+  assert.equal(got.outcome && "skipped" in got.outcome ? got.outcome.skipped : "", "no-pr-target");
   workItemStore.clear();
 });
 

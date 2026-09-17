@@ -11,11 +11,13 @@ const ID = "job-abc123";
 
 // ── 0. Tabla cerrada: 35 dominios / 36 filas ──
 
-test("tabla cerrada: 50 dominios únicos en 51 filas (build-log comparte dominio)", () => {
-  assert.equal(ROUTE_TABLE.length, 51);
+test("tabla cerrada: 52 dominios únicos en 53 filas (build-log comparte dominio)", () => {
+  assert.equal(ROUTE_TABLE.length, 53);
   const domains = new Set(ROUTE_TABLE.map((r) => r.domain));
-  assert.equal(domains.size, 50);
+  assert.equal(domains.size, 52);
   assert.ok(domains.has("health"));
+  assert.ok(domains.has("settings-get"));
+  assert.ok(domains.has("settings-set"));
   assert.ok(domains.has("job-detail"));
   assert.ok(domains.has("definition-status"));
   assert.ok(domains.has("automations-list"));
@@ -30,6 +32,9 @@ test("tabla cerrada: 50 dominios únicos en 51 filas (build-log comparte dominio
 
 test("exactas: health / scorers / scores-summary / definition-status", () => {
   assert.deepEqual(matchRoute("GET", "/factory/health"), { domain: "health" });
+  assert.deepEqual(matchRoute("GET", "/factory/settings"), { domain: "settings-get" });
+  assert.deepEqual(matchRoute("POST", "/factory/settings"), { domain: "settings-set" });
+  assert.equal(matchRoute("GET", "/factory/settings/extra"), null);
   assert.deepEqual(matchRoute("GET", "/factory/scorers"), { domain: "scorers-list" });
   assert.deepEqual(matchRoute("GET", "/factory/scores/summary"), { domain: "scores-summary" });
   assert.deepEqual(matchRoute("GET", "/factory/definition/status"), { domain: "definition-status" });

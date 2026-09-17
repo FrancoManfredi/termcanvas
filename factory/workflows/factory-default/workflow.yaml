@@ -90,6 +90,11 @@ nodes:
                     file: { type: string }
                     message: { type: string }
                     suggestion: { type: string }
+                    claim: { type: string }
+                    sources:
+                      type: array
+                      items: { type: string }
+                    verification: { type: string }
                     reverify:
                       type: object
                       properties:
@@ -99,4 +104,39 @@ nodes:
                         reason: { type: string }
                       required: [commands, reason]
                   required: [id, severity, message]
+              discoveries:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    id: { type: string }
+                    title: { type: string }
+                    source: { type: string }
+                    relation: { type: string }
+                    status: { type: string }
+                    issue: { type: string }
+                    note: { type: string }
+                  required: [title]
+              coverage:
+                type: object
+                properties:
+                  lenses:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: { type: string }
+                        result: { type: string }
+                      required: [name]
+                  disabled:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        name: { type: string }
+                        reason: { type: string }
+                      required: [name]
+                  unverified:
+                    type: array
+                    items: { type: string }
             required: [green, findings]

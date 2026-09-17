@@ -13,7 +13,7 @@ $INPUTS.issue_body
 $triage.output
 --- FIN TRIAGE ---
 
-Incluí: objetivo, cambios propuestos, archivos afectados y criterios de aceptación verificables.
+Incluí: objetivo, cambios propuestos, archivos afectados y criterios de aceptación verificables. Si el issue usa una frase de comportamiento ("mantiene el estado en memoria", "informa el fallo"), el criterio de aceptación debe citarla TEXTUALMENTE (entre comillas), sin parafrasearla ni agregarle calificativos que la debiliten ("por el throw", "retorna el valor").
 
 Si el triage cierra con `Contract: BLOCKED` o `Contract: NO_ACTION`, no escribas spec: devolvé solo `ESCALATE: <razón del triage>` para que el gate humano decida. Con `NEEDS_CONTRACT_WORK`, convertí la pregunta del triage en `DECISION NEEDED` en vez de asumirla.
 

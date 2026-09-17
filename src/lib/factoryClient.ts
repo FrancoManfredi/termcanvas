@@ -82,8 +82,6 @@ export const FACTORY_INTEGRATION_POST_TIMEOUT_MS = 3000;
 export const FACTORY_INTEGRATION_WEBHOOK_TIMEOUT_MS = 5000;
 export const FACTORY_INTEGRATION_POSTBACK_TIMEOUT_MS = 60000;
 export const FACTORY_DEPENDENCIES_TIMEOUT_MS = 20000;
-/** Install = hasta dos instaladores en cadena (uv, fallback pip): tope largo, a pedido humano. */
-export const FACTORY_DEPENDENCIES_INSTALL_TIMEOUT_MS = 610000;
 export const FACTORY_WORKTREE_DELETE_TIMEOUT_MS = 5000;
 /**
  * Discard = teardown completo (gh pr close + git push --delete + branch -D
@@ -92,6 +90,7 @@ export const FACTORY_WORKTREE_DELETE_TIMEOUT_MS = 5000;
  */
 export const FACTORY_DISCARD_TIMEOUT_MS = 60000;
 export const FACTORY_AGENT_FILE_TIMEOUT_MS = 5000;
+export const FACTORY_SETTINGS_TIMEOUT_MS = 3000;
 export const FACTORY_DEFAULT_TIMEOUT_MS = 3000;
 
 /** Tope del timeout ante `timeoutMs` absurdo (cota C1). */
@@ -3540,7 +3539,8 @@ export async function postFactoryWorkflowSignal(
   }
 }
 
-// ── Dependencies (pr-agent CLI): estado machine-global + install explícito ──
+// ── Dependencies: estado machine-global de herramientas (la integración
+// del revisor externo — Pullfrog — aporta su fila cuando esté configurada) ──
 
 export interface FactoryDependencyTool {
   name: string;
@@ -3613,50 +3613,238 @@ export async function getFactoryDependenciesStatus(
   }
 }
 
-export interface FactoryDependenciesInstall {
-  ok: boolean;
-  method?: string;
-  version?: string | null;
-  log?: string;
-  error?: string;
+// ── GitHub runners (self-hosted): estado + install explícito ──
+// El token de registro viaja solo en el body del POST y el daemon jamás
+// lo devuelve (log transcript redactado). Nunca se guarda en stores.
+
+export interface FactoryRunnerInfo {
+  name: string;
+  os: string;
+  labels: string[];
+  online: boolean;
+  busy: boolean;
+}
+
+export interface FactoryRunnersStatus {
+  local: { dir: string; dirExists: boolean; configured: boolean; services: string[]; supervised: { running: boolean; pid: number | null; restarts: number } | null };
+  remote: { reachable: boolean; runners: FactoryRunnerInfo[] };
+  pinned: { version: string; platform: string; url: string; sha256: string };
+}
+
+function parseRunnerInfo(value: unknown): FactoryRunnerInfo | null {
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const r = value as Record<string, unknown>;
+    if (typeof r.name !== "string" || r.name.length === 0) return null;
+    const labels: string[] = [];
+    if (Array.isArray(r.labels)) {
+      for (const l of r.labels) {
+        if (typeof l === "string") labels.push(l);
+      }
+    }
+    return {
+      name: r.name,
+      os: typeof r.os === "string" ? r.os : "",
+      labels,
+      online: r.online === true,
+      busy: r.busy === true,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function parseRunnersStatus(value: unknown): FactoryRunnersStatus | null {
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const rec = value as Record<string, unknown>;
+    const local = rec.local as Record<string, unknown> | undefined;
+    const remote = rec.remote as Record<string, unknown> | undefined;
+    const pinned = rec.pinned as Record<string, unknown> | undefined;
+    if (!local || !remote || !pinned) return null;
+    const runners: FactoryRunnerInfo[] = [];
+    if (remote && Array.isArray(remote.runners)) {
+      for (const item of remote.runners as unknown[]) {
+        const row = parseRunnerInfo(item);
+        if (row) runners.push(row);
+      }
+    }
+    const services: string[] = [];
+    if (Array.isArray(local.services)) {
+      for (const s of local.services as unknown[]) {
+        if (typeof s === "string") services.push(s);
+      }
+    }
+    let supervised: { running: boolean; pid: number | null; restarts: number } | null = null;
+    try {
+      const sup = local.supervised as Record<string, unknown> | null | undefined;
+      if (sup && typeof sup === "object") {
+        supervised = {
+          running: sup.running === true,
+          pid: typeof sup.pid === "number" ? sup.pid : null,
+          restarts: typeof sup.restarts === "number" ? sup.restarts : 0,
+        };
+      }
+    } catch {
+      supervised = null;
+    }
+    return {
+      local: {
+        dir: typeof local.dir === "string" ? local.dir : "",
+        dirExists: local.dirExists === true,
+        configured: local.configured === true,
+        services,
+        supervised,
+      },
+      remote: { reachable: remote.reachable === true, runners },
+      pinned: {
+        version: typeof pinned.version === "string" ? pinned.version : "",
+        platform: typeof pinned.platform === "string" ? pinned.platform : "",
+        url: typeof pinned.url === "string" ? pinned.url : "",
+        sha256: typeof pinned.sha256 === "string" ? pinned.sha256 : "",
+      },
+    };
+  } catch {
+    return null;
+  }
 }
 
 /**
- * POST /factory/dependencies/pr-agent/install (install explícito a pedido
- * humano; tarda hasta ~4 min). Fallback `{ok: false}`, nunca lanza.
+ * GET /factory/github/runners/status?repo=owner/name&folder=... Fallback
+ * vacío, nunca lanza.
  */
-export async function postFactoryPrAgentInstall(
-  opts: FactoryClientOptions = {},
-): Promise<FactoryResult<FactoryDependenciesInstall>> {
-  const fallback: FactoryDependenciesInstall = { ok: false };
+export async function getFactoryRunnersStatus(
+  opts: FactoryClientOptions & { repo?: string; folder?: string } = {},
+): Promise<FactoryResult<FactoryRunnersStatus>> {
+  const fallback: FactoryRunnersStatus = {
+    local: { dir: "", dirExists: false, configured: false, services: [], supervised: null },
+    remote: { reachable: false, runners: [] },
+    pinned: { version: "", platform: "", url: "", sha256: "" },
+  };
   try {
-    const { port, fetchFn, timeoutMs } = await prepare(opts, FACTORY_DEPENDENCIES_INSTALL_TIMEOUT_MS);
+    const { port, fetchFn, timeoutMs } = await prepare(opts, FACTORY_DEPENDENCIES_TIMEOUT_MS);
     if (port === null || fetchFn === null) return unavailable(fallback);
-    const url = factoryUrl(port, "/factory/dependencies/pr-agent/install");
+    const params = new URLSearchParams();
+    if (opts.repo) params.set("repo", opts.repo);
+    if (opts.folder) params.set("folder", opts.folder);
+    const qs = params.toString();
+    const url = factoryUrl(port, `/factory/github/runners/status${qs.length > 0 ? `?${qs}` : ""}`);
     if (!url) return unavailable(fallback);
-    const label = "POST /factory/dependencies/pr-agent/install";
-    const raw = await requestRaw(url, postJsonInit({}), fetchFn, timeoutMs, label);
+    const label = "GET /factory/github/runners/status";
+    const raw = await requestRaw(url, {}, fetchFn, timeoutMs, label);
     if (raw.transportError !== null || !isHttpOk(raw.status)) {
       if (raw.transportError !== null) return transportFail(fallback, raw.transportError);
       return httpFail(raw.status as number, fallback, raw.json, label);
     }
-    const rec = asRecord(raw.json) ?? {};
-    return {
-      ok: true,
-      status: raw.status as number,
-      data: {
-        ok: rec.ok === true,
-        method: typeof rec.method === "string" ? rec.method : undefined,
-        version: typeof rec.version === "string" ? rec.version : null,
-        log: typeof rec.log === "string" ? rec.log : undefined,
-        error: typeof rec.error === "string" ? rec.error : undefined,
-      },
-    };
+    const data = parseRunnersStatus(raw.json) ?? fallback;
+    return { ok: true, status: raw.status as number, data };
   } catch (e) {
     return {
       ok: false,
       status: null,
       data: fallback,
+      error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+    };
+  }
+}
+
+// ── Settings del daemon (bot reconcile) ──
+
+export type FactorySettingsSource = "env" | "setting" | "default";
+
+export interface FactorySettingsGate {
+  enabled: boolean;
+  source: FactorySettingsSource;
+}
+
+export interface FactorySettings {
+  botReconcile: boolean;
+  gate: FactorySettingsGate;
+  envOverride: "1" | "0" | null;
+}
+
+/** Forma `{settings, gate, envOverride}` de /factory/settings. Nunca lanza. */
+function parseSettingsBody(json: unknown): FactorySettings | null {
+  try {
+    const rec = asRecord(json);
+    const settings = asRecord(rec?.settings);
+    if (!rec || !settings) return null;
+    const gateRec = asRecord(rec.gate);
+    const source = gateRec?.source;
+    return {
+      botReconcile: settings.botReconcile === true,
+      gate: {
+        enabled: gateRec?.enabled === true,
+        source: source === "env" || source === "setting" ? source : "default",
+      },
+      envOverride: rec.envOverride === "1" || rec.envOverride === "0" ? rec.envOverride : null,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * GET /factory/settings (setting persistido + gate efectivo). Fallback
+ * `null`, nunca lanza.
+ */
+export async function getFactorySettings(
+  opts: FactoryClientOptions = {},
+): Promise<FactoryResult<FactorySettings | null>> {
+  try {
+    const { port, fetchFn, timeoutMs } = await prepare(opts, FACTORY_SETTINGS_TIMEOUT_MS);
+    if (port === null || fetchFn === null) return unavailable(null);
+    const url = factoryUrl(port, "/factory/settings");
+    if (!url) return unavailable(null);
+    const label = "GET /factory/settings";
+    const raw = await requestRaw(url, {}, fetchFn, timeoutMs, label);
+    if (raw.transportError !== null || !isHttpOk(raw.status)) {
+      if (raw.transportError !== null) return transportFail(null, raw.transportError);
+      return httpFail(raw.status as number, null, raw.json, label);
+    }
+    const parsed = parseSettingsBody(raw.json);
+    if (!parsed) return badShape(raw.status as number, null, label);
+    return { ok: true, status: raw.status as number, data: parsed };
+  } catch (e) {
+    return {
+      ok: false,
+      status: null,
+      data: null,
+      error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+    };
+  }
+}
+
+/**
+ * POST /factory/settings (body `{botReconcile}`). Validación local
+ * fail-closed (sin red ante body inválido). Fallback `null`, nunca lanza.
+ */
+export async function postFactorySettings(
+  botReconcile: unknown,
+  opts: FactoryClientOptions = {},
+): Promise<FactoryResult<FactorySettings | null>> {
+  try {
+    if (typeof botReconcile !== "boolean") {
+      return { ok: false, status: null, data: null, error: "botReconcile must be a boolean" };
+    }
+    const { port, fetchFn, timeoutMs } = await prepare(opts, FACTORY_SETTINGS_TIMEOUT_MS);
+    if (port === null || fetchFn === null) return unavailable(null);
+    const url = factoryUrl(port, "/factory/settings");
+    if (!url) return unavailable(null);
+    const label = "POST /factory/settings";
+    const raw = await requestRaw(url, postJsonInit({ botReconcile }), fetchFn, timeoutMs, label);
+    if (raw.transportError !== null || !isHttpOk(raw.status)) {
+      if (raw.transportError !== null) return transportFail(null, raw.transportError);
+      return httpFail(raw.status as number, null, raw.json, label);
+    }
+    const parsed = parseSettingsBody(raw.json);
+    if (!parsed) return badShape(raw.status as number, null, label);
+    return { ok: true, status: raw.status as number, data: parsed };
+  } catch (e) {
+    return {
+      ok: false,
+      status: null,
+      data: null,
       error: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
     };
   }

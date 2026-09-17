@@ -381,6 +381,12 @@ export const en = {
   quit_on_last_window_closed_toggle: "Quit when last window closes",
   quit_on_last_window_closed_toggle_desc:
     "Off by default — TermCanvas stays in the dock when the last window closes, click the dock icon to open a new one. Turn on to quit instead.",
+  bot_reconcile_label: "Bot reconcile round",
+  bot_reconcile_desc:
+    "Automatically re-runs the fix workflow when the external bot leaves open findings on a PR. Persists across restarts; the TERMCANVAS_BOT_RECONCILE env var overrides it.",
+  bot_reconcile_env_override:
+    "The TERMCANVAS_BOT_RECONCILE environment variable is forcing this value; the persisted setting has no effect while it is set.",
+  bot_reconcile_update_failed: "Failed to update bot reconcile setting",
   summary_toggle: "Terminal auto-summary",
   summary_toggle_desc:
     "Experimental. AI-generated one-line summaries for CLI terminals. May increase token usage.",

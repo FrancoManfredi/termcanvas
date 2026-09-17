@@ -113,7 +113,7 @@ export const ReviewResultSchema = z.object({
   reviewerModel: ReviewerModelSchema,
   verdict: ReviewVerdictSchema,
   confidence: z.number().min(0).max(1),
-  summary: z.string().min(1).max(2000),
+  summary: z.string().min(1).max(20000),
   findings: z.array(ReviewFindingSchema),
   reviewAttempt: z.number().int().min(1),
   reviewedAt: z.string().min(1),

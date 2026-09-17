@@ -267,6 +267,38 @@ test("F1 snapshot salud: pendiente y corriendo, uptime, buildId y puertos (cero 
   assert.equal(payload.opencode.url, "http://127.0.0.1:39999");
   assert.equal(payload.opencode.status, "healthy");
   assert.ok(!Number.isNaN(Date.parse(payload.ts)));
+  // P1: el gate post-bot viaja en salud (ausente → unknown honesto; presente → tal cual).
+  assert.deepEqual(payload.botReconcile, { enabled: false, source: "unknown" });
+  const gated = domainBuildHealth({
+    pending: 0,
+    running: 0,
+    uptime: 1,
+    buildId: "b",
+    version: "local",
+    startedAt: Date.now(),
+    factoryPort: 17777,
+    opencodeUrl: "",
+    opencodeStatus: "not_started",
+    opencodePort: null,
+    opencodeUptime: 0,
+    botReconcile: { enabled: true, source: "setting" },
+  });
+  assert.deepEqual(gated.botReconcile, { enabled: true, source: "setting" });
+  const junkGate = domainBuildHealth({
+    pending: 0,
+    running: 0,
+    uptime: 1,
+    buildId: "b",
+    version: "local",
+    startedAt: Date.now(),
+    factoryPort: 17777,
+    opencodeUrl: "",
+    opencodeStatus: "not_started",
+    opencodePort: null,
+    opencodeUptime: 0,
+    botReconcile: "on",
+  });
+  assert.deepEqual(junkGate.botReconcile, { enabled: false, source: "unknown" });
 });
 
 test("F2 snapshot minimo: pendiente y corriendo mas uptime (forma intacta)", () => {

@@ -43,9 +43,9 @@ function samplePath(template: string): string {
 
 // ── 1. Las 44 filas delegan (canónica + alias) ──
 
-test("TC-1 tabla cerrada: 51 filas / 50 dominios (base del dispatch)", () => {
-  assert.equal(ROUTE_TABLE.length, 51);
-  assert.equal(new Set(ROUTE_TABLE.map((r) => r.domain)).size, 50);
+test("TC-1 tabla cerrada: 53 filas / 52 dominios (base del dispatch)", () => {
+  assert.equal(ROUTE_TABLE.length, 53);
+  assert.equal(new Set(ROUTE_TABLE.map((r) => r.domain)).size, 52);
 });
 
 test("TC-2 loop delega cada fila canónica al dominio de la fila", () => {
@@ -65,14 +65,14 @@ test("TC-3 loop delega los alias duales al mismo dominio", () => {
 
 // ── 2. El switch cubre todos los dominios ──
 
-test("TC-4 switch con un case por dominio (50 casos + default)", () => {
+test("TC-4 switch con un case por dominio (52 casos + default)", () => {
   const domains = new Set(ROUTE_TABLE.map((r) => r.domain));
-  assert.equal(domains.size, 50);
+  assert.equal(domains.size, 52);
   for (const domain of domains) {
     assert.ok(SERVER_SRC.includes(`case "${domain}":`), `switch delega ${domain}`);
   }
   const cases = SERVER_SRC.match(/case "/g) ?? [];
-  assert.equal(cases.length, 50, `50 casos exactos, hallados ${cases.length}`);
+  assert.equal(cases.length, 52, `52 casos exactos, hallados ${cases.length}`);
   assert.ok(SERVER_SRC.includes("default: break;"), "default defensivo (C2)");
 });
 
@@ -131,8 +131,9 @@ test("TC-10 pares de confusión resuelven al dominio propio", () => {
   assert.equal(matchRoute("GET", `/work-items/${TEST_ID}/review/stale`)?.domain, "job-review-stale");
   assert.equal(matchRoute("POST", `/factory/jobs/${TEST_ID}/review/stale`), null);
   assert.equal(matchRoute("GET", "/factory/dependencies/status")?.domain, "dependencies-status");
-  assert.equal(matchRoute("POST", "/factory/dependencies/pr-agent/install")?.domain, "dependencies-install");
   assert.equal(matchRoute("GET", "/factory/dependencies/pr-agent/install"), null);
+  assert.equal(matchRoute("GET", "/factory/github/runners/status")?.domain, "github-runners-status");
+  assert.equal(matchRoute("POST", "/factory/github/runners/status"), null);
   assert.equal(matchRoute("POST", "/factory/dependencies/status"), null);
   assert.equal(matchRoute("GET", `/factory/jobs/${TEST_ID}/review/raw`)?.domain, "job-review-raw");
   assert.equal(matchRoute("GET", `/factory/jobs/${TEST_ID}/scores`)?.domain, "job-scores-get");
@@ -151,6 +152,8 @@ test("TC-10 pares de confusión resuelven al dominio propio", () => {
 
 const DOMAIN_OPS: ReadonlyArray<readonly [RouteDomain, string]> = [
   ["health", "buildHealthPayloadE2("],
+  ["settings-get", "handleSettingsGetRoute("],
+  ["settings-set", "handleSettingsSetRoute("],
   ["jobs-list", "applyDashboardUrlsTA("],
   ["foreman-logs", "foremanLogStore.list("],
   ["jobs-create", "createJobRequestT2("],
@@ -163,7 +166,7 @@ const DOMAIN_OPS: ReadonlyArray<readonly [RouteDomain, string]> = [
   ["job-review-raw", "readReviewRawById("],
   ["job-review-stale", "checkReviewStale("],
   ["dependencies-status", "getDependenciesStatus("],
-  ["dependencies-install", "installPrAgent("],
+  ["github-runners-status", "getRunnersStatus("],
   ["job-review-accept", "acceptReviewEqual("],
   ["job-review-retry", "requestReviewRetryToBuilding("],
   ["job-review-retry-review", "requestReviewRetryOnly("],
@@ -205,8 +208,8 @@ const RETIRED_LEGACY_OPS: Readonly<Record<string, string>> = {
   "job-review-rerun": "review rerun legacy retirado",
 };
 
-test("TC-11 cada dominio responde por su operación (41 formas intactas)", () => {
-  assert.equal(DOMAIN_OPS.length, 41);
+test("TC-11 cada dominio responde por su operación (43 formas intactas)", () => {
+  assert.equal(DOMAIN_OPS.length, 43);
   for (const [domain, op] of DOMAIN_OPS) {
     const expected = RETIRED_LEGACY_OPS[domain] ?? op;
     assert.ok(SERVER_SRC.includes(expected), `${domain} responde por ${expected}`);

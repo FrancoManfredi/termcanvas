@@ -28,12 +28,26 @@ import {
 import { notify } from "../notify/notifications";
 import { writeVerifyJsonAtomic } from "../implement/verifyEvidence";
 import { writeReviewJsonAtomic } from "../review/reviewDisk";
-import { extractDispositions } from "./isolation/isolationStore";
+import { extractDispositions, extractReportSection } from "./isolation/isolationStore";
+import {
+  formatBotFindingsForPrompt,
+  hasBotReconcileEvent,
+  hasBotReconcileRunEvent,
+  readBotReconcileFeedback,
+  resolveBotReconcilePolicy,
+} from "./isolation/gitHubPr";
 import {
   buildReviewReport,
   curateSummary,
   hasOpenBlockingFindings,
+  hasUndispositionedOpenFindings,
   parseReviewReportMeta,
+  parseScopeContract,
+} from "../review/reviewReport";
+import type {
+  CanonicalCoverageInput,
+  CanonicalDiscoveryInput,
+  CanonicalFindingInput,
 } from "../review/reviewReport";
 import type { WorkflowRuntime } from "../workflows/runtime";
 import type { WorkflowEvent, WorkflowRun } from "../workflows/types";
@@ -278,6 +292,235 @@ function renderVerifyLog(
   return `${redactSecrets(lines.join("\n"))}\n`;
 }
 
+/** Frozen-scope candidates inside the job worktree (review aids, never committed). */
+const SCOPE_MD_CANDIDATES: readonly string[] = ["artifacts/scope.md", "scope.md"];
+
+/** Reads the frozen scope.md from the worktree and parses its contract. Never throws. */
+function readScopeContractFromWorktree(
+  worktreePath: unknown,
+): ReturnType<typeof parseScopeContract> {
+  try {
+    if (typeof worktreePath !== "string" || worktreePath.trim() === "") return null;
+    const parsed = SCOPE_MD_CANDIDATES.map((rel) => {
+      try {
+        const abs = path.join(worktreePath, rel);
+        if (!fs.existsSync(abs)) return null;
+        return parseScopeContract(fs.readFileSync(abs, "utf-8").slice(0, 40_000));
+      } catch {
+        return null;
+      }
+    }).find((candidate) => candidate !== null);
+    return parsed ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Discoveries of the round: structured `reviewJson.discoveries` first,
+ * else the implement report's discoveries/follow-ups section bullets
+ * (stable `D<n>` ids). Never throws.
+ */
+function collectDiscoveries(
+  reviewJson: unknown,
+  implReport: string,
+): CanonicalDiscoveryInput[] {
+  try {
+    const fromReview =
+      reviewJson && typeof reviewJson === "object" && !Array.isArray(reviewJson)
+        ? (reviewJson as Record<string, unknown>).discoveries
+        : undefined;
+    if (Array.isArray(fromReview) && fromReview.length > 0) {
+      return fromReview
+        .filter((d): d is Record<string, unknown> => !!d && typeof d === "object" && !Array.isArray(d))
+        .slice(0, 20);
+    }
+    const section =
+      implReport !== ""
+        ? extractReportSection(implReport, ["discoveries", "follow-ups", "follow-up", "descubrimientos"])
+        : "";
+    if (section === "") return [];
+    return section
+      .split("\n")
+      .map((line) => line.match(/^\s*[-*]\s+(.+)$/)?.[1]?.trim() ?? "")
+      .filter((title) => title.length >= 8)
+      // Un "no hay discoveries" explícito no es una discovery (con la puerta
+      // WS-D bloquearía para siempre al agente que reporta honestamente).
+      .filter(
+        (title) =>
+          !/^(ninguno|ninguna|ningún|ningun|none|nada|sin descubrimientos|no hay)\b/i.test(title),
+      )
+      .slice(0, 20)
+      .map((title, idx) => {
+        // Forma estructurada del prompt: `Dn — <título> — accepted|dropped: razón`.
+        const m = title.match(
+          /^(?:D\d+\s*[—–:-]\s*)?(.*?)\s*[—–]\s*(accepted|dropped)\s*:\s*(.*)$/i,
+        );
+        const cleanTitle = (m ? (m[1] ?? "") : title).trim();
+        const status = m ? (m[2] ?? "").toLowerCase() : "recorded";
+        const reason = m ? (m[3] ?? "").trim() : "";
+        // `accepted: issue #163 creado` → el número viaja a la puerta WS-D.
+        const issueMatch = reason.match(/#(\d+)/);
+        const issue = issueMatch ? Number.parseInt(issueMatch[1] as string, 10) : undefined;
+        return {
+          id: `D${idx + 1}`,
+          title: (cleanTitle !== "" ? cleanTitle : title).slice(0, 200),
+          source: "implement report",
+          relation: "adjacent",
+          status,
+          ...(issue !== undefined && Number.isInteger(issue) ? { issue } : {}),
+          note: reason.length > 0 ? reason.slice(0, 300) : "surface to your human before dropping",
+        };
+      });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * WS4: contract coverage entries of the round (`reviewJson.contractCoverage`),
+ * one per issue requirement (Rq<n>) with the frozen-scope `R<n>` that preserves
+ * it. Returns `null` when the field is absent or not an array (legacy runs:
+ * the gate fails open); entries are plain objects only. Never throws.
+ */
+function collectContractCoverage(reviewJson: unknown): Record<string, unknown>[] | null {
+  try {
+    if (!reviewJson || typeof reviewJson !== "object" || Array.isArray(reviewJson)) {
+      return null;
+    }
+    const raw = (reviewJson as Record<string, unknown>).contractCoverage;
+    if (!Array.isArray(raw)) return null;
+    return raw
+      .filter(
+        (entry): entry is Record<string, unknown> =>
+          !!entry && typeof entry === "object" && !Array.isArray(entry),
+      )
+      .slice(0, 50);
+  } catch {
+    return null;
+  }
+}
+
+/** WS4: normalized coverage status (lowercase); blank/junk falls back to `missing`. */
+function contractCoverageStatus(v: unknown): string {
+  try {
+    const s = typeof v === "string" ? v.trim().toLowerCase() : "";
+    return s !== "" ? s : "missing";
+  } catch {
+    return "missing";
+  }
+}
+
+/** Writes `discoveries.json` + `discoveries.md` next to the review artifacts. Best-effort. */
+function persistDiscoveries(dir: string, discoveries: CanonicalDiscoveryInput[]): void {
+  if (discoveries.length === 0) return;
+  try {
+    const json = discoveries.map((d, idx) => ({
+      id: typeof d.id === "string" && d.id !== "" ? d.id : `D${idx + 1}`,
+      title: typeof d.title === "string" ? d.title.slice(0, 300) : "",
+      source: typeof d.source === "string" ? d.source.slice(0, 120) : "",
+      relation: typeof d.relation === "string" ? d.relation.slice(0, 60) : "adjacent",
+      status: typeof d.status === "string" ? d.status.slice(0, 60) : "recorded",
+      issue: typeof d.issue === "string" ? d.issue.slice(0, 80) : null,
+      note: typeof d.note === "string" ? d.note.slice(0, 300) : "",
+    }));
+    fs.writeFileSync(path.join(dir, "discoveries.json"), `${JSON.stringify(json, null, 2)}\n`, "utf-8");
+    fs.writeFileSync(
+      path.join(dir, "discoveries.md"),
+      [
+        "# Discoveries",
+        "",
+        "Validated findings outside the reviewed scope. Surface each one to your human",
+        "before dropping it; accepted ones become small follow-up issues.",
+        "",
+        ...json.map((d) => `- \`${d.id}\` — ${d.title} (${d.relation})`),
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+  } catch {
+    // artefacto best-effort: el reporte sigue siendo la fuente
+  }
+}
+
+interface ReviewRoundEntry {
+  round: number;
+  runId: string;
+  verdict: string;
+  findings: CanonicalFindingInput[];
+  createdAt: string;
+}
+
+/**
+ * Round bookkeeping for the job (continuation reviews): reads the prior
+ * entry from `review-rounds.json` and returns the round number for this
+ * mirror pass. A re-mirror of the same `runId` keeps its round. Never throws.
+ */
+function readRoundState(
+  dir: string,
+  runId: string,
+): { round: number; prior: ReviewRoundEntry | null } {
+  try {
+    const file = path.join(dir, "review-rounds.json");
+    if (!fs.existsSync(file)) return { round: 1, prior: null };
+    const parsed: unknown = JSON.parse(fs.readFileSync(file, "utf-8"));
+    if (!Array.isArray(parsed) || parsed.length === 0) return { round: 1, prior: null };
+    const entries = parsed
+      .filter(
+        (e): e is ReviewRoundEntry =>
+          !!e && typeof e === "object" && !Array.isArray(e) &&
+          typeof (e as { round?: unknown }).round === "number",
+      )
+      .slice(-20);
+    if (entries.length === 0) return { round: 1, prior: null };
+    const last = entries[entries.length - 1] as ReviewRoundEntry;
+    if (last.runId === runId) return { round: last.round, prior: entries[entries.length - 2] ?? null };
+    return { round: last.round + 1, prior: last };
+  } catch {
+    return { round: 1, prior: null };
+  }
+}
+
+/** Appends (or replaces, same run) the round entry. Best-effort. */
+function appendRoundEntry(dir: string, entry: ReviewRoundEntry): void {
+  try {
+    const file = path.join(dir, "review-rounds.json");
+    let list: unknown[] = [];
+    try {
+      const parsed: unknown = fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf-8")) : [];
+      if (Array.isArray(parsed)) list = parsed;
+    } catch {
+      list = [];
+    }
+    const withoutRun = list.filter(
+      (e) => !(e && typeof e === "object" && (e as { runId?: unknown }).runId === entry.runId),
+    );
+    withoutRun.push(entry);
+    fs.writeFileSync(file, `${JSON.stringify(withoutRun.slice(-20), null, 2)}\n`, "utf-8");
+  } catch {
+    // sidecar best-effort
+  }
+}
+
+/**
+ * Copies the previous `review-report.md` to `review-report-round-<n>.md`
+ * before the current round overwrites it (review aid, never committed).
+ * Returns the prior report filename when a continuation exists. Never throws.
+ */
+function rotatePriorReport(dir: string, round: number): string | undefined {
+  try {
+    if (round <= 1) return undefined;
+    const current = path.join(dir, "review-report.md");
+    if (!fs.existsSync(current)) return undefined;
+    const priorName = `review-report-round-${round - 1}.md`;
+    const priorPath = path.join(dir, priorName);
+    if (!fs.existsSync(priorPath)) fs.copyFileSync(current, priorPath);
+    return priorName;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Espeja la evidencia del run a la carpeta del job para que VerificationPanel
  * y ReviewPanel rendericen datos reales en vez de fallbacks:
@@ -305,7 +548,14 @@ export function mirrorRunEvidence(itemId: string, run: WorkflowRun | null): void
     const reviewNode = pick(/review|revis/i);
     const verificationText = (verifyNode?.output ?? "").trim();
     const reviewJson = reviewNode?.outputJson as
-      | { green?: unknown; summary?: unknown; findings?: unknown }
+      | {
+          green?: unknown;
+          summary?: unknown;
+          findings?: unknown;
+          discoveries?: unknown;
+          coverage?: unknown;
+          contractCoverage?: unknown;
+        }
       | undefined;
     // Veredicto estructurado primero (Fix D): el campo `summary` del
     // review es lo que lee el humano; la prosa cruda solo como fallback.
@@ -497,13 +747,15 @@ export function mirrorRunEvidence(itemId: string, run: WorkflowRun | null): void
       // Sin PR todavía: `pr: 0, publication: pending`; el publish (P3b)
       // lo refresca con número/head/URL reales. Best-effort.
       try {
-        const iso = (item as unknown as { isolation?: { branch?: unknown; baseBranch?: unknown } })?.isolation;
+        const iso = (item as unknown as {
+          isolation?: { branch?: unknown; baseBranch?: unknown; worktreePath?: unknown };
+        })?.isolation;
         const rawFindings = Array.isArray(reviewJson?.findings) ? reviewJson.findings : [];
         const dispositions = implReport !== "" ? extractDispositions(implReport) : [];
         const dispById = new Map(dispositions.map((d) => [d.id, d]));
-        const engineFindings = rawFindings
+        const engineFindings: Record<string, unknown>[] = rawFindings
           .filter((e): e is Record<string, unknown> => !!e && typeof e === "object" && !Array.isArray(e))
-          .map((e) => {
+          .map((e): Record<string, unknown> => {
             const idRaw = typeof e.id === "string" && e.id.trim() !== "" ? e.id.trim().toLowerCase() : "";
             const disp = idRaw !== "" ? dispById.get(idRaw) : undefined;
             return {
@@ -553,15 +805,142 @@ export function mirrorRunEvidence(itemId: string, run: WorkflowRun | null): void
             const name = typeof s.name === "string" ? s.name : "";
             return /^node --check\b/.test(cmd) || /^syntax\b/.test(name);
           });
+        // Contrato congelado (scope.md), discoveries y ronda: el reporte
+        // refleja el contrato aceptado y la continuidad entre rondas.
+        const contract = readScopeContractFromWorktree(
+          iso && typeof iso.worktreePath === "string"
+            ? iso.worktreePath
+            : (item as unknown as { worktree?: unknown })?.worktree,
+        );
+        const discoveries = collectDiscoveries(reviewJson, implReport);
+        persistDiscoveries(dir, discoveries);
+        // WS4: coverage requisito→contrato. Ausente o no-array = legacy (el
+        // gate fail-open); presente, cualquier status != `covered` bloquea READY.
+        const contractCoverage = collectContractCoverage(reviewJson);
+        const uncovered = (contractCoverage ?? []).filter(
+          (entry) => contractCoverageStatus(entry.status) !== "covered",
+        );
+        const roundState = readRoundState(dir, typeof run.id === "string" ? run.id : "");
+        const priorReportName = rotatePriorReport(dir, roundState.round);
+        const priorFindings: CanonicalFindingInput[] = (roundState.prior?.findings ?? []).map(
+          (f) => {
+            try {
+              const id =
+                typeof (f as { id?: unknown }).id === "string"
+                  ? ((f as { id: string }).id).toLowerCase()
+                  : "";
+              const current =
+                id !== ""
+                  ? engineFindings.find(
+                      (e) => typeof e.id === "string" && e.id.toLowerCase() === id,
+                    )
+                  : undefined;
+              if (current) {
+                return {
+                  ...f,
+                  state: typeof current.state === "string" ? current.state : "OPEN",
+                  verification:
+                    typeof current.verification === "string" && current.verification !== ""
+                      ? current.verification
+                      : typeof current.file === "string"
+                        ? current.file
+                        : "",
+                } as CanonicalFindingInput;
+              }
+              const disp = id !== "" ? dispById.get(id) : undefined;
+              if (disp) {
+                return {
+                  ...f,
+                  state: disp.disposition,
+                  dispositionReason: disp.reason,
+                  verification:
+                    typeof (f as { file?: unknown }).file === "string"
+                      ? (f as { file: string }).file
+                      : "",
+                } as CanonicalFindingInput;
+              }
+              return {
+                ...f,
+                state: "OPEN",
+                verification: "not re-reported at this head",
+              } as CanonicalFindingInput;
+            } catch {
+              return f;
+            }
+          },
+        );
+        // WS3/WS4: los motivos de bloqueo viajan al reporte como blockers de
+        // readiness, un renglón por causa (finding sin disposición, requisito
+        // no cubierto por el contrato).
+        // WS-D: una discovery sin disposición terminal (accepted+issue o
+        // dropped+razón) bloquea igual que un finding sin disponer: sin esto
+        // "Ninguno / Not tracked" convivía con verde (caso PR #162).
+        const untrackedDiscoveries = discoveries.filter((d) => {
+          try {
+            const status = typeof d.status === "string" ? d.status.trim().toLowerCase() : "";
+            const note = typeof d.note === "string" ? d.note.trim() : "";
+            const hasReason =
+              note !== "" && !/^surface to your human before dropping$/i.test(note);
+            if (status === "dropped") return !hasReason;
+            if (status === "accepted") {
+              const raw =
+                typeof d.issue === "number"
+                  ? d.issue
+                  : Number.parseInt(String(d.issue ?? "").replace(/^#/, ""), 10);
+              return !(Number.isInteger(raw) && raw > 0);
+            }
+            return true;
+          } catch {
+            return true;
+          }
+        });
+        const extraBlockers: string[] = [
+          ...(green && hasUndispositionedOpenFindings(engineFindings)
+            ? engineFindings
+                .filter((finding) => hasUndispositionedOpenFindings([finding]))
+                .map((finding) => {
+                  const id =
+                    typeof finding.id === "string" && finding.id.trim() !== ""
+                      ? finding.id.trim()
+                      : "?";
+                  return `finding \`${id}\` open without disposition (TRACKED_FOLLOW_UP/DECLINED)`;
+                })
+            : []),
+          ...untrackedDiscoveries.map((d) => {
+            const id = typeof d.id === "string" && d.id.trim() !== "" ? d.id.trim() : "?";
+            const status =
+              typeof d.status === "string" && d.status.trim() !== ""
+                ? d.status.trim()
+                : "missing";
+            return `discovery \`${id}\` untracked (${status}: needs accepted+issue or dropped+reason)`;
+          }),
+          ...uncovered.map((entry) => {
+            const requirement =
+              typeof entry.requirement === "string"
+                ? entry.requirement.replace(/\s+/g, " ").trim().slice(0, 80)
+                : "";
+            return `requirement \`${requirement}\` not covered (${contractCoverageStatus(entry.status)})`;
+          }),
+        ];
         const canonical = buildReviewReport({
           pr: 0,
           base: typeof iso?.baseBranch === "string" && iso.baseBranch !== "" ? iso.baseBranch : "(unknown)",
           head: typeof iso?.branch === "string" && iso.branch !== "" ? iso.branch : "(unknown)",
           // Gate: un major/blocker abierto contradice el verde del agente
-          // (caso PR #156: READY con open_findings:1). El loop sigue al
-          // green del agente; el veredicto canónico no miente.
+          // (caso PR #156: READY con open_findings:1). WS3: tampoco alcanza
+          // el verde si queda algún finding —info/minor incluido— sin
+          // disposición terminal (caso PR #160: READY con 2 abiertos). WS4:
+          // ni si el contrato debilita un requisito del issue (status !=
+          // `covered`; caso scope.md rewordeado y review "Cumple el issue").
+          // WS-D: ni si una discovery quedó sin disposición (accepted+issue o
+          // dropped+razón; caso PR #162 "Ninguno / Not tracked").
+          // El loop sigue al green del agente; el veredicto canónico no miente.
           verdict:
-            green && !hasOpenBlockingFindings(engineFindings)
+            green &&
+            !hasOpenBlockingFindings(engineFindings) &&
+            !hasUndispositionedOpenFindings(engineFindings) &&
+            uncovered.length === 0 &&
+            untrackedDiscoveries.length === 0
               ? "READY TO MERGE"
               : "NEEDS FIXES",
           summary:
@@ -574,6 +953,17 @@ export function mirrorRunEvidence(itemId: string, run: WorkflowRun | null): void
           ...(syntaxOnly ? { validationNote: "syntax only (no test runner in target repo)" } : {}),
           scopes: ["requirements", "tests", "security"],
           reviewer: "workflow-engine",
+          mode: roundState.round > 1 ? "continuation" : "initial",
+          round: roundState.round,
+          ...(priorReportName ? { priorReport: priorReportName } : {}),
+          ...(contract ? { contract } : {}),
+          ...(priorFindings.length > 0 ? { priorFindings } : {}),
+          ...(discoveries.length > 0 ? { discoveries } : {}),
+          ...(extraBlockers.length > 0 ? { extraBlockers } : {}),
+          ...(contractCoverage !== null ? { contractCoverage } : {}),
+          ...(reviewJson?.coverage
+            ? { coverage: reviewJson.coverage as CanonicalCoverageInput }
+            : {}),
         });
         try {
           fs.writeFileSync(path.join(dir, "review-report.md"), canonical, "utf-8");
@@ -592,6 +982,17 @@ export function mirrorRunEvidence(itemId: string, run: WorkflowRun | null): void
           });
         } catch {
           // evento best-effort: el archivo ya quedó
+        }
+        try {
+          appendRoundEntry(dir, {
+            round: roundState.round,
+            runId: typeof run.id === "string" ? run.id : "",
+            verdict: meta?.verdict ?? "NEEDS FIXES",
+            findings: engineFindings.slice(0, 50) as CanonicalFindingInput[],
+            createdAt: now,
+          });
+        } catch {
+          // sidecar best-effort: el reporte ya quedó
         }
         // Verificación + lastReview para el PR: buildPrDetailsFromJob solo
         // lee timeline meta + item.lastReview. Sin esto, Validation y commit
@@ -1220,8 +1621,29 @@ export function handleRunEvent(
       } else {
         // PR de handoff (best-effort, idempotente, solo jobs aislados): el
         // orquestador es el dueño del PR, igual que en el accept legacy.
+        // WS-1/WS-4: si este run fue la ronda de reconciliación post-bot, el
+        // PR abierto se reutiliza sin cortar el commit/push; y si el bot dejó
+        // findings abiertos, el hook arranca la ronda nueva (flag + cap 1).
+        const engineRunNow = (
+          item as unknown as { engineRun?: { reconcile?: unknown } | null } | null
+        )?.engineRun;
+        const isReconcileRun = engineRunNow?.reconcile === true;
+        const rt = runtime;
         void import("./isolation/gitHubPr")
-          .then((module) => module.maybeOpenPrForCompletedJob(itemId))
+          .then((module) =>
+            module.maybeOpenPrForCompletedJob(itemId, {
+              ...(isReconcileRun ? { reconcile: true } : {}),
+              ...(rt
+                ? {
+                    onBotReconcile: (id: string, fb: unknown) => {
+                      void startBotReconcileRun(id, rt, fb)
+                        .then((res) => traceBotReconcileNotStarted(id, res))
+                        .catch(() => {});
+                    },
+                  }
+                : {}),
+            }),
+          )
           .catch(() => {});
         // Auto-score como en el pipeline legacy (best-effort, no bloquea nada).
         void import("../measure/scorerEngine")
@@ -1300,6 +1722,181 @@ function reviveItemForActiveRun(itemId: string): void {
     );
   } catch {
     // best-effort: si la transición no aplica, la fila igual la salva G3
+  }
+}
+
+/**
+ * WS-1: ronda de reconciliación post-bot. Con `TERMCANVAS_BOT_RECONCILE=1` y
+ * un job aislado `Complete` cuyo bot dejó findings abiertos (evento
+ * `botReconcile`), reabre Building UNA vez (cap por evento) y arranca un run
+ * nuevo de `fix-issue` sobre el mismo worktree con los findings como input
+ * `bot_findings`. El commit/push del trabajo nuevo y la reutilización del PR
+ * abierto los hace `maybeOpenPrForCompletedJob` con `reconcile: true`.
+ * Nunca lanza.
+ */
+export async function startBotReconcileRun(
+  itemId: unknown,
+  runtime: WorkflowRuntime | undefined,
+  feedback?: unknown,
+): Promise<{ started: true; runId: string } | { started: false; reason: string }> {
+  try {
+    if (typeof itemId !== "string" || itemId.length === 0) {
+      return { started: false, reason: "bad-id" };
+    }
+    if (!runtime) return { started: false, reason: "no-runtime" };
+    if (!resolveBotReconcilePolicy().enabled) return { started: false, reason: "flag-off" };
+    const item = workItemStore.get(itemId);
+    if (!item) return { started: false, reason: "unknown-job" };
+    if (item.status !== "Complete") {
+      return { started: false, reason: `not-complete:${item.status}` };
+    }
+    const iso = (item as unknown as { isolation?: Record<string, unknown> | null }).isolation;
+    if (
+      !iso ||
+      typeof iso.branch !== "string" ||
+      iso.branch === "" ||
+      iso.state !== "pr-open"
+    ) {
+      return { started: false, reason: "not-isolated" };
+    }
+    const timeline = (item as unknown as { timeline?: unknown }).timeline;
+    if (!hasBotReconcileEvent(timeline)) return { started: false, reason: "no-bot-round" };
+    if (hasBotReconcileRunEvent(timeline)) {
+      return { started: false, reason: "already-started" };
+    }
+    const existingRunId = runIdForItem(itemId);
+    if (existingRunId && runtime.isActive(existingRunId)) {
+      return { started: false, reason: "run-active" };
+    }
+    const fb = feedback ?? readBotReconcileFeedback(timeline);
+    const findingsBlock = formatBotFindingsForPrompt(fb);
+    if (findingsBlock === "") return { started: false, reason: "no-findings" };
+
+    const repoRoot = runtimeRepoRoot(runtime);
+    const inputs =
+      buildInputsForWorkflow(
+        "fix-issue",
+        item.prompt,
+        itemId,
+        repoRoot,
+        issueInputText(itemId),
+        issueBodyInputText(item.prompt),
+      ) ?? {};
+    inputs.bot_findings = findingsBlock;
+    // El start va ANTES de reabrir Building: si falla, el job nunca sale de
+    // Complete (sin ventana "Building sin run" si el daemon muere acá).
+    const run = await runtime.start("fix-issue", {
+      inputs,
+      args: item.prompt,
+      cwd: resolveSessionWorktree(item),
+      isolation: "inherit",
+    });
+    transitionSafe(itemId, "Building", "engine: ronda de reconciliación post-bot");
+    try {
+      const dir =
+        item.dir ?? path.join(path.resolve(item.worktree), ".agents", "factory", itemId);
+      fs.unlinkSync(path.join(dir, ".done"));
+    } catch {
+      // sin `.done`: nada que limpiar
+    }
+    try {
+      workItemStore.releaseReviewLock(itemId);
+    } catch {
+      // lock libre: nada que liberar
+    }
+    try {
+      workItemStore.releaseBuildingLock(itemId);
+    } catch {
+      // lock libre: nada que liberar
+    }
+    registerLink(itemId, run.id);
+    const nodeIds = workflowNodeIds(runtime, "fix-issue");
+    try {
+      workItemStore.setEngineRun(itemId, {
+        runId: run.id,
+        workflow: "fix-issue",
+        status: "running",
+        currentNodeId: null,
+        completedNodes: [],
+        reconcile: true,
+        ...(nodeIds.length > 0 ? { nodes: nodeIds } : {}),
+        ...(typeof run.startedAt === "string" ? { startedAt: run.startedAt } : {}),
+      });
+    } catch {
+      // best-effort: el espejo de eventos también mantiene el avance
+    }
+    try {
+      workItemStore.appendEvent(itemId, "system", `engine: run de reconciliación ${run.id}`, {
+        workflowRunId: run.id,
+        botReconcileRun: true,
+      });
+    } catch {
+      // best-effort
+    }
+    return { started: true, runId: run.id };
+  } catch (e) {
+    try {
+      if (typeof itemId === "string") {
+        const cur = workItemStore.get(itemId);
+        if (cur && cur.status === "Building") {
+          transitionSafe(itemId, "Complete", "engine: reconciliación post-bot no arrancó");
+        }
+        workItemStore.appendEvent(
+          itemId,
+          "system",
+          `reconciliación post-bot no pudo arrancar: ${
+            e instanceof Error ? e.message : String(e)
+          }`.slice(0, 300),
+        );
+      }
+    } catch {
+      // best-effort
+    }
+    return { started: false, reason: "start-failed" };
+  }
+}
+
+/**
+ * Versión del starter para callers SIN runtime a mano (accept humano del
+ * panel, accept automático del flujo job-level): resuelve el runtime del
+ * daemon vía el provider registrado en boot (`setWorkflowRuntimeProvider`).
+ * No-op silencioso si el provider no fue registrado (boot a medias, tests
+ * cortos). Nunca lanza.
+ */
+export function reconcileFromAnyCaller(jobId: unknown, feedback?: unknown): void {
+  try {
+    if (typeof jobId !== "string" || jobId.length === 0) return;
+    const provider = runtimeProvider;
+    if (!provider) return;
+    void startBotReconcileRun(jobId, provider(), feedback)
+      .then((res) => traceBotReconcileNotStarted(jobId, res))
+      .catch(() => {});
+  } catch {
+    // best-effort: el PR ya quedó abierto
+  }
+}
+
+/**
+ * P2: traza honesta cuando la ronda no arranca (early returns del starter:
+ * gate off, job no Complete, sin ronda preparada, run activo). Antes el
+ * resultado se descartaba y el operador solo veía un PR bloqueado sin motivo.
+ * El camino `start-failed` ya trae su propio evento en el starter. Nunca lanza.
+ */
+function traceBotReconcileNotStarted(itemId: unknown, result: unknown): void {
+  try {
+    if (typeof itemId !== "string" || itemId.length === 0) return;
+    if (!result || typeof result !== "object") return;
+    const rec = result as { started?: unknown; reason?: unknown };
+    if (rec.started !== false) return;
+    const reason = typeof rec.reason === "string" && rec.reason.length > 0 ? rec.reason : "unknown";
+    if (reason === "start-failed") return;
+    workItemStore.appendEvent(
+      itemId,
+      "system",
+      `reconciliación post-bot no arrancó: ${reason.slice(0, 120)}`,
+    );
+  } catch {
+    // best-effort: la traza nunca rompe el caller
   }
 }
 

@@ -373,6 +373,12 @@ export const zh = {
   quit_on_last_window_closed_toggle: "关闭最后一个窗口时退出",
   quit_on_last_window_closed_toggle_desc:
     "默认关闭。关闭最后一个窗口时，TermCanvas 仍保留在 Dock 中，点击 Dock 图标可打开新窗口。开启则直接退出应用。",
+  bot_reconcile_label: "Bot 对账回合",
+  bot_reconcile_desc:
+    "当外部 bot 在 PR 上留下未处理的 finding 时，自动重新运行修复工作流。设置会持久保存，可通过 TERMCANVAS_BOT_RECONCILE 环境变量覆盖。",
+  bot_reconcile_env_override:
+    "当前由 TERMCANVAS_BOT_RECONCILE 环境变量强制决定该值，持久化设置在其生效期间不起作用。",
+  bot_reconcile_update_failed: "更新 bot 对账设置失败",
   summary_toggle: "终端自动摘要",
   summary_toggle_desc:
     "实验性功能。为 CLI 终端自动生成一行 AI 摘要，可能增加 token 用量",

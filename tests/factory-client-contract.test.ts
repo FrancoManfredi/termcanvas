@@ -39,6 +39,7 @@ import {
   FACTORY_REVIEW_TIMEOUT_MS,
   FACTORY_SCORERS_TIMEOUT_MS,
   FACTORY_SCORES_SUMMARY_TIMEOUT_MS,
+  FACTORY_SETTINGS_TIMEOUT_MS,
   FACTORY_SPEC_TIMEOUT_MS,
   FACTORY_TRIAGE_TIMEOUT_MS,
   FACTORY_VERIFY_RETRY_TIMEOUT_MS,
@@ -59,6 +60,7 @@ import {
   getFactoryReview,
   getFactoryReviewRaw,
   getFactoryScoresSummary,
+  getFactorySettings,
   getFactoryVerify,
   listFactoryBenchmarks,
   listFactoryFailures,
@@ -76,6 +78,7 @@ import {
   postFactoryReviewAccept,
   postFactoryReviewRetry,
   postFactoryReviewRetryReview,
+  postFactorySettings,
   postFactorySpecApprove,
   postFactoryTriageRespond,
   postFactoryVerifyRetry,
@@ -436,6 +439,91 @@ test("notificaciones lista + ack; definition status + forma corrupta", async () 
   if (!defBad.ok) assert.equal(defBad.data.valid, null);
 });
 
+// ── Settings del daemon (bot reconcile) ──
+
+test("settings GET: forma {settings, gate, envOverride}, fuente env y basura → null", async () => {
+  const body = {
+    ok: true,
+    settings: { botReconcile: false },
+    gate: { enabled: false, source: "default" },
+    envOverride: null,
+  };
+  const f = mockFetch(() => jsonRes(body));
+  const res = await getFactorySettings(opts(f));
+  assert.equal(res.ok, true);
+  assert.equal(f.calls.length, 1);
+  assert.equal(f.calls[0].url, `http://127.0.0.1:${TEST_PORT}/factory/settings`);
+  assert.equal((f.calls[0].init as RequestInit | undefined)?.method, undefined);
+  if (res.ok && res.data) {
+    assert.equal(res.data.botReconcile, false);
+    assert.equal(res.data.gate.enabled, false);
+    assert.equal(res.data.gate.source, "default");
+    assert.equal(res.data.envOverride, null);
+  }
+
+  const env = mockFetch(() =>
+    jsonRes({
+      ok: true,
+      settings: { botReconcile: false },
+      gate: { enabled: true, source: "env" },
+      envOverride: "1",
+    }),
+  );
+  const resEnv = await getFactorySettings(opts(env));
+  assert.equal(resEnv.ok, true);
+  if (resEnv.ok && resEnv.data) {
+    assert.equal(resEnv.data.gate.source, "env");
+    assert.equal(resEnv.data.gate.enabled, true);
+    assert.equal(resEnv.data.envOverride, "1");
+  }
+
+  const err = mockFetch(() => jsonRes({ error: "daemon caído" }, 500));
+  const resErr = await getFactorySettings(opts(err));
+  assert.equal(resErr.ok, false);
+  assert.equal(resErr.data, null);
+  assert.match(String((resErr as { error?: string }).error ?? ""), /daemon caído/);
+
+  const bad = mockFetch(() => jsonRes({ nope: true }));
+  const resBad = await getFactorySettings(opts(bad));
+  assert.equal(resBad.ok, false);
+  assert.equal(resBad.data, null);
+});
+
+test("settings POST: body {botReconcile} JSON; inválido no toca red; 400 → fallback null", async () => {
+  const f = mockFetch(() =>
+    jsonRes({
+      ok: true,
+      settings: { botReconcile: true },
+      gate: { enabled: true, source: "setting" },
+      envOverride: null,
+    }),
+  );
+  const res = await postFactorySettings(true, opts(f));
+  assert.equal(res.ok, true);
+  assert.equal(f.calls[0].url, `http://127.0.0.1:${TEST_PORT}/factory/settings`);
+  const init = f.calls[0].init as RequestInit;
+  assert.equal(init.method, "POST");
+  assert.equal(
+    (init.headers as Record<string, string>)["Content-Type"],
+    "application/json",
+  );
+  const sent = JSON.parse(String(init.body)) as { botReconcile: boolean };
+  assert.equal(sent.botReconcile, true);
+  if (res.ok && res.data) assert.equal(res.data.gate.source, "setting");
+
+  const bad = mockFetch(() => jsonRes({ ok: true }));
+  const resBad = await postFactorySettings("sí", opts(bad));
+  assert.equal(resBad.ok, false);
+  assert.equal(resBad.data, null);
+  assert.equal(bad.calls.length, 0);
+
+  const fourOhFour = mockFetch(() => jsonRes({ error: "body inválido" }, 400));
+  const resFail = await postFactorySettings(false, opts(fourOhFour));
+  assert.equal(resFail.ok, false);
+  assert.equal(resFail.data, null);
+  assert.match(String((resFail as { error?: string }).error ?? ""), /body inválido/);
+});
+
 // ── Ids inválidos / mocks corruptos / estática ──
 
 test("id inválido o traversal no toca red (fail-closed local)", async () => {
@@ -498,6 +586,7 @@ test("todos los timeouts nombrados exportados, numéricos y positivos", () => {
     FACTORY_NOTIFICATIONS_TIMEOUT_MS,
     FACTORY_NOTIFICATION_ACK_TIMEOUT_MS,
     FACTORY_DEFINITION_TIMEOUT_MS,
+    FACTORY_SETTINGS_TIMEOUT_MS,
     FACTORY_DEFAULT_TIMEOUT_MS,
   ]) {
     assert.equal(typeof t, "number");

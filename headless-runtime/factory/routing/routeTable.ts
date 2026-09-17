@@ -63,6 +63,8 @@ export type RouteMethod = "GET" | "POST";
  */
 export type RouteDomain =
   | "health"
+  | "settings-get"
+  | "settings-set"
   | "jobs-list"
   | "foreman-logs"
   | "jobs-create"
@@ -105,7 +107,7 @@ export type RouteDomain =
   | "notifications-ack"
   | "definition-status"
   | "dependencies-status"
-  | "dependencies-install"
+  | "github-runners-status"
   | "automations-list"
   | "automations-tick"
   | "integrations-status"
@@ -137,7 +139,7 @@ export interface RouteTableEntry {
 }
 
 /**
- * Tabla completa: 51 filas → 50 dominios (job-build-log comparte dominio en
+ * Tabla completa: 53 filas → 52 dominios (job-build-log comparte dominio en
  * dos filas). Orden: exactas primero, luego sufijos largos antes que cortos
  * (defensa, aunque el MATCH exige sufijo+longitud exactos y el orden no
  * cambia el resultado).
@@ -145,6 +147,11 @@ export interface RouteTableEntry {
 export const ROUTE_TABLE: readonly RouteTableEntry[] = [
   // ── Exactas globales ──
   { method: "GET", domain: "health", kind: "exact", canonical: "/factory/health", canonicalLen: 2 },
+  // ── P4 (2026-09-17) gate persistente del factory: lectura y escritura ──
+  // Mismo path, el método distingue (precedente benchmarks). El cuerpo vive
+  // en el cascarón (handler delgado → settings/factorySettingsStore).
+  { method: "GET", domain: "settings-get", kind: "exact", canonical: "/factory/settings", canonicalLen: 2 },
+  { method: "POST", domain: "settings-set", kind: "exact", canonical: "/factory/settings", canonicalLen: 2 },
   { method: "GET", domain: "jobs-list", kind: "exact", canonical: "/factory/jobs", alias: "/work-items", canonicalLen: 2, aliasLen: 1 },
   { method: "GET", domain: "foreman-logs", kind: "exact", canonical: "/factory/foreman/logs", alias: "/foreman/logs", canonicalLen: 3, aliasLen: 2 },
   { method: "POST", domain: "jobs-create", kind: "exact", canonical: "/factory/jobs", canonicalLen: 2 },
@@ -158,7 +165,7 @@ export const ROUTE_TABLE: readonly RouteTableEntry[] = [
   { method: "GET", domain: "notifications-list", kind: "exact", canonical: "/factory/notifications", canonicalLen: 2 },
   { method: "GET", domain: "definition-status", kind: "exact", canonical: "/factory/definition/status", canonicalLen: 3 },
   { method: "GET", domain: "dependencies-status", kind: "exact", canonical: "/factory/dependencies/status", canonicalLen: 3 },
-  { method: "POST", domain: "dependencies-install", kind: "exact", canonical: "/factory/dependencies/pr-agent/install", canonicalLen: 4 },
+  { method: "GET", domain: "github-runners-status", kind: "exact", canonical: "/factory/github/runners/status", canonicalLen: 4 },
   { method: "GET", domain: "automations-list", kind: "exact", canonical: "/factory/automations", canonicalLen: 2 },
   { method: "POST", domain: "automations-tick", kind: "exact", canonical: "/factory/automations/tick", canonicalLen: 3 },
   { method: "GET", domain: "integrations-status", kind: "exact", canonical: "/factory/integrations/status", canonicalLen: 3 },

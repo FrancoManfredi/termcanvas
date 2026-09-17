@@ -1,10 +1,13 @@
 /**
  * factory/dependencies/depsRoutes — pure matchers for the dependencies domain.
  *
- * Two exact global routes (same shape as definition-status, no alias):
- * GET /factory/dependencies/status and POST
- * /factory/dependencies/pr-agent/install. Zero imports (string ops only),
+ * One exact global route (same shape as definition-status, no alias):
+ * GET /factory/dependencies/status. Zero imports (string ops only),
  * never throws (match object or null).
+ *
+ * (The former POST .../pr-agent/install route was removed with pr-agent;
+ * the reviewer integration — Pullfrog — will own its own route when it
+ * lands.)
  */
 
 /** Match ok (the caller answers; unknown jobs get an honest 404 there). */
@@ -36,23 +39,6 @@ export function parseDependenciesStatusPath(
 ): DepsRouteOk | null {
   try {
     return splitExact(method, pathname, "GET", "/factory/dependencies/status")
-      ? { ok: true }
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * POST /factory/dependencies/pr-agent/install — explicit human install
- * action (never automatic). Non-null only on the exact shape.
- */
-export function parseDependenciesInstallPath(
-  method: unknown,
-  pathname: unknown,
-): DepsRouteOk | null {
-  try {
-    return splitExact(method, pathname, "POST", "/factory/dependencies/pr-agent/install")
       ? { ok: true }
       : null;
   } catch {

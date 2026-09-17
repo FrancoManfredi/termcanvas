@@ -174,7 +174,7 @@ export const EngineGateSchema = z
   .object({
     nodeId: z.string().min(1).max(64),
     kind: z.enum(["spec-approval", "ask-human"]),
-    message: z.string().max(2000),
+    message: z.string().max(20000),
     runId: z.string().min(1).max(128),
     attempt: z.number().int().min(1).max(10).optional(),
   })
@@ -232,6 +232,11 @@ export const EngineRunSchema = z
      * attachea. La fila muestra la identidad que efectivamente ejecutó.
      */
     nodeAgents: z.record(z.string(), z.string().min(1).max(128)).optional(),
+    /**
+     * WS-1: el run es la ronda de reconciliación post-bot (reusa el PR
+     * abierto sin cortar el commit/push). Opcional y aditivo.
+     */
+    reconcile: z.boolean().optional(),
     startedAt: z.string().max(64).optional(),
   })
   .nullable()
@@ -363,8 +368,11 @@ export type WorkItem = z.infer<typeof WorkItemSchema>;
 // Ola 4: Building → Review (pass) | Building → Triage (fail) | Building → Complete (pact legacy).
 // Review → Complete (accept) | Review → Building (revise con rondas restantes, ver MAX_REVIEW_ROUNDS) | stay Review (ask_human / rondas agotadas).
 // Cancelled → Building: reopen DELIBERADO para el re-sync del engine (un run
-// vivo que quedó con el job terminal, ej. reject + resume posterior). No hay
-// otras salidas de Cancelled/Complete.
+// vivo que quedó con el job terminal, ej. reject + resume posterior).
+// Complete → Building: reopen DELIBERADO SOLO para la ronda de reconciliación
+// post-bot (`startBotReconcileRun` en engineBridge): un PR abierto con
+// findings del bot sin reconciliar dispara UNA ronda nueva sobre el mismo
+// worktree. Nadie más reabre Complete; el permiso no se otorga por la tabla.
 export const ALLOWED_TRANSITIONS: Record<
   WorkItemStatus,
   WorkItemStatus[]
@@ -374,7 +382,7 @@ export const ALLOWED_TRANSITIONS: Record<
   Triage: ["Foreman", "Review", "Cancelled"],
   Building: ["Complete", "Triage", "Cancelled", "Review"],
   Review: ["Complete", "Building", "Triage", "Cancelled"],
-  Complete: [],
+  Complete: ["Building"],
   Cancelled: ["Building"],
 };
 

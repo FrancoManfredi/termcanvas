@@ -10,6 +10,11 @@ Pedido: $INPUTS.request
 $INPUTS.issue_body
 --- FIN ISSUE ---
 
-Respondé JSON con `summary` (string) y `steps` (array de strings). Sin preámbulos.
+Respondé ÚNICAMENTE con el objeto JSON del contrato, sin prosa, sin fences, sin headings ni markdown:
 
-El `summary` abre con outcome (qué es observablemente distinto) e invariante (qué debe seguir verdadero). Cada step cita sus archivos (`{path:line}`) y su validación. Si falta una primitiva fundacional o la intención es incierta, el `summary` cierra con `DECISION NEEDED:` + pregunta + recomendación.
+{"summary": "string", "steps": ["string", ...]}
+
+- `summary`: abre con outcome (qué es observablemente distinto) e invariante (qué debe seguir verdadero); si falta una primitiva fundacional o la intención es incierta, cierra con `DECISION NEEDED:` + pregunta + recomendación.
+- `steps`: 3-6 pasos; cada uno cita sus archivos (`{path:line}`) y su validación.
+
+Nada fuera del objeto.

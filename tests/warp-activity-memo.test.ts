@@ -28,6 +28,8 @@ import {
   isDiscardableSection,
   isSameActivityCardProps,
   parseGateMessage,
+  parseMermaidFlowchart,
+  splitGateBodySegments,
   type ActivityCardProps,
 } from "../src/features/warpPanel/components/ActivityPanel.tsx";
 import { shouldForcePrLookupOnMount, splitBatches } from "../src/features/warpPanel/hooks/useActivity.ts";
@@ -302,6 +304,58 @@ test("onDiscardRequest estabilidad: ref estable baila, closure nuevo re-renderiz
     ),
     false,
   );
+});
+
+test("splitGateBodySegments: markdown + mermaid cercado y sin cercar", () => {
+  const fenced = splitGateBodySegments(
+    "**Objetivo:** envolver\n\n```mermaid\nflowchart LR\n  A[x] --> B[y]\n```\n\ncola",
+  );
+  assert.deepEqual(
+    fenced.map((s) => s.type),
+    ["markdown", "mermaid", "markdown"],
+  );
+  assert.match(
+    (fenced[1] as { code: string }).code,
+    /flowchart LR/,
+    "el cercado conserva el código",
+  );
+  const bare = splitGateBodySegments(
+    "## Spec\n\nflowchart LR\n  subgraph Before\n    B1[a] --> B2[b]\n  end\n\nfin",
+  );
+  assert.deepEqual(
+    bare.map((s) => s.type),
+    ["markdown", "mermaid", "markdown"],
+  );
+  assert.deepEqual(splitGateBodySegments("**solo** markdown"), [
+    { type: "markdown", text: "**solo** markdown" },
+  ]);
+  assert.deepEqual(splitGateBodySegments(""), []);
+  assert.deepEqual(splitGateBodySegments(null), []);
+  assert.deepEqual(splitGateBodySegments(42), []);
+});
+
+test("parseMermaidFlowchart: subgraphs Before/After del spec #124", () => {
+  const chart = parseMermaidFlowchart(
+    "flowchart LR\n" +
+      "  subgraph Before\n" +
+      "    B1[localStorage corrupto] --> B2[JSON.parse lanza] --> B3[app rota]\n" +
+      "  end\n" +
+      "  subgraph After\n" +
+      "    A1[localStorage corrupto] --> A2[try/catch<br/>return []] --> A3[render vacío]\n" +
+      "  end",
+  );
+  assert.ok(chart, "parsea el diagrama del spec");
+  assert.equal(chart?.horizontal, true);
+  assert.deepEqual(chart?.groups, ["Before", "After"]);
+  assert.equal(chart?.nodes.length, 6);
+  assert.equal(chart?.edges.length, 4);
+  const a2 = chart?.nodes.find((n) => n.id === "A2");
+  assert.deepEqual(a2?.lines, ["try/catch", "return []"], "<br/> parte líneas");
+  assert.equal(a2?.group, "After");
+  assert.equal(parseMermaidFlowchart("sequenceDiagram\n  A->>B: hola"), null, "no-flowchart → fallback");
+  assert.equal(parseMermaidFlowchart("flowchart LR\n  solo texto"), null, "sin nodos → fallback");
+  assert.equal(parseMermaidFlowchart(null), null);
+  assert.equal(parseMermaidFlowchart(42), null);
 });
 
 test("isDiscardableSection: In Progress / Awaiting / Ready solamente", () => {

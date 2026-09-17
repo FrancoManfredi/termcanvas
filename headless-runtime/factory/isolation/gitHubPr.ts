@@ -18,9 +18,21 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { workItemStore } from "../../workItem/workItemStore";
+import { resolveBotReconcileGate } from "../settings/factorySettingsStore";
 import type { WorkItem } from "../../../shared/types/workItem";
-import { buildPrBody, buildPrTitle, prGuard, parseIssueTitleFromPrompt, summarizeDetailsForCommit, type PrBodyDetails } from "./isolationStore";
-import { refreshReviewReportMeta, parseReviewReportMeta } from "../../review/reviewReport";
+import { buildCommitSubject, buildPrBody, buildPrTitle, capTextAtBoundary, extractCommitUnits, extractDispositions, prGuard, parseIssueTitleFromPrompt, summarizeDetailsForCommit, type PrBodyDetails } from "./isolationStore";
+import {
+  appendBotReviewSection,
+  applyBotFindingsToReport,
+  assertReportIntegrity,
+  refreshReviewReportMeta,
+  parseReviewReportMeta,
+} from "../../review/reviewReport";
+import {
+  changedFilesSince,
+  reconcileBotFindings,
+  waitForBotReview,
+} from "../../review/botReview";
 
 /** Bound G02: `git push -u origin <branch>`, single attempt. */
 export const GIT_PUSH_TIMEOUT_MS = 30000;
@@ -156,6 +168,12 @@ export interface OpenPrForJobInput {
    * createdFiles). Cuando viene no-vacía manda sobre el porcelain.
    */
   readonly allowedPaths?: readonly unknown[];
+  /**
+   * Ronda de reconciliación post-bot: con un PR ya abierto, la reutilización
+   * NO corta el commit/push del trabajo nuevo — solo evita crear otro PR.
+   * Sin el flag, el comportamiento histórico (early return duplicate) intacto.
+   */
+  readonly reconcile?: boolean;
 }
 
 export type OpenPrForJobResult =
@@ -243,13 +261,16 @@ export async function countBranchCommitsVsBase(input: {
 }
 
 /**
- * Worktree sucio o limpio (`git status --porcelain`). Recorta SOLO la cola
- * (CRLF normalizado, sin newlines finales): el espacio líder de la primera
- * línea es el offset `XY` del formato (`" M archivo"`) y un `trim()` completo
- * lo borraba — `parsePorcelainPaths` cortaba de más y `js/app.js` se volvía
- * `s/app.js` (bug run #125: `git add` explotaba y el PR jamás se abría).
- * `""` = limpio. Null cuando el probe falla (git ausente, no-repo, timeout)
- * — el caller decide fail-open. Read-only, nunca lanza.
+ * Worktree sucio o limpio (`git status --porcelain -uall`). Recorta SOLO la
+ * cola (CRLF normalizado, sin newlines finales): el espacio líder de la
+ * primera línea es el offset `XY` del formato (`" M archivo"`) y un `trim()`
+ * completo lo borraba — `parsePorcelainPaths` cortaba de más y `js/app.js`
+ * se volvía `s/app.js` (bug run #125: `git add` explotaba y el PR jamás se
+ * abría). `-uall` enumera archivos untracked individualmente: sin él, git
+ * colapsa el dir a `?? artifacts/` y una review aid (`artifacts/scope.md`)
+ * pasaba el filtro exacto y shipeaba (PR #158). `""` = limpio. Null cuando
+ * el probe falla (git ausente, no-repo, timeout) — el caller decide
+ * fail-open. Read-only, nunca lanza.
  */
 export async function readWorktreeStatusPorcelain(input: {
   repoPath: string;
@@ -258,7 +279,7 @@ export async function readWorktreeStatusPorcelain(input: {
   try {
     const repoPath = typeof input?.repoPath === "string" ? input.repoPath : "";
     if (repoPath.trim().length === 0) return null;
-    const out = await input.run("git", ["status", "--porcelain"], {
+    const out = await input.run("git", ["status", "--porcelain", "-uall"], {
       cwd: repoPath,
       timeoutMs: GIT_STATUS_TIMEOUT_MS,
     });
@@ -296,12 +317,12 @@ const COMMIT_EXCLUDE_PREFIXES: readonly string[] = [
   "review/",
 ];
 
-/** Archivos exactos que el commit jamás incluye (locks del toolchain). */
-const COMMIT_EXCLUDE_EXACT: ReadonlySet<string> = new Set([
-  "package-lock.json",
-  "pnpm-lock.yaml",
-  "yarn.lock",
-  // Ayudas de review en la raíz (ver prefijos arriba para `review/`).
+/**
+ * Ayudas de review del ciclo: viven en el worktree, jamás en un commit/PR.
+ * Pura, case-insensitive, nunca lanza. Alimenta tanto el filtro de `add`
+ * como el gate pre-push de `openPrForJob`.
+ */
+const REVIEW_AID_PATHS: ReadonlySet<string> = new Set([
   "artifacts/scope.md",
   "scope.md",
   "plan.md",
@@ -310,14 +331,43 @@ const COMMIT_EXCLUDE_EXACT: ReadonlySet<string> = new Set([
   "discoveries.md",
 ]);
 
+/**
+ * True si la ruta es una review aid del ciclo (scope/plan/triage/
+ * discoveries o cualquier cosa bajo `review/`). Las formas de directorio
+ * (`review/`, residuo de un porcelain colapsado) cuentan como aids: no hay
+ * nada legítimo que shipear bajo `review/`. Pura, nunca lanza.
+ */
+export function isReviewAidPath(p: unknown): boolean {
+  try {
+    if (typeof p !== "string" || p.length === 0) return false;
+    const norm = p.replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+    if (norm.length === 0) return false;
+    if (norm.endsWith("/")) return norm === "review/" || norm === "artifacts/";
+    if (REVIEW_AID_PATHS.has(norm)) return true;
+    return norm.startsWith("review/");
+  } catch {
+    return false;
+  }
+}
+
+/** Archivos exactos que el commit jamás incluye (locks y review aids). */
+const COMMIT_EXCLUDE_EXACT: ReadonlySet<string> = new Set([
+  "package-lock.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  // Ayudas de review en la raíz (ver prefijos arriba para `review/`).
+  ...REVIEW_AID_PATHS,
+]);
+
 /** Tope de paths por `git add --` (misma cota que el reporte de cambios). */
 const COMMIT_MAX_PATHS = 50;
 
 /**
  * True si la ruta relativa puede entrar al commit del PR (pura, nunca
  * lanza). Fuera: ruido de toolchain/daemon (`node_modules/`, `dist/`,
- * `logs/`, `.agents/...`, worktrees) y `*.log`. Todo lo demás pasa,
- * incluido el código y tests del issue.
+ * `logs/`, `.agents/...`, worktrees), `*.log`, formas de directorio
+ * (`dir/`) y las review aids del ciclo (`scope.md`, `review/`, ...).
+ * Todo lo demás pasa, incluido el código y tests del issue.
  */
 export function isCommittablePath(p: unknown): boolean {
   try {
@@ -325,6 +375,11 @@ export function isCommittablePath(p: unknown): boolean {
     const norm = p.replace(/\\/g, "/").replace(/^\.\//, "");
     if (norm.length === 0 || norm.startsWith("/") || norm.includes("..")) return false;
     const lower = norm.toLowerCase();
+    // Forma de directorio (porcelain sin `-uall` colapsa untracked dirs a
+    // `artifacts/`): no es un archivo validable contra las listas exactas
+    // y podía barrer una review aid dentro. Con `-uall` los archivos vienen
+    // enumerados; un dir pelado se rechaza por las dudas.
+    if (lower.endsWith("/")) return false;
     for (const pre of COMMIT_EXCLUDE_PREFIXES) {
       if (lower.startsWith(pre)) return false;
     }
@@ -407,9 +462,21 @@ export async function commitWorktreeChanges(input: {
   allowedPaths?: readonly unknown[];
   /**
    * Cuerpo del commit (summary + files + validation, ya acotado por el
-   * caller). Headline intacto. Vacío = commit solo con headline.
+   * caller). Vacío = commit solo con headline.
    */
   messageBody?: unknown;
+  /**
+   * Subject del commit (conventional, ya construido por el caller). Vacío
+   * o ausente = headline legacy `factory: implement issue #N (handoff)`.
+   */
+  messageSubject?: unknown;
+  /**
+   * WS-F: unidades de trabajo (una por commit, en orden). Cada `paths` se
+   * intersecta con los candidatos commiteables reales; los candidatos no
+   * asignados cierran en un commit final `chore: remaining changes`. Vacío
+   * o inválido = commit único legacy.
+   */
+  units?: readonly { subject?: unknown; body?: unknown; paths?: readonly unknown[] }[];
 }): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
     const repoPath = typeof input?.repoPath === "string" ? input.repoPath : "";
@@ -446,20 +513,49 @@ export async function commitWorktreeChanges(input: {
     } catch {
       candidates = [];
     }
-    if (candidates.length > 0) {
-      try {
-        await run("git", ["add", "--", ...candidates], {
-          cwd: repoPath,
-          timeoutMs: GIT_COMMIT_TIMEOUT_MS,
-        });
-      } catch (e) {
-        return { ok: false, error: sliceError(`git add failed: ${e instanceof Error ? e.message : String(e)}`) };
+    // WS-F: unidades de trabajo declaradas por el implement. Solo paths del
+    // set committable entran; duplicados/desconocidos se descartan. Sin
+    // unidades válidas la ruta de commit único legacy queda intacta.
+    const commitUnits: Array<{ subject: string; body: string; paths: string[] }> = [];
+    try {
+      if (Array.isArray(input?.units) && input.units.length > 0) {
+        const candidateSet = new Set(candidates);
+        const assigned = new Set<string>();
+        for (const raw of input.units) {
+          if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+          const u = raw as { subject?: unknown; body?: unknown; paths?: unknown };
+          const subject = typeof u.subject === "string" ? u.subject.trim().slice(0, 160) : "";
+          if (subject === "" || !Array.isArray(u.paths)) continue;
+          const paths: string[] = [];
+          for (const p of u.paths) {
+            if (typeof p !== "string") continue;
+            const norm = p.replace(/\\/g, "/").replace(/^\.\//, "");
+            if (!candidateSet.has(norm) || assigned.has(norm)) continue;
+            assigned.add(norm);
+            paths.push(norm);
+          }
+          if (paths.length === 0) continue;
+          commitUnits.push({
+            subject,
+            body:
+              typeof u.body === "string" && u.body.trim() !== ""
+                ? capTextAtBoundary(u.body.trim(), 1000)
+                : "",
+            paths,
+          });
+          if (commitUnits.length >= 8) break;
+        }
       }
-    } else if (Array.isArray(input?.allowedPaths) && input.allowedPaths.length > 0) {
-      return { ok: false, error: "nothing committable after exclusions: node_modules/logs/.agents/dist quedan fuera del PR" };
-    } else if (typeof input?.knownStatus === "string") {
-      return { ok: false, error: "nothing committable after exclusions: node_modules/logs/.agents/dist quedan fuera del PR" };
-    } else {
+    } catch {
+      commitUnits.length = 0;
+    }
+    if (candidates.length === 0) {
+      if (Array.isArray(input?.allowedPaths) && input.allowedPaths.length > 0) {
+        return { ok: false, error: "nothing committable after exclusions: node_modules/logs/.agents/dist quedan fuera del PR" };
+      }
+      if (typeof input?.knownStatus === "string") {
+        return { ok: false, error: "nothing committable after exclusions: node_modules/logs/.agents/dist quedan fuera del PR" };
+      }
       // Compat: caller sin status (uso directo legacy) — add -A con
       // exclusiones, nunca ciego.
       try {
@@ -498,11 +594,21 @@ export async function commitWorktreeChanges(input: {
         return { ok: false, error: sliceError(`git add failed: ${e instanceof Error ? e.message : String(e)}`) };
       }
     }
-    try {
-      const bodyText =
-        typeof input?.messageBody === "string" && input.messageBody.trim() !== ""
-          ? input.messageBody.trim().slice(0, 1500)
-          : "";
+    const defaultBodyText =
+      typeof input?.messageBody === "string" && input.messageBody.trim() !== ""
+        ? capTextAtBoundary(input.messageBody.trim(), 1500)
+        : "";
+    const defaultSubjectText =
+      typeof input?.messageSubject === "string" && input.messageSubject.trim() !== ""
+        ? input.messageSubject.trim().slice(0, 160)
+        : `factory: implement issue #${n} (handoff)`;
+    const stage = async (paths: string[]): Promise<void> => {
+      await run("git", ["add", "--", ...paths], {
+        cwd: repoPath,
+        timeoutMs: GIT_COMMIT_TIMEOUT_MS,
+      });
+    };
+    const commitWith = async (subjectText: string, bodyText: string): Promise<void> => {
       const commitArgs = [
         "-c",
         `user.name=${FACTORY_GIT_USER_NAME}`,
@@ -510,13 +616,46 @@ export async function commitWorktreeChanges(input: {
         `user.email=${FACTORY_GIT_USER_EMAIL}`,
         "commit",
         "-m",
-        `factory: implement issue #${n} (handoff)`,
+        subjectText,
         ...(bodyText !== "" ? ["-m", bodyText] : []),
       ];
       await run("git", commitArgs, {
         cwd: repoPath,
         timeoutMs: GIT_COMMIT_TIMEOUT_MS,
       });
+    };
+    if (commitUnits.length > 0 && candidates.length > 0) {
+      for (const unit of commitUnits) {
+        try {
+          await stage(unit.paths);
+        } catch (e) {
+          return { ok: false, error: sliceError(`git add failed: ${e instanceof Error ? e.message : String(e)}`) };
+        }
+        try {
+          await commitWith(unit.subject, unit.body !== "" ? unit.body : defaultBodyText);
+        } catch (e) {
+          return { ok: false, error: sliceError(`git commit failed: ${e instanceof Error ? e.message : String(e)}`) };
+        }
+      }
+      const assigned = new Set(commitUnits.flatMap((u) => u.paths));
+      const remaining = candidates.filter((c) => !assigned.has(c));
+      if (remaining.length > 0) {
+        try {
+          await stage(remaining);
+        } catch (e) {
+          return { ok: false, error: sliceError(`git add failed: ${e instanceof Error ? e.message : String(e)}`) };
+        }
+        try {
+          await commitWith("chore: remaining changes", defaultBodyText);
+        } catch (e) {
+          return { ok: false, error: sliceError(`git commit failed: ${e instanceof Error ? e.message : String(e)}`) };
+        }
+      }
+      return { ok: true };
+    }
+    try {
+      if (candidates.length > 0) await stage(candidates);
+      await commitWith(defaultSubjectText, defaultBodyText);
     } catch (e) {
       return { ok: false, error: sliceError(`git commit failed: ${e instanceof Error ? e.message : String(e)}`) };
     }
@@ -724,8 +863,9 @@ export async function openPrForJob(
         manualHint: "",
       };
     }
-    // Title is outcome-first (prp-pr): the accepted outcome leads in
-    // behavior language when known; the issue title stays the fallback.
+    // Title mirrors the issue (prp-pr, skill): texto humano y estable. El
+    // outcome/summary solo entra como fallback sin título y nunca si es
+    // finding o prosa de compliance (caso PR #162).
     const detailsSummary =
       input?.details &&
       typeof (input.details as PrBodyDetails).summary === "string"
@@ -753,7 +893,10 @@ export async function openPrForJob(
     );
     // Anti-duplicate (prp-pr): an open PR for this branch is reused, never
     // recreated. The lookup is best-effort: an unreadable answer fails open
-    // to the push/PR attempt below (its error stays honest).
+    // to the push/PR attempt below (its error stays honest). WS-2: en la
+    // ronda de reconciliación la reutilización NO corta el commit/push — el
+    // trabajo nuevo debe quedar registrado en la rama del PR abierto.
+    let existingPr: { prNumber: number; prUrl: string } | null = null;
     try {
       const existing = await readPrState({ repoPath, branch, run }).catch(
         () => null,
@@ -766,11 +909,30 @@ export async function openPrForJob(
         typeof existing.prUrl === "string" &&
         existing.prUrl.length > 0
       ) {
+        if (input?.reconcile !== true) {
+          return {
+            ok: true,
+            prNumber: existing.prNumber,
+            prUrl: existing.prUrl,
+            duplicate: true,
+          };
+        }
+        existingPr = { prNumber: existing.prNumber, prUrl: existing.prUrl };
+      } else if (
+        input?.reconcile === true &&
+        existing !== null &&
+        existing.ok &&
+        (existing.state === "merged" || existing.state === "closed")
+      ) {
+        // WS-2: reconciliación con PR cerrado/mergeado — jamás crear otro PR
+        // ni pushear trabajo después del cierre; el humano decide (el reporte
+        // del nuevo head queda honesto en REVIEW INCOMPLETE).
         return {
-          ok: true,
-          prNumber: existing.prNumber,
-          prUrl: existing.prUrl,
-          duplicate: true,
+          ok: false,
+          error: sliceError(
+            `reconciliación abortada: el PR de la rama está ${existing.state} — no se pushea ni se crea otro PR`,
+          ),
+          manualHint: hint,
         };
       }
     } catch {
@@ -778,7 +940,7 @@ export async function openPrForJob(
     }
     if (status !== "" && status !== null) {
       // Archivos del commit desde el porcelain ya leído (ground truth de
-      // lo que se commitea; el body del PR usa el diff post-commit abajo).
+      // lo que se commitea; el body del PR usa el diff real pre-push abajo).
       const pendingFiles = parsePorcelainPaths(status).filter((f) =>
         isCommittablePath(f),
       );
@@ -786,6 +948,13 @@ export async function openPrForJob(
         input?.details && typeof input.details === "object" && !Array.isArray(input.details)
           ? { ...(input.details as Record<string, unknown>), files: pendingFiles }
           : { files: pendingFiles };
+      // WS-F: unidades de commit declaradas por el implement (sección
+      // `## Commit units`); sin sección válida cae al commit único legacy.
+      const implementReportText =
+        input?.details &&
+        typeof (input.details as PrBodyDetails).implementReport === "string"
+          ? ((input.details as PrBodyDetails).implementReport as string)
+          : "";
       const committed = await commitWorktreeChanges({
         repoPath,
         issueNumber: n,
@@ -793,6 +962,8 @@ export async function openPrForJob(
         knownStatus: status,
         allowedPaths: input?.allowedPaths,
         messageBody: summarizeDetailsForCommit(commitDetails),
+        messageSubject: buildCommitSubject(n, input?.title),
+        units: extractCommitUnits(implementReportText),
       }).catch(() => ({ ok: false as const, error: "commit spawn failed" }));
       if (!committed.ok) {
         return {
@@ -810,6 +981,35 @@ export async function openPrForJob(
         manualHint: hint,
       };
     }
+    // Changed files ground-truth (el diff real del PR): no depende del
+    // reporte del agente. Best-effort: si falla, el body usa lo declarado.
+    // Además es el gate anti-fuga: si una review aid entró a algún commit
+    // de la rama, no se pushea ni se abre PR (nunca shipean, ver PR #158).
+    let diffFiles: string[] = [];
+    try {
+      const d = await run(
+        "git",
+        ["diff", "--name-only", `${baseBranch}...${branch}`],
+        { cwd: repoPath, timeoutMs: GIT_DIFF_TIMEOUT_MS },
+      );
+      const diffPaths = d.stdout
+        .split("\n")
+        .map((s) => s.trim().replace(/\\/g, "/").replace(/^\.\//, ""))
+        .filter((s) => s.length > 0);
+      const leaked = diffPaths.filter((s) => isReviewAidPath(s));
+      if (leaked.length > 0) {
+        return {
+          ok: false,
+          error: sliceError(
+            `review-aid leaked into branch ${branch}: ${leaked.slice(0, 5).join(", ")} — push/PR abortados`,
+          ),
+          manualHint: hint,
+        };
+      }
+      diffFiles = diffPaths.filter((s) => isCommittablePath(s)).slice(0, 50);
+    } catch {
+      diffFiles = [];
+    }
     try {
       await run("git", ["push", "-u", "origin", branch], {
         cwd: repoPath,
@@ -824,22 +1024,16 @@ export async function openPrForJob(
         manualHint: hint,
       };
     }
-    // Changed files ground-truth (el diff real del PR): no depende del
-    // reporte del agente. Best-effort: si falla, el body usa lo declarado.
-    let diffFiles: string[] = [];
-    try {
-      const d = await run(
-        "git",
-        ["diff", "--name-only", `${baseBranch}...${branch}`],
-        { cwd: repoPath, timeoutMs: GIT_DIFF_TIMEOUT_MS },
-      );
-      diffFiles = d.stdout
-        .split("\n")
-        .map((s) => s.trim().replace(/\\/g, "/").replace(/^\.\//, ""))
-        .filter((s) => s.length > 0 && isCommittablePath(s))
-        .slice(0, 50);
-    } catch {
-      diffFiles = [];
+    if (existingPr) {
+      // WS-2: PR abierto reutilizado en la ronda de reconciliación — el
+      // commit y el push ya se hicieron; jamás se crea otro PR. El reporte
+      // del nuevo head lo publica el caller aguas arriba (idempotente por head).
+      return {
+        ok: true,
+        prNumber: existingPr.prNumber,
+        prUrl: existingPr.prUrl,
+        duplicate: true,
+      };
     }
     const bodyDetails =
       input?.details && typeof input.details === "object" && !Array.isArray(input.details)
@@ -1628,12 +1822,32 @@ export async function maybePublishReviewReportForJob(
     if (/^https?:\/\/\S+$/.test(prevPub) && prevHead !== "" && prevHead === head) {
       return { published: false, skipped: "already-published" };
     }
+    // WS1b: el cuerpo se refresca ANTES de publicar (pr/head reales y prosa
+    // alineada); lo publicado y lo persistido parten del mismo texto.
+    const bodyToPublish = refreshReviewReportMeta(stored.report as string, {
+      pr: prNumber,
+      reviewedHead: head,
+    });
+    // Red de seguridad: reporta violaciones de integridad sin bloquear jamás
+    // el publish (best-effort).
+    try {
+      const violations = assertReportIntegrity(bodyToPublish);
+      if (violations.length > 0) {
+        workItemStore.appendEvent(
+          jobId,
+          "system",
+          `review report integrity: ${violations.join("; ")}`.slice(0, 500),
+        );
+      }
+    } catch {
+      // best-effort: la integridad nunca bloquea el publish
+    }
     const res = await publishReviewReport({
       repoPath,
       prNumber,
       branch,
       headSha: head,
-      body: stored.report as string,
+      body: bodyToPublish,
       run,
     });
     if (!res.ok) {
@@ -1652,11 +1866,7 @@ export async function maybePublishReviewReportForJob(
       }
       return { published: false, error: res.error };
     }
-    const refreshed = refreshReviewReportMeta(stored.report as string, {
-      pr: prNumber,
-      reviewedHead: head,
-      publication: res.url,
-    });
+    const refreshed = refreshReviewReportMeta(bodyToPublish, { publication: res.url });
     try {
       const dir = (job as unknown as { dir?: unknown }).dir;
       if (typeof dir === "string" && dir.length > 0) {
@@ -1694,6 +1904,821 @@ export async function maybePublishReviewReportForJob(
     } catch {
       return { published: false, error: "publish hook failed" };
     }
+  }
+}
+
+/**
+ * External-reviewer wait policy for the first publication: the report is
+ * commented only after the bot review lands (or the wait deadline
+ * expires), so bot findings travel reconciled instead of racing the bot.
+ *
+ * `TERMCANVAS_REVIEW_WAIT_MS` overrides the default wait (0 = publish
+ * immediately, legacy behavior). `TERMCANVAS_REVIEW_BOTS` overrides the
+ * reviewer logins (empty string disables the wait). Never throws.
+ */
+export const BOT_REVIEW_WAIT_MS_DEFAULT = 1_200_000;
+export const BOT_REVIEW_WAIT_MS_MAX = 3_600_000;
+
+export function resolveBotReviewPolicy(
+  env: Record<string, string | undefined> = process.env,
+): { waitMs: number; bots: string[] } {
+  try {
+    const rawBots =
+      typeof env?.TERMCANVAS_REVIEW_BOTS === "string" ? env.TERMCANVAS_REVIEW_BOTS : undefined;
+    const bots =
+      rawBots === undefined
+        ? ["pullfrog", "coderabbit"]
+        : rawBots
+            .split(",")
+            .map((s) => s.trim().toLowerCase())
+            .filter((s) => s.length > 0)
+            .slice(0, 10);
+    if (bots.length === 0) return { waitMs: 0, bots: [] };
+    const rawWait =
+      typeof env?.TERMCANVAS_REVIEW_WAIT_MS === "string" ? env.TERMCANVAS_REVIEW_WAIT_MS.trim() : "";
+    if (rawWait === "") return { waitMs: BOT_REVIEW_WAIT_MS_DEFAULT, bots };
+    const parsed = Number.parseInt(rawWait, 10);
+    if (!Number.isInteger(parsed) || parsed < 0) return { waitMs: BOT_REVIEW_WAIT_MS_DEFAULT, bots };
+    return { waitMs: Math.min(parsed, BOT_REVIEW_WAIT_MS_MAX), bots };
+  } catch {
+    return { waitMs: BOT_REVIEW_WAIT_MS_DEFAULT, bots: ["pullfrog", "coderabbit"] };
+  }
+}
+
+/** Last review findings recorded on the job (bot overlap matching). Never throws. */
+/**
+ * Disposiciones `fN` de la ronda de reconciliación para los bot findings:
+ * parsea el `## Dispositions` del último implement report del timeline y le
+ * adjunta el mensaje del feedback almacenado (match robusto por mensaje;
+ * fallback por índice 1-based del feedback `f1..fn`). Vacío sin ronda o sin
+ * disposiciones. Nunca lanza.
+ */
+function collectBotDispositions(
+  timeline: unknown,
+): Array<{ index: number; message: string; disposition: string; reason: string }> {
+  try {
+    if (!Array.isArray(timeline)) return [];
+    // Provenance obligatoria: las disposiciones aplican SOLO si fueron
+    // escritas por la ronda de reconciliación (evento `botReconcileRun`) y
+    // el implement report es POSTERIOR a ese arranque. Sin esto, el
+    // `## Dispositions` del review interno matcheaba por índice contra la
+    // lista fresca de findings del bot en la primera publicación (H1).
+    let runIdx = -1;
+    for (let i = 0; i < timeline.length; i += 1) {
+      const e = timeline[i];
+      const m = e && typeof e === "object" ? (e as { meta?: unknown }).meta : null;
+      if (m && typeof m === "object" && "botReconcileRun" in (m as Record<string, unknown>)) {
+        runIdx = i;
+      }
+    }
+    if (runIdx < 0) return [];
+    let report = "";
+    for (let i = timeline.length - 1; i > runIdx; i -= 1) {
+      const e = timeline[i];
+      const m = e && typeof e === "object" ? (e as { meta?: unknown }).meta : null;
+      if (!m || typeof m !== "object") continue;
+      const r = (m as Record<string, unknown>).implementReport;
+      if (typeof r === "string" && r.trim() !== "") {
+        report = r;
+        break;
+      }
+    }
+    if (report === "") return [];
+    const feedback = readBotReconcileFeedback(timeline);
+    const feedbackFindings =
+      feedback && Array.isArray(feedback.findings) ? feedback.findings : [];
+    if (feedbackFindings.length === 0) return [];
+    return extractDispositions(report)
+      .map((d) => {
+        const m = d.id.match(/^f(\d+)$/i);
+        if (!m) return null;
+        const index = Number.parseInt(m[1] as string, 10);
+        if (!Number.isInteger(index) || index <= 0) return null;
+        const source = feedbackFindings[index - 1];
+        const message =
+          source && typeof (source as { message?: unknown }).message === "string"
+            ? String((source as { message: string }).message)
+            : "";
+        return { index, message, disposition: d.disposition, reason: d.reason };
+      })
+      .filter(
+        (d): d is { index: number; message: string; disposition: string; reason: string } =>
+          d !== null,
+      )
+      .slice(0, 50);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * P6b: recupera publicaciones pendientes al boot. Re-agenda el publish de los
+ * reports guardados con `publication` sin URL y PR abierto (idempotente por
+ * head; el wait del bot se repite acotado). Solo el dueño del pipeline la
+ * llama. Cap por boot. Nunca lanza.
+ */
+export async function resumePendingReviewPublications(opts?: {
+  limit?: number;
+  run?: GhExecRun;
+  env?: Record<string, string | undefined>;
+  waitMs?: number;
+  waitForBot?: typeof waitForBotReview;
+  bots?: readonly string[];
+}): Promise<{ rescheduled: number; skipped: number }> {
+  const out = { rescheduled: 0, skipped: 0 };
+  try {
+    const limit =
+      typeof opts?.limit === "number" && Number.isInteger(opts.limit) && opts.limit > 0
+        ? Math.min(opts.limit, 20)
+        : 5;
+    for (const job of workItemStore.list()) {
+      if (out.rescheduled >= limit) break;
+      try {
+        if (job.status !== "Complete") {
+          out.skipped += 1;
+          continue;
+        }
+        const timeline = (job as unknown as { timeline?: unknown }).timeline;
+        const iso = (job as unknown as { isolation?: Record<string, unknown> | null }).isolation;
+        if (!iso || iso.state !== "pr-open") {
+          out.skipped += 1;
+          continue;
+        }
+        const prNumber =
+          typeof iso.prNumber === "number" && Number.isInteger(iso.prNumber) && iso.prNumber > 0
+            ? (iso.prNumber as number)
+            : 0;
+        const repoPath = typeof iso.worktreePath === "string" ? iso.worktreePath : "";
+        const branch = typeof iso.branch === "string" ? iso.branch : "";
+        if (prNumber <= 0 || repoPath === "" || branch === "") {
+          out.skipped += 1;
+          continue;
+        }
+        const stored = readReviewReportFromTimeline(timeline);
+        if (!stored || typeof stored.report !== "string" || stored.report === "") {
+          out.skipped += 1;
+          continue;
+        }
+        const pub = typeof stored.publication === "string" ? stored.publication : "";
+        if (/^https?:\/\//.test(pub)) {
+          out.skipped += 1;
+          continue;
+        }
+        // Cap entre boots: tras 2 intentos de recovery, decide el humano.
+        let resumedBefore = 0;
+        if (Array.isArray(timeline)) {
+          for (const e of timeline) {
+            const m = e && typeof e === "object" ? (e as { meta?: unknown }).meta : null;
+            if (
+              m &&
+              typeof m === "object" &&
+              "publicationResumed" in (m as Record<string, unknown>)
+            ) {
+              resumedBefore += 1;
+            }
+          }
+        }
+        if (resumedBefore >= 2) {
+          out.skipped += 1;
+          continue;
+        }
+        // Drift: un reporte con head revisado REAL distinto del head actual no
+        // se re-publica como si hubiera revisado el head nuevo (`unknown` es el
+        // estado pre-PR normal: el refresh del publish lo fija al head actual).
+        const meta = parseReviewReportMeta(stored.report);
+        const reviewedHead =
+          meta && typeof meta.reviewed_head === "string" ? meta.reviewed_head : "";
+        const currentHead = await resolvePublishHead({
+          repoPath,
+          branch,
+          run: opts?.run ?? defaultRun,
+        }).catch(() => "unknown");
+        if (reviewedHead !== "" && reviewedHead !== "unknown" && reviewedHead !== currentHead) {
+          out.skipped += 1;
+          continue;
+        }
+        const result = await scheduleReviewReportPublish(job.id, {
+          repoPath,
+          prNumber,
+          branch,
+          // Mismo hook que los caminos normales: si el bot dejó findings
+          // abiertos, la ronda de reconciliación debe poder arrancar (si no,
+          // el evento `botReconcile` quemaría el cap sin ronda).
+          onBotReconcile: (id: string, fb: unknown) => {
+            void import("../engineBridge")
+              .then((m) => m.reconcileFromAnyCaller(id, fb))
+              .catch(() => {});
+          },
+          ...(opts?.run ? { run: opts.run } : {}),
+          ...(opts?.env ? { env: opts.env } : {}),
+          ...(typeof opts?.waitMs === "number" ? { waitMs: opts.waitMs } : {}),
+          ...(opts?.waitForBot ? { waitForBot: opts.waitForBot } : {}),
+          ...(opts?.bots ? { bots: opts.bots } : {}),
+        });
+        if (result.mode === "skipped") {
+          out.skipped += 1;
+          continue;
+        }
+        out.rescheduled += 1;
+        try {
+          workItemStore.appendEvent(
+            job.id,
+            "system",
+            `review report publish re-scheduled (boot recovery, ${result.mode})`,
+            { publicationResumed: true } as unknown as Record<string, unknown>,
+          );
+        } catch {
+          // best-effort: el estado ya quedó re-agendado
+        }
+      } catch {
+        out.skipped += 1;
+      }
+    }
+  } catch {
+    // best-effort: el boot nunca se rompe por la recuperación
+  }
+  return out;
+}
+
+/**
+ * P3: recupera rondas de reconciliación post-bot perdidas (el gate estaba
+ * apagado al publicar, o el hook no llegó a arrancar). Prepara el evento
+ * `botReconcile` (si falta) desde los findings estructurados persistidos y
+ * avisa al caller vía `onBotReconcile`; el cap real sigue siendo
+ * `botReconcileRun` (un start fallido se puede reintentar en el próximo
+ * boot). Solo corre con el gate activo y reports publicados; los reports
+ * pre-P3 sin `botFindings` estructurados se saltean honestamente. Cap por
+ * boot. Solo el dueño del pipeline la llama. Nunca lanza.
+ */
+export async function resumeMissedBotReconcileRounds(opts?: {
+  limit?: number;
+  env?: Record<string, string | undefined>;
+  onBotReconcile?: (jobId: string, feedback: BotReconcileFeedback) => void | Promise<void>;
+}): Promise<{ prepared: number; skipped: number }> {
+  const out = { prepared: 0, skipped: 0 };
+  try {
+    if (!resolveBotReconcilePolicy(opts?.env ?? process.env).enabled) return out;
+    const limit =
+      typeof opts?.limit === "number" && Number.isInteger(opts.limit) && opts.limit > 0
+        ? Math.min(opts.limit, 10)
+        : 3;
+    for (const job of workItemStore.list()) {
+      if (out.prepared >= limit) break;
+      try {
+        if (job.status !== "Complete") {
+          out.skipped += 1;
+          continue;
+        }
+        const iso = (job as unknown as { isolation?: Record<string, unknown> | null }).isolation;
+        if (
+          !iso ||
+          iso.state !== "pr-open" ||
+          typeof iso.branch !== "string" ||
+          iso.branch === ""
+        ) {
+          out.skipped += 1;
+          continue;
+        }
+        const timeline = (job as unknown as { timeline?: unknown }).timeline;
+        // Cap ya consumido: no hay ronda que recuperar.
+        if (hasBotReconcileRunEvent(timeline)) {
+          out.skipped += 1;
+          continue;
+        }
+        // Solo reports ya publicados; los pendientes los cubre P6 (que al
+        // publicar prepara su propia ronda con el gate vigente).
+        const stored = readReviewReportFromTimeline(timeline);
+        const publication = typeof stored?.publication === "string" ? stored.publication : "";
+        if (!/^https?:\/\//.test(publication)) {
+          out.skipped += 1;
+          continue;
+        }
+        let feedback = readBotReconcileFeedback(timeline);
+        if (!feedback) {
+          const structured = readBotFindingsFromTimeline(timeline);
+          feedback = structured.length > 0 ? buildBotReconcileFeedback(structured) : null;
+        }
+        if (!feedback) {
+          out.skipped += 1;
+          continue;
+        }
+        const openCount = feedback.findings.length;
+        if (!hasBotReconcileEvent(timeline)) {
+          workItemStore.appendEvent(
+            job.id,
+            "system",
+            `bot reconcile: ${openCount} open finding(s) prepared for a new revise round (cap 1, boot recovery)`,
+            { botReconcile: { feedback, openCount, recovered: true } } as unknown as Record<
+              string,
+              unknown
+            >,
+          );
+        }
+        try {
+          await opts?.onBotReconcile?.(job.id, feedback);
+        } catch {
+          // el hook del caller nunca rompe el boot
+        }
+        out.prepared += 1;
+      } catch {
+        out.skipped += 1;
+      }
+    }
+  } catch {
+    // best-effort: el boot nunca se rompe por la recuperación
+  }
+  return out;
+}
+
+function readInternalFindingsForBot(
+  job: WorkItem | null | undefined,
+): Array<{ id: unknown; file: unknown; state: unknown }> {
+  try {
+    const last = (job as unknown as { lastReview?: unknown } | undefined)?.lastReview;
+    if (!last || typeof last !== "object" || Array.isArray(last)) return [];
+    const findings = (last as Record<string, unknown>).findings;
+    if (!Array.isArray(findings)) return [];
+    return findings
+      .filter((f): f is Record<string, unknown> => !!f && typeof f === "object" && !Array.isArray(f))
+      .slice(0, 50)
+      .map((f) => ({ id: f.id, file: f.file, state: f.state }));
+  } catch {
+    return [];
+  }
+}
+
+/** Resolves the publish target from opts or the job isolation record. Never throws. */
+function resolveReviewPublishTarget(
+  job: WorkItem | null | undefined,
+  opts?: { repoPath?: unknown; prNumber?: unknown; branch?: unknown },
+): { repoPath: string; prNumber: number; branch: string } {
+  try {
+    const iso = (job as unknown as { isolation?: Record<string, unknown> } | undefined)?.isolation;
+    const repoPath =
+      typeof opts?.repoPath === "string" && opts.repoPath.length > 0
+        ? opts.repoPath
+        : iso && typeof iso.worktreePath === "string"
+          ? (iso.worktreePath as string)
+          : "";
+    const branch =
+      typeof opts?.branch === "string" && opts.branch.length > 0
+        ? opts.branch
+        : iso && typeof iso.branch === "string"
+          ? (iso.branch as string)
+          : "";
+    const prNumber =
+      typeof opts?.prNumber === "number" && Number.isInteger(opts.prNumber)
+        ? opts.prNumber
+        : iso && typeof iso.prNumber === "number"
+          ? (iso.prNumber as number)
+          : 0;
+    return { repoPath, prNumber, branch };
+  } catch {
+    return { repoPath: "", prNumber: 0, branch: "" };
+  }
+}
+
+/** Feedback de revise que consume el próximo implement (mismo shape de `reviewFeedback`). */
+export interface BotReconcileFeedback {
+  verdict: "revise";
+  summary: string;
+  findings: Array<{ message: string; severity?: string; file?: string; suggestion?: string }>;
+}
+
+/**
+ * Política de reconciliación post-bot (WS-B): el override explícito del env
+ * `TERMCANVAS_BOT_RECONCILE` (`1`/`0`) gana; si no está seteado vale el
+ * setting persistido (`/factory/settings`, P4); sin ninguno, off. Nunca lanza.
+ */
+export function resolveBotReconcilePolicy(
+  env: Record<string, string | undefined> = process.env,
+): { enabled: boolean; source: "env" | "setting" | "default" } {
+  try {
+    return resolveBotReconcileGate(env);
+  } catch {
+    return { enabled: false, source: "default" };
+  }
+}
+
+/**
+ * Convierte los bot findings SIN reconciliar (status `open`) en el feedback
+ * de revise que el próximo implement consume (`reviewFeedback.verdict ===
+ * "revise"`, `implementPrompt.ts`): mensajes saneados, hasta 10 findings.
+ * Null cuando no hay ninguno mapeable. Puro, nunca lanza.
+ */
+export function buildBotReconcileFeedback(findings: unknown): BotReconcileFeedback | null {
+  try {
+    if (!Array.isArray(findings)) return null;
+    const mapped: BotReconcileFeedback["findings"] = [];
+    for (const f of findings) {
+      if (!f || typeof f !== "object" || Array.isArray(f)) continue;
+      const r = f as Record<string, unknown>;
+      const status = typeof r.status === "string" ? r.status.trim().toLowerCase() : "";
+      if (status !== "open") continue;
+      const message =
+        typeof r.message === "string" ? r.message.replace(/\s+/g, " ").trim().slice(0, 300) : "";
+      if (message === "") continue;
+      const one: BotReconcileFeedback["findings"][number] = { message };
+      const file = typeof r.file === "string" ? r.file.trim().slice(0, 200) : "";
+      if (file !== "") one.file = file;
+      const suggestion = typeof r.suggestion === "string" ? r.suggestion.trim().slice(0, 300) : "";
+      if (suggestion !== "") one.suggestion = suggestion;
+      mapped.push(one);
+      if (mapped.length >= 10) break;
+    }
+    if (mapped.length === 0) return null;
+    return {
+      verdict: "revise",
+      summary: `Bot review sin reconciliar (${mapped.length} finding${
+        mapped.length === 1 ? "" : "s"
+      }): marcá cada uno Taken (fix) o Dropped (razón) antes del merge.`,
+      findings: mapped,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Cap WS-B: un solo round de reconciliación por job (evento durable en el timeline). */
+export function hasBotReconcileEvent(timeline: unknown): boolean {
+  try {
+    if (!Array.isArray(timeline)) return false;
+    return timeline.some((e) => {
+      const m = e && typeof e === "object" ? (e as { meta?: unknown }).meta : null;
+      return !!m && typeof m === "object" && "botReconcile" in (m as Record<string, unknown>);
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Cap real de la ronda de reconciliación: el evento `botReconcileRun` que
+ * escribe el starter al arrancar (`startBotReconcileRun`). Un start fallido
+ * no lo escribe, así que la ronda puede reintentarse; un start exitoso la
+ * cierra para siempre (cap 1). Nunca lanza.
+ */
+export function hasBotReconcileRunEvent(timeline: unknown): boolean {
+  try {
+    if (!Array.isArray(timeline)) return false;
+    return timeline.some((e) => {
+      const m = e && typeof e === "object" ? (e as { meta?: unknown }).meta : null;
+      return !!m && typeof m === "object" && "botReconcileRun" in (m as Record<string, unknown>);
+    });
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Feedback persistido por el evento `botReconcile` (restart-safe): permite
+ * re-armar el run de reconciliación sin depender del callback en memoria.
+ * Null cuando no hay evento o el shape es basura. Puro, nunca lanza.
+ */
+export function readBotReconcileFeedback(timeline: unknown): BotReconcileFeedback | null {
+  try {
+    if (!Array.isArray(timeline)) return null;
+    for (let i = timeline.length - 1; i >= 0; i -= 1) {
+      const e = timeline[i];
+      const m = e && typeof e === "object" ? (e as { meta?: unknown }).meta : null;
+      if (!m || typeof m !== "object") continue;
+      const bc = (m as Record<string, unknown>).botReconcile;
+      if (!bc || typeof bc !== "object" || Array.isArray(bc)) continue;
+      const fb = (bc as Record<string, unknown>).feedback;
+      if (fb && typeof fb === "object" && !Array.isArray(fb)) {
+        return fb as BotReconcileFeedback;
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * P3: recorta los findings reconciliados al shape mínimo que viaja en el
+ * evento `review report bot section` (`botFindings`) para poder reconstruir
+ * el feedback de una ronda sin parsear el markdown del reporte. Puro, nunca
+ * lanza.
+ */
+export function sanitizeBotFindingsForTimeline(
+  findings: unknown,
+): Array<{ id: string; status: string; message: string; file?: string; suggestion?: string }> {
+  const out: Array<{ id: string; status: string; message: string; file?: string; suggestion?: string }> = [];
+  try {
+    if (!Array.isArray(findings)) return out;
+    for (const f of findings) {
+      if (!f || typeof f !== "object" || Array.isArray(f)) continue;
+      const rec = f as Record<string, unknown>;
+      const message =
+        typeof rec.message === "string" ? rec.message.replace(/\s+/g, " ").trim().slice(0, 300) : "";
+      if (message === "") continue;
+      const id = typeof rec.id === "string" ? rec.id.trim().slice(0, 80) : "";
+      const status =
+        typeof rec.status === "string" && rec.status.trim() !== ""
+          ? rec.status.trim().toLowerCase().slice(0, 20)
+          : "open";
+      const file = typeof rec.file === "string" ? rec.file.trim().slice(0, 200) : "";
+      const suggestion =
+        typeof rec.suggestion === "string" ? rec.suggestion.trim().slice(0, 300) : "";
+      out.push({
+        id,
+        status,
+        message,
+        ...(file !== "" ? { file } : {}),
+        ...(suggestion !== "" ? { suggestion } : {}),
+      });
+      if (out.length >= 20) break;
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * P3: último array `botFindings` estructurado persistido en el timeline (el
+ * evento `review report bot section` más reciente). Vacío cuando no hay.
+ * Puro, nunca lanza.
+ */
+export function readBotFindingsFromTimeline(
+  timeline: unknown,
+): Array<{ id: string; status: string; message: string; file?: string; suggestion?: string }> {
+  try {
+    if (!Array.isArray(timeline)) return [];
+    for (let i = timeline.length - 1; i >= 0; i -= 1) {
+      const e = timeline[i];
+      const m = e && typeof e === "object" ? (e as { meta?: unknown }).meta : null;
+      if (!m || typeof m !== "object" || Array.isArray(m)) continue;
+      const raw = (m as Record<string, unknown>).botFindings;
+      if (!Array.isArray(raw)) continue;
+      return sanitizeBotFindingsForTimeline(raw);
+    }
+    return [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Bloque markdown para el input `bot_findings` del run de reconciliación:
+ * renumera los findings abiertos como `f1..fn` (los ids que
+ * `extractDispositions` y el review saben disponer), con archivo y
+ * sugerencia. Vacío cuando no hay findings mapeables. Puro, nunca lanza.
+ */
+export function formatBotFindingsForPrompt(feedback: unknown): string {
+  try {
+    if (!feedback || typeof feedback !== "object" || Array.isArray(feedback)) return "";
+    const findings = (feedback as { findings?: unknown }).findings;
+    if (!Array.isArray(findings)) return "";
+    const lines: string[] = [];
+    for (const f of findings) {
+      if (!f || typeof f !== "object" || Array.isArray(f)) continue;
+      const rec = f as { message?: unknown; file?: unknown; suggestion?: unknown };
+      const message = typeof rec.message === "string" ? rec.message.trim() : "";
+      if (message === "") continue;
+      const file =
+        typeof rec.file === "string" && rec.file.trim() !== "" ? ` (${rec.file.trim()})` : "";
+      const suggestion =
+        typeof rec.suggestion === "string" && rec.suggestion.trim() !== ""
+          ? ` — Suggested fix: ${rec.suggestion.trim()}`
+          : "";
+      lines.push(`- f${lines.length + 1}${file} — ${message}${suggestion}`);
+      if (lines.length >= 10) break;
+    }
+    if (lines.length === 0) return "";
+    return lines.join("\n").slice(0, 4000);
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Background publication after the external reviewer: bounded wait
+ * (`waitForBotReview`), mechanical reconciliation, bot section merged
+ * into the report and publish. On timeout the section closes honestly
+ * with the deadline-pending copy (`status: "timeout"`). Con el flag de
+ * reconciliación activo y findings abiertos, prepara UNA ronda de revise
+ * (cap 1) y avisa al caller vía `onBotReconcile`. Never throws.
+ */
+async function runDeferredBotReviewPublish(input: {
+  jobId: string;
+  repoPath: string;
+  prNumber: number;
+  branch: string;
+  bots: readonly string[];
+  run: GhExecRun;
+  waitMs: number;
+  pollMs?: number;
+  sleep?: (ms: number) => Promise<void>;
+  waitForBot?: typeof waitForBotReview;
+  /**
+   * Gate de la ronda post-bot. Booleano (decisiones viejas) o thunk: con P4
+   * el gate se evalúa al momento del publish (el setting puede cambiar
+   * durante el wait del bot).
+   */
+  reconcileEnabled?: boolean | (() => boolean);
+  onBotReconcile?: (jobId: string, feedback: BotReconcileFeedback) => void | Promise<void>;
+}): Promise<void> {
+  const publish = async (): Promise<void> => {
+    try {
+      await maybePublishReviewReportForJob(input.jobId, {
+        repoPath: input.repoPath,
+        prNumber: input.prNumber,
+        branch: input.branch,
+        run: input.run,
+      });
+    } catch {
+      // best-effort: el PR ya quedó abierto
+    }
+  };
+  try {
+    const waitForBot = input.waitForBot ?? waitForBotReview;
+    const waited = await waitForBot({
+      repoPath: input.repoPath,
+      prNumber: input.prNumber,
+      run: input.run,
+      bots: input.bots,
+      timeoutMs: input.waitMs,
+      ...(typeof input.pollMs === "number" ? { pollMs: input.pollMs } : {}),
+      ...(typeof input.sleep === "function" ? { sleep: input.sleep } : {}),
+    });
+    const job = workItemStore.get(input.jobId);
+    const stored = readReviewReportFromTimeline(job?.timeline);
+    if (stored && typeof stored.report === "string" && stored.report !== "") {
+      const head = await resolvePublishHead({
+        repoPath: input.repoPath,
+        branch: input.branch,
+        run: input.run,
+      }).catch(() => "unknown");
+      let findings: ReturnType<typeof reconcileBotFindings> = [];
+      if (waited.status === "found" && waited.findings.length > 0) {
+        const since =
+          waited.findings
+            .map((f) => f.createdAt)
+            .filter((s) => s.length > 0)
+            .sort()[0] ?? "";
+        const changed =
+          since !== ""
+            ? await changedFilesSince({ repoPath: input.repoPath, sinceIso: since, run: input.run })
+            : [];
+        // P4: disposiciones `fN` de la ronda (si existe): un estado terminal
+        // marca `dispositioned` en vez de `open` (no bloquea readiness).
+        const dispositions = collectBotDispositions(
+          (job as unknown as { timeline?: unknown } | null | undefined)?.timeline,
+        );
+        findings = reconcileBotFindings(waited.findings, {
+          internalFindings: readInternalFindingsForBot(job),
+          changedFiles: changed,
+          ...(dispositions.length > 0 ? { dispositions } : {}),
+        });
+      }
+      const appended = appendBotReviewSection(stored.report, findings, {
+        botReviewer: waited.reviewer,
+        reviewedHead: head,
+        status: waited.status,
+      });
+      // WS1b (endurecido): un bot finding abierto degrada header Y §1 juntos
+      // (verdict REVIEW INCOMPLETE + readiness blocked, con la razón del bot);
+      // sin abiertos el reporte vuelve a ready. Nunca READY con readiness
+      // distinto de ready (caso PR #162). Un verdict ya no-READY se preserva.
+      const updated = applyBotFindingsToReport(appended, findings, {
+        reviewedHead: head,
+        status: waited.status,
+      });
+      // WS-B: con findings del bot sin reconciliar, preparar UNA ronda de
+      // revise (gate + cap 1) hacia el próximo implement. El callback del
+      // caller decide si re-dispara; el engine deja el feedback durable en el
+      // timeline (mismo shape que `reviewFeedback`). P2: si el gate está
+      // apagado, el skip deja traza (antes era mudo: PR bloqueado y nada más).
+      try {
+        const openCount = findings.filter((f) => f.status === "open").length;
+        const jobNow = workItemStore.get(input.jobId);
+        const reconcileOn =
+          typeof input.reconcileEnabled === "function"
+            ? input.reconcileEnabled() === true
+            : input.reconcileEnabled === true;
+        if (openCount > 0 && jobNow && !hasBotReconcileEvent((jobNow as unknown as { timeline?: unknown }).timeline)) {
+          if (reconcileOn) {
+            const feedback = buildBotReconcileFeedback(findings);
+            if (feedback) {
+              workItemStore.appendEvent(
+                input.jobId,
+                "system",
+                `bot reconcile: ${openCount} open finding(s) prepared for a new revise round (cap 1)`,
+                { botReconcile: { feedback, openCount } } as unknown as Record<string, unknown>,
+              );
+              try {
+                await input.onBotReconcile?.(input.jobId, feedback);
+              } catch {
+                // el hook del caller nunca rompe el publish
+              }
+            }
+          } else {
+            workItemStore.appendEvent(
+              input.jobId,
+              "system",
+              `bot reconcile skipped: ${openCount} open finding(s) sin ronda (gate off)`,
+              { botReconcileSkipped: { openCount, reason: "gate-off" } } as unknown as Record<
+                string,
+                unknown
+              >,
+            );
+          }
+        }
+      } catch {
+        // best-effort: la preparación de la ronda nunca rompe el publish
+      }
+      try {
+        workItemStore.appendEvent(
+          input.jobId,
+          "system",
+          `review report bot section: ${findings.length} finding(s), ${findings.filter((f) => f.status === "open").length} open (${waited.status})`,
+          {
+            reviewReport: { ...stored, report: updated.slice(0, 20000) },
+            // P3: findings estructurados para que el boot recovery (o una
+            // re-armada futura) pueda reconstruir el feedback sin parsear el
+            // markdown del reporte.
+            botFindings: sanitizeBotFindingsForTimeline(findings),
+          } as unknown as Record<string, unknown>,
+        );
+      } catch {
+        // best-effort: el archivo local sigue siendo la fuente
+      }
+    }
+  } catch {
+    // best-effort: publica igual el reporte sin sección de bot
+  }
+  await publish();
+}
+
+export interface ScheduleReviewPublishResult {
+  mode: "immediate" | "deferred" | "skipped";
+  skipped?: string;
+  outcome?: PublishReviewOutcome;
+}
+
+/**
+ * Publication entrypoint after the PR is ensured (option A): waits for
+ * the external reviewer within a bounded window and publishes the report
+ * reconciled; with the wait disabled (or no target) it publishes
+ * immediately like before. Never throws.
+ */
+export async function scheduleReviewReportPublish(
+  jobId: unknown,
+  opts?: {
+    repoPath?: unknown;
+    prNumber?: unknown;
+    branch?: unknown;
+    run?: GhExecRun;
+    env?: Record<string, string | undefined>;
+    waitMs?: unknown;
+    bots?: readonly string[];
+    pollMs?: number;
+    sleep?: (ms: number) => Promise<void>;
+    waitForBot?: typeof waitForBotReview;
+    /** WS-B: hook opcional para re-disparar la ronda de reconciliación. */
+    onBotReconcile?: (jobId: string, feedback: BotReconcileFeedback) => void | Promise<void>;
+  },
+): Promise<ScheduleReviewPublishResult> {
+  try {
+    if (typeof jobId !== "string" || jobId.length === 0) {
+      return { mode: "skipped", skipped: "bad-id" };
+    }
+    const policy = resolveBotReviewPolicy(opts?.env ?? process.env);
+    const waitMs =
+      typeof opts?.waitMs === "number" && Number.isInteger(opts.waitMs) && opts.waitMs >= 0
+        ? Math.min(opts.waitMs as number, BOT_REVIEW_WAIT_MS_MAX)
+        : policy.waitMs;
+    const bots = Array.isArray(opts?.bots) ? opts.bots : policy.bots;
+    const job = workItemStore.get(jobId);
+    const target = resolveReviewPublishTarget(job, opts);
+    if (waitMs <= 0 || bots.length === 0 || target.repoPath.trim() === "" || target.prNumber <= 0) {
+      const outcome = await maybePublishReviewReportForJob(jobId, opts);
+      return { mode: "immediate", outcome };
+    }
+    void runDeferredBotReviewPublish({
+      jobId,
+      repoPath: target.repoPath,
+      prNumber: target.prNumber,
+      branch: target.branch,
+      bots,
+      run: opts?.run ?? defaultRun,
+      waitMs,
+      // P4: el gate se evalúa recién al decidir (el setting puede cambiar
+      // durante el wait del bot; el env sigue mandando si está seteado).
+      reconcileEnabled: () => resolveBotReconcilePolicy(opts?.env ?? process.env).enabled,
+      ...(typeof opts?.onBotReconcile === "function" ? { onBotReconcile: opts.onBotReconcile } : {}),
+      ...(typeof opts?.pollMs === "number" ? { pollMs: opts.pollMs } : {}),
+      ...(typeof opts?.sleep === "function" ? { sleep: opts.sleep } : {}),
+      ...(typeof opts?.waitForBot === "function" ? { waitForBot: opts.waitForBot } : {}),
+    });
+    return { mode: "deferred" };
+  } catch (e) {
+    return {
+      mode: "skipped",
+      skipped: e instanceof Error ? e.message.slice(0, 200) : String(e).slice(0, 200),
+    };
   }
 }
 
@@ -1883,6 +2908,16 @@ export function buildPrDetailsFromJob(job: unknown): {
  */
 export async function maybeOpenPrForCompletedJob(
   jobId: unknown,
+  opts?: {
+    /**
+     * Ronda de reconciliación post-bot (WS-2): reutiliza el PR abierto sin
+     * cortar el commit/push del trabajo nuevo; el caller la dispara con el
+     * run de reconciliación completado.
+     */
+    reconcile?: boolean;
+    /** Hook WS-B: re-disparo de la ronda cuando el bot deja findings abiertos. */
+    onBotReconcile?: (jobId: string, feedback: BotReconcileFeedback) => void | Promise<void>;
+  },
 ): Promise<CompletedPrOutcome> {
   try {
     if (typeof jobId !== "string" || jobId.length === 0) {
@@ -1922,7 +2957,9 @@ export async function maybeOpenPrForCompletedJob(
       return { opened: false, skipped: "not-isolated" };
     }
     const guard = prGuard(job);
-    if (guard.opened) return { opened: false, skipped: "already-opened" };
+    if (guard.opened && opts?.reconcile !== true) {
+      return { opened: false, skipped: "already-opened" };
+    }
     const branchHit = iso.branch.match(/^issue-(\d+)/);
     const issueNumber = branchHit
       ? Number.parseInt(branchHit[1] as string, 10)
@@ -1956,14 +2993,23 @@ export async function maybeOpenPrForCompletedJob(
       issueNumber,
       title: prText.title,
       details: prText.details,
+      ...(opts?.reconcile === true ? { reconcile: true } : {}),
     });
     if (res.ok) {
       try {
+        // No pisar un estado terminal del PR (merged/closed): el reuse
+        // duplicado devuelve el PR viejo y re-marcarlo pr-open confundiría
+        // al panel (carrera: el humano lo cierra durante la ronda).
+        const prevState =
+          iso && typeof (iso as { state?: unknown }).state === "string"
+            ? ((iso as { state: string }).state)
+            : "";
         (job as WorkItem).isolation = {
           ...iso,
           prNumber: res.prNumber,
           prUrl: res.prUrl,
-          state: "pr-open",
+          state:
+            res.duplicate === true && prevState === "pr-merged" ? "pr-merged" : "pr-open",
         };
       } catch {
         // Memory fast path is best-effort; the timeline event is the record.
@@ -1991,13 +3037,18 @@ export async function maybeOpenPrForCompletedJob(
       } catch {
         // The memory record above already carries the outcome.
       }
-      // P3b (default publicar-siempre): con el PR asegurado, publica el
-      // reporte canónico de review. Best-effort: nunca voltea el handoff.
+      // P3b + revisor externo primero (option A): con el PR asegurado, la
+      // publicación espera acotada al bot (pullfrog) y comenta el reporte
+      // reconciliado; `TERMCANVAS_REVIEW_WAIT_MS=0` vuelve al publish
+      // inmediato. Best-effort: nunca voltea el handoff.
       try {
-        await maybePublishReviewReportForJob(jobId, {
+        await scheduleReviewReportPublish(jobId, {
           repoPath: iso.worktreePath,
           prNumber: res.prNumber,
           branch: iso.branch,
+          ...(typeof opts?.onBotReconcile === "function"
+            ? { onBotReconcile: opts.onBotReconcile }
+            : {}),
         });
       } catch {
         // best-effort; el PR ya quedó abierto

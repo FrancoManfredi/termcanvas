@@ -63,6 +63,12 @@ Además, para todos los workflows:
    El review preserva IDs entre rondas (nunca renumera). El parser
    `extractDispositions` (`isolationStore.ts`) espeja la tabla al PR body
    (`## Review dispositions`); sin sección no hay tabla.
+6. **Commit units (prp-issue)**: el reporte del implement incluye
+   `## Commit units`, una línea por unidad de trabajo
+   (`- <type>: <subject> — <path1>, <path2>`, type conventional y paths
+   backtickeados). Una unidad es un commit y cada archivo tocado aparece
+   exactamente una vez. Sección ausente o inválida → un único commit
+   (comportamiento legacy).
 
 ## Veredicto de contrato del triage (prp-issue-contract, liviano)
 
@@ -104,20 +110,138 @@ El espejo del engine (`mirrorRunEvidence` en `engineBridge.ts`) escribe
 `headless-runtime/review/reviewReport.ts`): metadata máquina en HTML
 comment (`prp-review-id`, `pr`, `base`, `head`, `reviewed`,
 `reviewed_head`, `verdict: READY TO MERGE | NEEDS FIXES |
-REVIEW INCOMPLETE`, `open_findings`, `scopes`, `publication`),
-tabla de findings (severidades `Critical/Important/Suggestion`
-mapeadas desde `blocker/major/minor/info`), `<details>` por finding
-(impacto, evidencia `path:line`, outcome requerido, autor,
-disposición), cobertura por scope y tabla de validación. Sin PR
-todavía: `pr: 0, publication: pending`.
+REVIEW INCOMPLETE`, `readiness: ready | blocked | pending`,
+`open_findings`, `mode`, `round`, `scopes`, `publication`) + cuerpo por
+rondas:
 
-Publicación (default publicar-siempre, `gitHubPr.ts`): tras el PR
-asegurado, `maybePublishReviewReportForJob` comenta el reporte con
-`gh pr comment` y solo reporta la URL cuando el marcador
+1. Verdict (`Ready. Action: none|fix f1, f2`) con summary curado y
+   contadores blocking/non-blocking.
+2. Accepted contract desde `artifacts/scope.md` del worktree (Required
+   outcome / Invariants / Explicit non-goals); sin scope congelado, el
+   review juzga contra el issue/spec. El scope puede cerrar con
+   `## Amendments` (`- A<n>: <qué cambió> — <razón> (ronda k)`):
+   obligatorio cuando el diff modifica algo congelado (invariante,
+   non-goal, o un test existente que pineaba el comportamiento viejo).
+   El review exige el amendment: cambiar comportamiento pineado sin
+   amendment es finding `major` en `requirements`.
+3. Reviewed head SHA (el cursor de la próxima ronda).
+4. Findings en secciones: Blocking, Important (non-blocking),
+   Suggestions, Rejected findings (terminales `NOT_A_FINDING`/`DECLINED`
+   con razón) y Complete causal class (enumeración del `class`).
+5. Prior findings: tabla de la ronda N-1 (sidecar
+   `review-rounds.json`; la ronda previa se rota a
+   `review-report-round-<n>.md` antes de sobrescribir el reporte).
+6. Bot review: findings del revisor externo (pullfrog/CodeRabbit) con
+   reconciliación mecánica `Taken` (commit posterior toca el archivo) /
+   `Overlap` (mismo surface que un finding interno) / `Dispositioned` (la
+   ronda de reconciliación lo dispuso con estado terminal — `FIXED`,
+   `NOT_A_FINDING`, `TRACKED_FOLLOW_UP` o `DECLINED` — matcheando el
+   mensaje del feedback `fN` o su índice 1-based) / `Open` (sin
+   reconciliar; frena el merge, no el reporte).
+7. Discoveries (`discoveries.json`/`discoveries.md` junto a los
+   artefactos; sección con la nota "surface each discovery to your
+   human"). Los IDs son estables entre rondas. Cada discovery necesita
+   estado terminal — `accepted` con el número de issue creado
+   (`gh issue create`) o `dropped` con razón —; sin disposición bloquea
+   el verde igual que un finding sin disposición.
+8. Review coverage: lentes corridos, lentes no corridos con razón,
+   tabla de validación y evidencia no obtenida.
+
+Sin PR todavía: `pr: 0, publication: pending`; la sección 6 queda
+`Pending` hasta que el publisher la completa.
+
+`readiness` es el veredicto máquina único: `computeReadiness` lo deriva
+de los mismos inputs estructurados y la prosa de la sección 1 lo
+refleja, nunca al revés.
+
+- `ready`: `verdict: READY TO MERGE` sin ninguna causa de bloqueo.
+- `blocked`: causa concreta que prohíbe mergear (`NEEDS FIXES`, finding
+  `Critical` abierto, bot finding `open`, o un blocker inyectado por el
+  engine — requisito no cubierto, finding o discovery sin disposición).
+  Sección 1: `**Not ready. Action: <ids|none>.** Blocked by: <razón 1>;
+  <razón 2>.`
+- `pending`: review sin terminar (`REVIEW INCOMPLETE`, o el bot todavía
+  no aterrizó). Sección 1: `**Review incomplete. Action: ...** Pending:
+  <razón>.`
+
+Invariante: `verdict: READY TO MERGE` no puede convivir con `readiness`
+distinto de `ready`; cualquier causa de bloqueo baja el header a
+`REVIEW INCOMPLETE` además de `readiness: blocked`. Cuando el revisor
+externo aterriza después del PR, el append (`appendBotReviewSection` +
+`refreshReviewReportMeta` en `gitHubPr.ts`) degrada el reporte a
+REVIEW INCOMPLETE/blocked si deja bot findings `Open` (sección 6 con la
+tabla y el renglón `bot finding <id> open: <mensaje>`); sin abiertos la
+readiness queda `ready`; si vence el deadline de espera sin findings,
+queda `pending` con el copy de deadline.
+
+Publicación con revisor externo primero (`gitHubPr.ts`,
+`scheduleReviewReportPublish`): tras el PR asegurado, el publish espera
+ACOTADO al bot (`waitForBotReview` en
+`headless-runtime/review/botReview.ts`: poll 60s, ≤ 20 polls) para
+comentar el reporte ya reconciliado; si el bot no llega, publica igual
+al vencer la espera. Un review **sin findings** se confirma con un poll
+extra (~60s) y publica enseguida (sección 6: «reviewed … with no
+findings»), sin esperar el deadline de 20 min. Al boot, el dueño del
+pipeline re-agenda los reports con `publication` pendiente y PR abierto
+(`resumePendingReviewPublications`; kill switch
+`TERMCANVAS_FACTORY_NO_PUBLISH_RESUME=1`): un daemon caído antes del
+publish se recupera solo. `TERMCANVAS_REVIEW_WAIT_MS=0` (o
+`TERMCANVAS_REVIEW_BOTS=""`) vuelve al publish inmediato legacy; el
+default espera `BOT_REVIEW_WAIT_MS_DEFAULT = 1200000` (20 min) con techo
+`BOT_REVIEW_WAIT_MS_MAX = 3600000`. `maybePublishReviewReportForJob`
+comenta con `gh pr comment` y solo reporta la URL cuando el marcador
 (`prp-review-id: pr-N` + `reviewed_head: <sha>`) se verifica releyendo
 los comentarios. Idempotente por head SHA: mismo head ya publicado →
 skip. Un publish fallido deja `publication: pending` y nunca voltea el
 handoff del PR.
+
+Cotas del wait y del poll: fila R01 de `docs/LOOPS.md` (Regla 7).
+
+**Reconciliación post-bot (automática)**: gate default off. Lo prende el
+setting persistido `botReconcile` (`GET/POST /factory/settings`, toggle en
+Settings del panel) o el override de entorno `TERMCANVAS_BOT_RECONCILE=1`
+(el env gana si está seteado; `0` fuerza off). El setting se lee por
+llamada, así que cambiarlo aplica sin reiniciar; el env sí exige reiniciar
+el proceso del factory. El publish diferido que termina la espera acotada al
+bot con findings `Open` prepara UNA ronda de revise (cap 1 total por job;
+evento durable `botReconcile` en el timeline) y llama el hook
+`onBotReconcile`:
+
+- `startBotReconcileRun` (`headless-runtime/factory/engineBridge.ts`) reabre
+  el job `Complete → Building` (transición deliberada, exclusiva de esta
+  ronda), borra el `.done`, libera los locks y arranca un run NUEVO de
+  `fix-issue` sobre el mismo worktree; el run queda marcado
+  `engineRun.reconcile: true`.
+- Input `bot_findings` del workflow `fix-issue`: bloque
+  `- f1 (archivo) — mensaje — Suggested fix: ...` con ids `f1..fn` que el
+  implement corrige o dispone en `## Dispositions`.
+- Al completar el run, `maybeOpenPrForCompletedJob` corre con
+  `reconcile: true` y `openPrForJob` reutiliza el PR abierto SIN cortar el
+  commit/push: el trabajo nuevo se commitea (commit units) y se pushea a la
+  rama del PR, jamás se crea otro PR; el reporte del head nuevo se publica
+  idempotente por head SHA.
+- Guardas: con el gate off, sin evento `botReconcile`, con el job fuera de
+  `Complete`/`pr-open`, con un run activo o sin findings mapeables la ronda
+  no arranca; si el run no puede arrancar, el job vuelve a `Complete` con un
+  evento honesto.
+- Observabilidad (P1/P2): `GET /factory/health` expone
+  `botReconcile: {enabled, source: "env"|"setting"|"default"}` del PROCESO
+  VIVO (verificá contra el PID que sirve el puerto, no contra logs de otro
+  daemon). Con findings abiertos y gate off el timeline deja
+  `bot reconcile skipped: N open finding(s) sin ronda (gate off)`; si el
+  starter no arranca, deja `reconciliación post-bot no arrancó: <reason>`.
+- Boot recovery (P3): al arrancar, `resumeMissedBotReconcileRounds` recorre
+  los jobs `Complete`/`pr-open` con reporte publicado y findings `Open`
+  persistidos (`botFindings` estructurados en el evento de la sección de
+  bot) sin ronda arrancada: reconstruye el feedback, prepara el evento
+  `botReconcile` si falta y re-dispara el starter (cap real
+  `botReconcileRun` intacto; kill switch
+  `TERMCANVAS_FACTORY_NO_BOT_RECONCILE_RESUME=1`). Los reportes publicados
+  antes de esta persistencia estructurada no se recuperan automáticamente.
+- Segunda publicación: el head nuevo dispara otra espera acotada al bot y la
+  reconciliación mecánica marca `Taken` los findings cuyo archivo fue
+  tocado; si vuelven a quedar `Open`, no hay otra ronda automática (cap) y
+  el reporte queda `REVIEW INCOMPLETE` para el humano.
 
 Veredicto primero y validación honesta (lección PR #146 y #147):
 
@@ -154,15 +278,22 @@ Veredicto primero y validación honesta (lección PR #146 y #147):
   `review stale` durable y el veredicto queda vencido. Sin polling ni
   timers: el check corre solo a pedido, el re-review también.
 
-## Texto del PR (prp-pr)El body lo genera el orquestador (`buildPrBody` en
+## Texto del PR (prp-pr)
+
+El body lo genera el orquestador (`buildPrBody` en
 `headless-runtime/factory/isolation/isolationStore.ts`, datos de
 `buildPrDetailsFromJob` en `gitHubPr.ts`); el agente nunca lo escribe.
 
-- **Título outcome-first**: `Resolve issue #N — <outcome en lenguaje de
-  comportamiento>` (primera línea del outcome aceptado, ≤120 chars);
-  fallback al título del issue. Malo: `add child run traversal`.
-  Bueno: `workflows can now include a child run`. Sin prefijos
-  Conventional Commit salvo que el repo los exija.
+- **Título engine-owned**: `Resolve issue #N — <issue title>`: el subject
+  espeja SIEMPRE el título del issue (texto humano y estable). El outcome
+  comportamental solo entra como fallback cuando no hay título utilizable,
+  y nunca si parece finding (PR #160) o prosa de compliance ("el fix
+  cumple el issue" — PR #162). Malo: `add child run traversal`. Bueno:
+  `workflows can now include a child run`. Sin prefijos Conventional
+  Commit salvo que el repo los exija.
+- **Outcome sin compliance**: el `Outcome` describe el comportamiento
+  resultante; nunca frases de cumplimiento ("el fix cumple el
+  issue/contrato"), que son proceso y no resultado.
 - **Validación honesta**: solo cuenta la verificación que corrió posta.
   `Nothing material` exige steps reales; un "nada pendiente" sin steps
   queda visible como cobertura no corrida, nunca como verde inventado.

@@ -127,6 +127,27 @@ test("agent.md: el contrato máquina vive en el turno, no en el body", () => {
   const spec = loadAgentDef("spec");
   assert.ok(spec);
   assert.doesNotMatch(spec.body, /"acceptanceCriteria"/, "spec: sin keys en el body");
+  assert.doesNotMatch(spec.body, /"summary"/, "spec: sin keys del plan en el body");
+  assert.doesNotMatch(
+    spec.body,
+    /\{"summary"/,
+    "spec: sin shape JSON propio en el body",
+  );
+  assert.doesNotMatch(
+    spec.body,
+    /```json/,
+    "spec: sin bloques JSON en el body (regresión ed63630d)",
+  );
+  assert.match(
+    spec.body,
+    /formato de cierre lo define el mensaje/i,
+    "spec: el formato de salida lo define el mensaje del nodo",
+  );
+  assert.doesNotMatch(
+    spec.body,
+    /Respondé con una spec breve que incluya/,
+    "spec: sin lista de secciones obligatorias como formato",
+  );
   const implement = loadAgentDef("implement");
   assert.ok(implement);
   assert.doesNotMatch(implement.body, /```json/, "implement: sin bloques JSON en el body");
@@ -187,6 +208,19 @@ test("plan-approve-implement minimal: plan con issue_ref, implement sin pedido c
   assert.match(planCommand, /\$INPUTS\.issue_ref/);
   assert.match(planCommand, /\$INPUTS\.request/);
   assert.match(planCommand, /\$INPUTS\.issue_body/, "plan lleva el cuerpo pegado");
+  assert.match(planCommand, /JSON/i, "plan: contrato JSON en el mensaje");
+  assert.match(planCommand, /summary/, "plan: key summary en el contrato");
+  assert.match(planCommand, /steps/, "plan: key steps en el contrato");
+  assert.match(
+    planCommand,
+    /sin prosa/i,
+    "plan: cierre JSON-only (sin prosa fuera del objeto)",
+  );
+  assert.match(
+    planCommand,
+    /nada fuera del objeto/i,
+    "plan: prohibido agregar markdown alrededor del JSON",
+  );
 
   const implement = byId("implement")?.prompt ?? "";
   assert.equal(implement.includes("$INPUTS.request"), false, "sin repetir el pedido");
