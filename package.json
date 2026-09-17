@@ -9,7 +9,7 @@
     "browse": "./dist-cli/browse.js"
   },
   "scripts": {
-    "dev": "vite",
+    "dev": "node scripts/ensure-electron.mjs && vite",
     "dev:web": "node scripts/dev-web.mjs",
     "dev:web-local": "node scripts/dev-web-local.mjs",
     "build": "tsc && vite build",
