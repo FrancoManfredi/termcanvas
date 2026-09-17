@@ -70,6 +70,26 @@ factory/.job-index.json
 factory/.job-index.json.tmp-*
 factory/.notifications.json
 factory/.automations.json
+factory/.settings.json
+factory/.settings.json.tmp-*
 factory/.integrations-mock.json
 factory/.proposals/
 factory/.benchmark-results/
+
+# Scratch repo and captures left by local factory test runs
+/test-orquestador-work/
+/health.json
+/snapshot.yaml
+/wf-clean.png
+/verify_simple.mjs
+/verify_simple2.mjs
+/playwright-verify.mjs
+/playwright-verify2.mjs
+
+# Scratch modules leaked into the checkout by a factory test job (issues #97/#125)
+/a11y.ts
+/todo.ts
+/todo.test.ts
+/src/a11y.ts
+/src/todo.ts
+/tests/a11y-cancel.test.ts
